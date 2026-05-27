@@ -107,7 +107,16 @@ function WatermarkedImage({ src, photographer, purchased }) {
   };
   const [selectedTag, setSelectedTag] = useState(null);
   const [heroScrollY, setHeroScrollY] = useState(0);
-
+  const [photographerSearch, setPhotographerSearch] = useState("");
+  const [searchMode, setSearchMode] = useState(false);
+  const [handleAvailable, setHandleAvailable] = useState(null);
+  const [photoViewMode, setPhotoViewMode] = useState("grid");
+  const [allSubscriptions, setAllSubscriptions] = useState([]);
+  const [subsLoading, setSubsLoading] = useState(false);
+  const [withdrawals, setWithdrawals] = useState([]);
+  const [withdrawalsLoading, setWithdrawalsLoading] = useState(false);
+  const [adminWithdrawals, setAdminWithdrawals] = useState([]);
+  
   // ── Upload states ──────────────────────────────────────────
   const [uploadForm, setUploadForm] = useState({ location: "", ride_date: "", price: "", tags: "", time_start: "", time_end: "", album_id: "" });
   const [uploadLoading, setUploadLoading] = useState(false);
@@ -138,6 +147,22 @@ const fetchPhotos = async () => {
     console.error(err);
   } finally {
     setLoading(false);
+  }
+};
+
+const fetchAllSubscriptions = async () => {
+  if (!session) return;
+  try {
+    setSubsLoading(true);
+    const res = await fetch("/api/auth/my-subscriptions/all", {
+      headers: { Authorization: `Bearer ${session.access_token}` }
+    });
+    const data = await res.json();
+    setAllSubscriptions(data.subscriptions || []);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    setSubsLoading(false);
   }
 };
 
@@ -239,11 +264,16 @@ const fetchAlbums = async (photographerId) => {
 
 const fetchPhotographerProfile = async (id) => {
   try {
-    const res = await fetch(`/api/auth/photographers/${id}`);
-    const data = await res.json();
-    setSelectedPhotographer(data.photographer);
-    setPhotographerPhotos(data.photos || []);
-    fetchAlbums(id);
+    const [profileRes, albumsRes] = await Promise.all([
+      fetch(`/api/auth/photographers/${id}`),
+      fetch(`/api/auth/albums/${id}`)
+    ]);
+    const profileData = await profileRes.json();
+    const albumsData = await albumsRes.json();
+    
+    setSelectedPhotographer(profileData.photographer);
+    setPhotographerPhotos(profileData.photos || []);
+    setAlbums(albumsData.albums || []);
   } catch (err) {
     console.error(err);
   }
@@ -335,6 +365,34 @@ const handleAvatarUpload = async () => {
     setGlobalLoading({ active: false, message: "" });
   }
 };
+const fetchMyWithdrawals = async () => {
+  if (!session) return;
+  try {
+    setWithdrawalsLoading(true);
+    const res = await fetch("/api/auth/withdrawals/my", {
+      headers: { Authorization: `Bearer ${session.access_token}` }
+    });
+    const data = await res.json();
+    setWithdrawals(data.withdrawals || []);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    setWithdrawalsLoading(false);
+  }
+};
+
+const fetchAdminWithdrawals = async () => {
+  if (!session) return;
+  try {
+    const res = await fetch("/api/auth/withdrawals/admin", {
+      headers: { Authorization: `Bearer ${session.access_token}` }
+    });
+    const data = await res.json();
+    setAdminWithdrawals(data.withdrawals || []);
+  } catch (err) {
+    console.error(err);
+  }
+};
 
   useEffect(() => { fetchPhotos(); }, []);
   useEffect(() => { fetchPhotographers(); }, []);
@@ -370,8 +428,9 @@ useEffect(() => {
   useEffect(() => {
     const isApproved = profile?.verification_status === "approved";
     const needsStats = (view === VIEWS.DASHBOARD || view === VIEWS.VENDOR_REQUEST) && isApproved && session && user;
-    if (needsStats) fetchVendorDashboard();
-  
+    if (needsStats) 
+      fetchVendorDashboard();
+      fetchMyWithdrawals();
     // Perfil propio del fotógrafo — cargar sus fotos y álbumes
     if (view === VIEWS.VENDOR_REQUEST && isApproved && profile?.id) {
       fetchPhotographerProfile(profile.id);
@@ -383,6 +442,13 @@ useEffect(() => {
       fetchPurchases();
     }
   }, [view, profile, session, user]);
+
+  useEffect(() => {
+    if (view !== VIEWS.VENDOR_REQUEST && editMode) {
+      setEditMode(false);
+      showToast("Saliste sin guardar los cambios.");
+    }
+  }, [view]);
 
   // ── Pending purchase after login ───────────────────────────
   useEffect(() => {
@@ -486,7 +552,16 @@ useEffect(() => {
       const { error } = await supabase.auth.signInWithPassword({ email: authForm.email, password: authForm.password });
       if (error) throw error;
       setView(VIEWS.PHOTOGRAPHERS);
-    } catch (err) { setMessage(err.message || "Login fallido."); }
+    } catch (err) {
+      const msg = err.message || "";
+      if (msg.toLowerCase().includes("invalid login credentials")) {
+        showToast("Email o contraseña incorrectos.");
+      } else if (msg.toLowerCase().includes("email")) {
+        showToast("El email ingresado no existe.");
+      } else {
+        showToast("Error al iniciar sesión. Intentá de nuevo.");
+      }
+    }
   };
 
   const handleSignUp = async () => {
@@ -494,6 +569,12 @@ useEffect(() => {
     try {
       const { error } = await supabase.auth.signUp({ email: authForm.email, password: authForm.password });
       if (error) throw error;
+      // Email de bienvenida
+      await fetch("/api/auth/welcome", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authForm.email, name: authForm.email.split("@")[0] })
+      });
       setMessage("Revisá tu email para confirmar tu cuenta.");
     } catch (err) { setMessage(err.message || "Error al registrar."); }
   };
@@ -725,7 +806,70 @@ useEffect(() => {
         ))}
       </div>
     )}
-
+  {/* Retiros pendientes */}
+<div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, letterSpacing: 1, marginBottom: 12 }}>
+  SOLICITUDES DE RETIRO
+</div>
+<button className="nav-btn" style={{ marginBottom: 16, fontSize: 12 }} onClick={fetchAdminWithdrawals}>
+  🔄 Cargar solicitudes
+</button>
+{adminWithdrawals.length === 0 ? (
+  <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 32 }}>No hay solicitudes aún.</div>
+) : (
+  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 32 }}>
+    {adminWithdrawals.map(w => (
+      <div key={w.id} style={{ padding: 14, borderRadius: 12, background: "var(--surface)", border: `1px solid ${w.status === "pending" ? "var(--orange)" : "var(--border)"}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 40, height: 40, borderRadius: "50%", overflow: "hidden", background: "var(--card)" }}>
+              {w.photographer?.avatar_url
+                ? <img src={w.photographer.avatar_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                : <div style={{ display: "grid", placeItems: "center", height: "100%" }}>👤</div>}
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{w.photographer?.name}</div>
+              <div style={{ fontSize: 12, color: "var(--orange)" }}>{w.photographer?.handle}</div>
+            </div>
+          </div>
+          <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 24, color: "var(--success)" }}>
+            Q{Number(w.amount).toFixed(2)}
+          </div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: 11, color: "var(--muted)" }}>
+            {new Date(w.created_at).toLocaleString("es-GT")}
+            {w.processed_at && ` · Pagado: ${new Date(w.processed_at).toLocaleDateString("es-GT")}`}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{
+              fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20,
+              background: w.status === "paid" ? "rgba(61,220,132,0.12)" : w.status === "pending" ? "rgba(255,107,0,0.12)" : "rgba(100,100,100,0.12)",
+              color: w.status === "paid" ? "var(--success)" : w.status === "pending" ? "var(--orange)" : "var(--muted)",
+            }}>
+              {w.status === "paid" ? "✓ Pagado" : w.status === "pending" ? "⏳ Pendiente" : "Cancelado"}
+            </span>
+            {w.status === "pending" && (
+              <motion.button
+                whileTap={{ scale: 0.95 }}
+                onClick={async () => {
+                  if (!confirm(`¿Marcar como pagado Q${Number(w.amount).toFixed(2)} a ${w.photographer?.name}?`)) return;
+                  const res = await fetch(`/api/auth/withdrawals/${w.id}/pay`, {
+                    method: "PUT",
+                    headers: { Authorization: `Bearer ${session?.access_token}` }
+                  });
+                  if (res.ok) { showToast("✓ Marcado como pagado."); fetchAdminWithdrawals(); }
+                }}
+                style={{ background: "rgba(61,220,132,0.1)", border: "1px solid var(--success)", color: "var(--success)", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              >
+                ✓ Marcar pagado
+              </motion.button>
+            )}
+          </div>
+        </div>
+      </div>
+    ))}
+  </div>
+)}
     {/* Fotógrafos — destacar */}
     <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, letterSpacing: 1, marginBottom: 12 }}>FOTÓGRAFOS DESTACADOS</div>
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -851,7 +995,15 @@ const renderPhotographers = () => (
         <div style={{ display: "flex", gap: 12, overflowX: "auto", scrollbarWidth: "none", paddingBottom: 8 }}>
           {mySubscriptions.map(sub => (
             <div key={sub.id}
-              onClick={() => { fetchPhotographerProfile(sub.photographer.id); setView(VIEWS.PHOTOGRAPHER_PROFILE); }}
+            onClick={() => {
+              if (user && sub.photographer.user_id === user.id) {
+                setView(VIEWS.VENDOR_REQUEST);
+                setActiveTab("profile");
+              } else {
+                fetchPhotographerProfile(sub.photographer.id);
+                setView(VIEWS.PHOTOGRAPHER_PROFILE);
+              }
+            }}
               style={{ flexShrink: 0, width: 120, cursor: "pointer", textAlign: "center" }}>
               <div style={{ width: 72, height: 72, borderRadius: "50%", overflow: "hidden", border: "3px solid var(--orange)", background: "var(--card)", margin: "0 auto 8px" }}>
                 {sub.photographer.avatar_url
@@ -877,7 +1029,15 @@ const renderPhotographers = () => (
     <div style={{ display: "flex", gap: 12, overflowX: "auto", scrollbarWidth: "none", paddingBottom: 8 }}>
       {photographers.filter(p => p.featured).map(ph => (
         <div key={ph.id}
-          onClick={() => { fetchPhotographerProfile(ph.id); setView(VIEWS.PHOTOGRAPHER_PROFILE); }}
+        onClick={() => {
+          if (user && ph.user_id === user.id) {
+            setView(VIEWS.VENDOR_REQUEST);
+            setActiveTab("profile");
+          } else {
+            fetchPhotographerProfile(ph.id);
+            setView(VIEWS.PHOTOGRAPHER_PROFILE);
+          }
+        }}
           style={{ flexShrink: 0, width: 160, borderRadius: 12, overflow: "hidden", background: "var(--surface)", border: "1px solid var(--orange)", cursor: "pointer" }}>
           <div style={{ height: 80, background: ph.banner_url ? "none" : "linear-gradient(135deg, #1a1a1a, #2a2a2a)", overflow: "hidden", position: "relative" }}>
             {ph.banner_url
@@ -912,7 +1072,90 @@ const renderPhotographers = () => (
         FOTÓGRAFOS VERIFICADOS
       </div>
       <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 16 }}>Seleccioná un fotógrafo para ver su galería</div>
+      
+  {/* Barra de búsqueda */}
+<div style={{ position: "relative", marginBottom: 16, display: "flex", gap: 8 }}>
+  <div style={{ position: "relative", flex: 1 }}>
+    <input
+      className="search-input"
+      placeholder="Buscar fotógrafo"
+      value={photographerSearch}
+      onChange={e => { 
+        setPhotographerSearch(e.target.value); 
+        if (!e.target.value) setSearchMode(false);
+      }}
+      onKeyDown={e => { if (e.key === "Enter" && photographerSearch.trim()) setSearchMode(true); }}
+    />
+    {photographerSearch && (
+      <button
+      onClick={() => { setPhotographerSearch(""); setSearchMode(false); }}
+        style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 18 }}
+      >
+        ×
+      </button>
+    )}
+  </div>
+  <button
+    className="nav-btn primary"
+    style={{ flexShrink: 0, padding: "0 20px" }}
+    onClick={() => {}}
+  >
+    Buscar
+  </button>
+</div>
+    {/* Resultados de búsqueda */}
+{searchMode && (
+  <div style={{ marginBottom: 24 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+      <div style={{ fontSize: 13, color: "var(--muted)" }}>
+        Resultados para <strong style={{ color: "var(--text)" }}>"{photographerSearch}"</strong>
+      </div>
+      <button onClick={() => { setSearchMode(false); setPhotographerSearch(""); }}
+        style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 13 }}>
+        ✕ Limpiar
+      </button>
+    </div>
 
+    {photographers.filter(ph => {
+      const term = photographerSearch.toLowerCase();
+      return (ph.name || "").toLowerCase().includes(term) || (ph.handle || "").toLowerCase().includes(term);
+    }).length === 0 ? (
+      <div className="empty">
+        <div className="empty-icon">🔍</div>
+        <div>No se encontró ningún fotógrafo con ese nombre.</div>
+      </div>
+    ) : (
+      photographers.filter(ph => {
+        const term = photographerSearch.toLowerCase();
+        return (ph.name || "").toLowerCase().includes(term) || (ph.handle || "").toLowerCase().includes(term);
+      }).map(ph => (
+        <div key={ph.id}
+        onClick={() => {
+          if (user && ph.user_id === user.id) {
+            setView(VIEWS.VENDOR_REQUEST);
+            setActiveTab("profile");
+          } else {
+            fetchPhotographerProfile(ph.id);
+            setView(VIEWS.PHOTOGRAPHER_PROFILE);
+          }
+        }}
+          style={{ display: "flex", alignItems: "center", gap: 12, padding: 14, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", marginBottom: 10, cursor: "pointer" }}>
+          <div style={{ width: 52, height: 52, borderRadius: "50%", overflow: "hidden", border: "2px solid var(--orange)", background: "var(--card)", flexShrink: 0 }}>
+            {ph.avatar_url
+              ? <img src={ph.avatar_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center", fontSize: 20 }}>👤</div>}
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>{ph.name}</div>
+            <div style={{ color: "var(--orange)", fontSize: 13 }}>{ph.handle}</div>
+            {ph.bio && <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 2 }}>{ph.bio}</div>}
+          </div>
+          <div style={{ color: "var(--muted)", fontSize: 20 }}>→</div>
+        </div>
+      ))
+    )}
+  </div>
+)}
       {photographersLoading ? (
   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
     {[1,2,3,4,5,6].map(i => (
@@ -945,7 +1188,16 @@ const renderPhotographers = () => (
   initial="hidden"
   animate="show"
 >
-  {photographers.map(ph => (
+{photographers
+  .filter(ph => {
+    if (!photographerSearch) return true;
+    const term = photographerSearch.toLowerCase();
+    return (
+      (ph.name || "").toLowerCase().includes(term) ||
+      (ph.handle || "").toLowerCase().includes(term)
+    );
+  })
+  .map(ph => (
     <motion.div
       key={ph.id}
       variants={{
@@ -954,7 +1206,15 @@ const renderPhotographers = () => (
       }}
       whileHover={{ y: -4, borderColor: "var(--orange)" }}
       whileTap={{ scale: 0.98 }}
-      onClick={() => { fetchPhotographerProfile(ph.id); setView(VIEWS.PHOTOGRAPHER_PROFILE); }}
+      onClick={() => {
+        if (user && ph.user_id === user.id) {
+          setView(VIEWS.VENDOR_REQUEST);
+          setActiveTab("profile");
+        } else {
+          fetchPhotographerProfile(ph.id);
+          setView(VIEWS.PHOTOGRAPHER_PROFILE);
+        }
+      }}
       style={{ borderRadius: 14, overflow: "hidden", background: "var(--surface)", border: `1px solid ${ph.featured ? "var(--orange)" : "var(--border)"}`, cursor: "pointer" }}
     >
       <div style={{ width: "100%", height: 110, background: ph.banner_url ? "none" : "linear-gradient(135deg, #1a1a1a, #2a2a2a)", overflow: "hidden", position: "relative" }}>
@@ -1012,20 +1272,20 @@ const renderPhotographerProfile = () => (
             : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center", fontSize: 28 }}>👤</div>
           }
         </div>
-        {selectedPhotographer?.subscription_price && (
-        <motion.button
-        className="nav-btn primary"
-        whileHover={{ scale: 1.04 }}
-        whileTap={{ scale: 0.95 }}
-        onClick={() => {
-          if (!user) { setView(VIEWS.AUTH); return; }
-          setShowSubscribeModal(true);
-        }}
-      >
-        Suscribirse · Q{selectedPhotographer.subscription_price}/mes
-      </motion.button>
+{selectedPhotographer?.subscription_price && user?.id !== selectedPhotographer?.user_id && (
+  <motion.button
+    className="nav-btn primary"
+    whileHover={{ scale: 1.04 }}
+    whileTap={{ scale: 0.95 }}
+    onClick={() => {
+      if (!user) { setView(VIEWS.AUTH); return; }
+      setShowSubscribeModal(true);
+    }}
+  >
+    Suscribirse · Q{selectedPhotographer.subscription_price}/mes
+  </motion.button>
 )}
-      </div>
+</div>
 
       <motion.div
   initial={{ opacity: 0, y: 20 }}
@@ -1084,7 +1344,10 @@ const renderPhotographerProfile = () => (
     {albums.map(album => {
   const albumPhotos = photographerPhotos.filter(p => p.album_id === album.id);
   const isSelected = selectedAlbum?.id === album.id;
-  const coverUrl = album.cover_url?.split("?")[0] || albumPhotos[0]?.watermark_url;
+  const coverUrl = album.cover_url 
+  ? album.cover_url.trim().split("?")[0] + `?t=${album.id}` 
+  : albumPhotos[0]?.watermark_url;
+
 
   return (
     <motion.div
@@ -1099,33 +1362,33 @@ const renderPhotographerProfile = () => (
       style={{ borderRadius: 12, overflow: "hidden", background: "var(--surface)", border: `1px solid ${isSelected ? "var(--orange)" : "var(--border)"}`, cursor: "pointer" }}
     >
       {/* Collage */}
-      <div style={{ height: 160, display: "grid", gap: 2, gridTemplateColumns: albumPhotos.length >= 3 ? "2fr 1fr" : "1fr", gridTemplateRows: albumPhotos.length >= 3 ? "1fr 1fr" : "1fr", background: "var(--card)" }}>
-        {albumPhotos.length === 0 ? (
-          coverUrl
-            ? <img src={coverUrl} style={{ width: "100%", height: "100%", objectFit: "cover", gridColumn: "1 / -1", gridRow: "1 / -1" }} />
-            : <div style={{ display: "grid", placeItems: "center", color: "var(--muted)", fontSize: 13, gridColumn: "1 / -1", gridRow: "1 / -1" }}>📷 Sin fotos</div>
-        ) : albumPhotos.length === 1 ? (
-          <img src={coverUrl || albumPhotos[0].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-        ) : albumPhotos.length === 2 ? (
-          <>
-            <img src={coverUrl || albumPhotos[0].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            <img src={albumPhotos[1].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-          </>
-        ) : (
-          <>
-            <img src={albumPhotos[0].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover", gridRow: "1 / 3" }} />
-            <img src={albumPhotos[1].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            <div style={{ position: "relative", overflow: "hidden" }}>
-              <img src={albumPhotos[2].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              {albumPhotos.length > 3 && (
-                <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center", color: "#fff", fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1 }}>
-                  +{albumPhotos.length - 3}
-                </div>
-              )}
-            </div>
-          </>
+<div style={{ height: 160, display: "grid", gap: 2, gridTemplateColumns: (!coverUrl && albumPhotos.length >= 3) ? "2fr 1fr" : "1fr", gridTemplateRows: (!coverUrl && albumPhotos.length >= 3) ? "1fr 1fr" : "1fr", background: "var(--card)" }}>
+  {coverUrl ? (
+    <img src={coverUrl} style={{ width: "100%", height: "100%", objectFit: "cover", gridColumn: "1 / -1", gridRow: "1 / -1" }} />
+  ) : albumPhotos.length === 0 ? (
+    <div style={{ display: "grid", placeItems: "center", color: "var(--muted)", fontSize: 13, gridColumn: "1 / -1" }}>📷 Sin fotos</div>
+  ) : albumPhotos.length === 1 ? (
+    <img src={albumPhotos[0].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+  ) : albumPhotos.length === 2 ? (
+    <>
+      <img src={albumPhotos[0].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      <img src={albumPhotos[1].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+    </>
+  ) : (
+    <>
+      <img src={albumPhotos[0].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover", gridRow: "1 / 3" }} />
+      <img src={albumPhotos[1].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      <div style={{ position: "relative", overflow: "hidden" }}>
+        <img src={albumPhotos[2].watermark_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        {albumPhotos.length > 3 && (
+          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center", color: "#fff", fontFamily: "'Bebas Neue', sans-serif", fontSize: 20 }}>
+            +{albumPhotos.length - 3}
+          </div>
         )}
       </div>
+    </>
+  )}
+</div>
 
       {/* Info */}
       <div style={{ padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1190,54 +1453,117 @@ const renderPhotographerProfile = () => (
 
   return (
     <>
-      <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1, marginBottom: 12 }}>
-        {selectedAlbum
-          ? `${selectedAlbum.name.toUpperCase()}${selectedTag ? ` · ${selectedTag}` : ""}`
-          : "TODAS LAS FOTOS"} · {displayPhotos.length}
-      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+  <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
+    {selectedAlbum
+      ? `${selectedAlbum.name.toUpperCase()}${selectedTag ? ` · ${selectedTag}` : ""}`
+      : "TODAS LAS FOTOS"} · {displayPhotos.length}
+  </div>
+  <div style={{ display: "flex", gap: 4 }}>
+    {[
+      { mode: "grid", icon: "⊞" },
+      { mode: "feed", icon: "☰" },
+    ].map(({ mode, icon }) => (
+      <button
+        key={mode}
+        onClick={() => setPhotoViewMode(mode)}
+        style={{
+          background: photoViewMode === mode ? "var(--orange)" : "var(--surface)",
+          border: `1px solid ${photoViewMode === mode ? "var(--orange)" : "var(--border)"}`,
+          color: photoViewMode === mode ? "#fff" : "var(--muted)",
+          borderRadius: 8, padding: "6px 10px", cursor: "pointer",
+          fontSize: 16, transition: "all 0.2s",
+        }}
+      >
+        {icon}
+      </button>
+    ))}
+  </div>
+</div>
 
-      <motion.div
-  className="grid"
-  variants={{ hidden: {}, show: { transition: { staggerChildren: 0.05 } } }}
-  initial="hidden"
-  animate="show"
->
-  {displayPhotos.map(photo => (
+<AnimatePresence mode="wait">
+  {photoViewMode === "grid" ? (
     <motion.div
-      key={photo.id}
-      className="card"
-      variants={{
-        hidden: { opacity: 0, scale: 0.95 },
-        show: { opacity: 1, scale: 1, transition: { duration: 0.3, ease: "easeOut" } }
-      }}
-      whileHover={{ scale: 1.02, zIndex: 2 }}
-      whileTap={{ scale: 0.98 }}
-      onClick={() => { setSelected(photo); setView(VIEWS.DETAIL); }}
+      key="grid"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.2 }}
+      style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 2 }}
     >
-      <div className="card-photo-badge">{selectedPhotographer?.name}</div>
-      {photo.time_start && photo.time_end && (
-        <div style={{ position: "absolute", bottom: 50, left: 10, zIndex: 5, background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 10, padding: "2px 6px", borderRadius: 4 }}>
-          {photo.time_start} - {photo.time_end}
-        </div>
-      )}
-      <WatermarkedImage src={photo.watermark_url} photographer={selectedPhotographer?.name || ""} purchased={purchased.includes(photo.id)} />
-      <div className="card-overlay">
-        <div className="card-photographer">{selectedPhotographer?.name}</div>
-        <div className="card-location">📍 {photo.location}</div>
-        <div className="card-footer">
-          <div className="card-price">Q{photo.price}</div>
-          <motion.button
-  className="card-buy"
-  whileTap={{ scale: 0.9 }}
-  onClick={e => { e.stopPropagation(); handleBuy(photo); }}
->
-  Comprar
-</motion.button>
-        </div>
-      </div>
+      {displayPhotos.map(photo => (
+        <motion.div
+          key={photo.id}
+          whileTap={{ scale: 0.97 }}
+          onClick={() => { setSelected(photo); setView(VIEWS.DETAIL); }}
+          style={{ aspectRatio: "1", overflow: "hidden", cursor: "pointer", position: "relative", background: "var(--card)" }}
+        >
+          <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        </motion.div>
+      ))}
     </motion.div>
-  ))}
-</motion.div>
+  ) : (
+    <motion.div
+      key="feed"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.2 }}
+      style={{ display: "flex", flexDirection: "column", gap: 16 }}
+    >
+      {displayPhotos.map(photo => (
+        <motion.div
+          key={photo.id}
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          whileTap={{ scale: 0.99 }}
+          style={{ borderRadius: 14, overflow: "hidden", background: "var(--surface)", border: "1px solid var(--border)" }}
+        >
+          <div
+            style={{ width: "100%", aspectRatio: "4/3", overflow: "hidden", cursor: "pointer" }}
+            onClick={() => { setSelected(photo); setView(VIEWS.DETAIL); }}
+          >
+            <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          </div>
+          <div style={{ padding: "12px 14px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--orange)" }}>
+                  📍 {photo.location}
+                </div>
+                {photo.ride_date && (
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+                    📅 {photo.ride_date}
+                    {photo.time_start ? ` · ${photo.time_start}${photo.time_end ? `–${photo.time_end}` : ""}` : ""}
+                  </div>
+                )}
+                {photo.tags?.length > 0 && (
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
+                    {photo.tags.map(t => (
+                      <span key={t} style={{ background: "var(--card)", border: "1px solid var(--border)", color: "var(--muted)", fontSize: 11, padding: "2px 8px", borderRadius: 20 }}>{t}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div style={{ textAlign: "right", flexShrink: 0, marginLeft: 12 }}>
+                <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 28, color: "var(--text)" }}>
+                  Q{photo.price}
+                </div>
+                <motion.button
+                  className="card-buy"
+                  whileTap={{ scale: 0.92 }}
+                  onClick={() => handleBuy(photo)}
+                >
+                  Comprar
+                </motion.button>
+              </div>
+            </div>
+          </div>
+        </motion.div>
+      ))}
+    </motion.div>
+  )}
+</AnimatePresence>
     </>
   );
 })()}
@@ -1341,22 +1667,102 @@ const renderPhotographerProfile = () => (
             </div>
   
             {/* Ventas por día */}
-            <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1, marginBottom: 12 }}>VENTAS POR DÍA</div>
-            {vendorStats.stats.daily_sales.length === 0 ? (
-              <div className="empty"><div className="empty-icon">🧾</div><div>Todavía no tenés ventas registradas.</div></div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {vendorStats.stats.daily_sales.map(d => (
-                  <div key={d.date} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: 12, borderRadius: 10, background: "var(--surface)", border: "1px solid var(--border)", fontSize: 13 }}>
-                    <div>
-                      <div style={{ fontWeight: 600 }}>{d.date}</div>
-                      <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 2 }}>{d.sales} venta(s)</div>
-                    </div>
-                    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, color: "var(--success)" }}>Q{d.amount}</div>
-                  </div>
-                ))}
+<div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1, marginBottom: 12 }}>VENTAS POR DÍA</div>
+{vendorStats.stats.daily_sales.length === 0 ? (
+  <div className="empty"><div className="empty-icon">🧾</div><div>Todavía no tenés ventas registradas.</div></div>
+) : (
+  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    {vendorStats.stats.daily_sales.map(d => (
+      <div key={d.date} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: 12, borderRadius: 10, background: "var(--surface)", border: "1px solid var(--border)", fontSize: 13 }}>
+        <div>
+          <div style={{ fontWeight: 600 }}>{d.date}</div>
+          <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 2 }}>{d.sales} venta(s)</div>
+        </div>
+        <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, color: "var(--success)" }}>Q{d.amount}</div>
+      </div>
+    ))}
+  </div>
+)}
+
+{/* Retiros */}
+<div style={{ marginTop: 28 }}>
+  <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1, marginBottom: 12 }}>RETIROS</div>
+  {(() => {
+    const totalEarned = vendorStats?.stats?.total_amount || 0;
+    const totalWithdrawn = withdrawals.filter(w => ["pending","paid"].includes(w.status)).reduce((sum, w) => sum + Number(w.amount || 0), 0);
+    const available = totalEarned - totalWithdrawn;
+    const hasPending = withdrawals.some(w => w.status === "pending");
+    return (
+      <>
+        <div style={{ padding: 16, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 12, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Balance disponible</div>
+            <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 36, color: available >= 50 ? "var(--success)" : "var(--muted)", lineHeight: 1, marginTop: 4 }}>
+              Q{available.toFixed(2)}
+            </div>
+            {available < 50 && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Mínimo Q50 para retirar</div>}
+          </div>
+          {hasPending ? (
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 12, color: "var(--orange)", fontWeight: 700, marginBottom: 8 }}>⏳ Retiro pendiente</div>
+              <motion.button
+                whileTap={{ scale: 0.95 }}
+                onClick={async () => {
+                  const pending = withdrawals.find(w => w.status === "pending");
+                  if (!pending || !confirm("¿Cancelar la solicitud de retiro?")) return;
+                  const res = await fetch(`/api/auth/withdrawals/${pending.id}/cancel`, {
+                    method: "PUT",
+                    headers: { Authorization: `Bearer ${session?.access_token}` }
+                  });
+                  if (res.ok) { showToast("Retiro cancelado."); fetchMyWithdrawals(); }
+                }}
+                style={{ background: "rgba(255,68,68,0.1)", border: "1px solid rgba(255,68,68,0.4)", color: "#ff4444", borderRadius: 8, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              >
+                Cancelar retiro
+              </motion.button>
+            </div>
+          ) : (
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              disabled={available < 50}
+              onClick={async () => {
+                if (!confirm(`¿Solicitar retiro de Q${available.toFixed(2)}?`)) return;
+                const res = await fetch("/api/auth/withdrawals", {
+                  method: "POST",
+                  headers: { Authorization: `Bearer ${session?.access_token}` }
+                });
+                const data = await res.json();
+                if (res.ok) { showToast("✓ Retiro solicitado. Procesaremos tu pago pronto."); fetchMyWithdrawals(); }
+                else showToast(data.error);
+              }}
+              style={{ background: available >= 50 ? "var(--orange)" : "var(--surface)", border: `1px solid ${available >= 50 ? "var(--orange)" : "var(--border)"}`, color: available >= 50 ? "#fff" : "var(--muted)", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: available >= 50 ? "pointer" : "not-allowed", fontFamily: "'DM Sans', sans-serif" }}
+            >
+              💸 Solicitar retiro
+            </motion.button>
+          )}
+        </div>
+        {withdrawals.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontSize: 12, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>Historial</div>
+            {withdrawals.map(w => (
+              <div key={w.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: 12, borderRadius: 10, background: "var(--surface)", border: "1px solid var(--border)", fontSize: 13 }}>
+                <div>
+                  <div style={{ fontWeight: 600 }}>Q{Number(w.amount).toFixed(2)}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{new Date(w.created_at).toLocaleDateString("es-GT")}</div>
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: w.status === "paid" ? "rgba(61,220,132,0.12)" : w.status === "pending" ? "rgba(255,107,0,0.12)" : "rgba(100,100,100,0.12)", color: w.status === "paid" ? "var(--success)" : w.status === "pending" ? "var(--orange)" : "var(--muted)", border: `1px solid ${w.status === "paid" ? "var(--success)" : w.status === "pending" ? "var(--orange)" : "var(--border)"}` }}>
+                  {w.status === "paid" ? "✓ Pagado" : w.status === "pending" ? "⏳ Pendiente" : "Cancelado"}
+                </div>
               </div>
-            )}
+            ))}
+          </div>
+        )}
+      </>
+    );
+  })()}
+</div>
+
           </>
         )}
       </div>
@@ -1490,77 +1896,127 @@ const renderPhotographerProfile = () => (
           )}
   
           {/* Grid */}
-          {displayPhotos.length === 0 ? (
-            <div className="empty">
-              <div className="empty-icon">📷</div>
-              <div>{myPhotos.length === 0 ? "Todavía no subiste fotos." : "No hay fotos en este álbum."}</div>
-              {myPhotos.length === 0 && (
-                <button className="nav-btn primary" style={{ marginTop: 16 }}
-                  onClick={() => { setActiveTab("upload"); setView(VIEWS.UPLOAD); }}>
-                  Subir primera foto
-                </button>
+{displayPhotos.length === 0 ? (
+  <div className="empty">
+    <div className="empty-icon">📷</div>
+    <div>{myPhotos.length === 0 ? "Todavía no subiste fotos." : "No hay fotos en este álbum."}</div>
+    {myPhotos.length === 0 && (
+      <button className="nav-btn primary" style={{ marginTop: 16 }}
+        onClick={() => { setActiveTab("upload"); setView(VIEWS.UPLOAD); }}>
+        Subir primera foto
+      </button>
+    )}
+  </div>
+) : (
+  <>
+    {/* Toggle de vista */}
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 20px", marginTop: 16, marginBottom: 8 }}>
+      <div style={{ fontSize: 13, color: "var(--muted)" }}>{displayPhotos.length} foto(s)</div>
+      <div style={{ display: "flex", gap: 4 }}>
+        {[{ mode: "grid", icon: "⊞" }, { mode: "feed", icon: "☰" }].map(({ mode, icon }) => (
+          <button
+            key={mode}
+            onClick={() => setPhotoViewMode(mode)}
+            style={{
+              background: photoViewMode === mode ? "var(--orange)" : "var(--surface)",
+              border: `1px solid ${photoViewMode === mode ? "var(--orange)" : "var(--border)"}`,
+              color: photoViewMode === mode ? "#fff" : "var(--muted)",
+              borderRadius: 8, padding: "6px 10px", cursor: "pointer",
+              fontSize: 16, transition: "all 0.2s",
+            }}
+          >{icon}</button>
+        ))}
+      </div>
+    </div>
+
+    {photoViewMode === "grid" ? (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 2 }}>
+        {displayPhotos.map(photo => {
+          const isSelected = selectedPhotos.has(photo.id);
+          const albumName = photo.album_id ? albums.find(a => a.id === photo.album_id)?.name : null;
+          return (
+            <div
+              key={photo.id}
+              onClick={() => selectMode ? toggleSelect(photo.id) : null}
+              style={{ aspectRatio: "1", overflow: "hidden", position: "relative", background: "var(--card)", outline: isSelected ? "3px solid var(--orange)" : "none", outlineOffset: -3, cursor: selectMode ? "pointer" : "default" }}
+            >
+              {selectMode && (
+                <div style={{ position: "absolute", top: 6, left: 6, zIndex: 10, width: 20, height: 20, borderRadius: 5, border: `2px solid ${isSelected ? "var(--orange)" : "rgba(255,255,255,0.7)"}`, background: isSelected ? "var(--orange)" : "rgba(0,0,0,0.5)", display: "grid", placeItems: "center", fontSize: 12, color: "#fff", transition: "all 0.15s" }}>
+                  {isSelected ? "✓" : ""}
+                </div>
               )}
+              {!selectMode && (
+                <button
+                  style={{ position: "absolute", top: 6, right: 6, zIndex: 6, background: "rgba(220,50,50,0.85)", border: "none", color: "#fff", borderRadius: 6, padding: "3px 7px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}
+                  onClick={async e => {
+                    e.stopPropagation();
+                    if (!confirm("¿Eliminar esta foto?")) return;
+                    const res = await fetch(`/api/photos/${photo.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${session?.access_token}` } });
+                    if (res.ok) fetchPhotos();
+                  }}
+                >🗑️</button>
+              )}
+              <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             </div>
-          ) : (
-            <div className="grid" style={{ marginTop: 16 }}>
-              {displayPhotos.map(photo => {
-                const isSelected = selectedPhotos.has(photo.id);
-                const albumName = photo.album_id ? albums.find(a => a.id === photo.album_id)?.name : null;
-                return (
-                  <div
-                    key={photo.id}
-                    className="card"
-                    onClick={() => selectMode ? toggleSelect(photo.id) : null}
-                    style={{ outline: isSelected ? "3px solid var(--orange)" : "none", outlineOffset: -3 }}
-                  >
-                    {/* Checkbox en modo selección */}
-                    {selectMode && (
-                      <div style={{ position: "absolute", top: 10, left: 10, zIndex: 10, width: 24, height: 24, borderRadius: 6, border: `2px solid ${isSelected ? "var(--orange)" : "rgba(255,255,255,0.7)"}`, background: isSelected ? "var(--orange)" : "rgba(0,0,0,0.5)", display: "grid", placeItems: "center", fontSize: 14, color: "#fff", transition: "all 0.15s" }}>
-                        {isSelected ? "✓" : ""}
-                      </div>
-                    )}
-  
-                    {albumName && !selectMode && (
-                      <div className="card-photo-badge">{albumName}</div>
-                    )}
-  
-                    {!selectMode && (
-                      <button
-                        style={{ position: "absolute", top: 10, right: 10, zIndex: 6, background: "rgba(220,50,50,0.85)", border: "none", color: "#fff", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                        onClick={async e => {
-                          e.stopPropagation();
-                          if (!confirm("¿Eliminar esta foto?")) return;
-                          const res = await fetch(`/api/photos/${photo.id}`, {
-                            method: "DELETE",
-                            headers: { Authorization: `Bearer ${session?.access_token}` },
-                          });
-                          if (res.ok) fetchPhotos();
-                        }}
-                      >
-                        🗑️
-                      </button>
-                    )}
-  
-                    <WatermarkedImage src={photo.watermark_url} photographer={profile?.name || "MOTOSHOT"} purchased={true} />
-                    <div className="card-overlay">
-                      <div className="card-photographer">📍 {photo.location}</div>
-                      <div className="card-location">
-                        {photo.ride_date || ""}
-                        {photo.time_start ? ` · ${photo.time_start}${photo.time_end ? `–${photo.time_end}` : ""}` : ""}
-                      </div>
-                      <div className="card-footer">
-                        <div className="card-price">Q{photo.price}</div>
-                        <div style={{ fontSize: 10, background: "var(--success)", color: "#000", padding: "3px 8px", borderRadius: 6, fontWeight: 700 }}>✓ Publicada</div>
-                      </div>
+          );
+        })}
+      </div>
+    ) : (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: "0 20px" }}>
+        {displayPhotos.map(photo => {
+          const isSelected = selectedPhotos.has(photo.id);
+          const albumName = photo.album_id ? albums.find(a => a.id === photo.album_id)?.name : null;
+          return (
+            <div
+              key={photo.id}
+              style={{ borderRadius: 14, overflow: "hidden", background: "var(--surface)", border: `1px solid ${isSelected ? "var(--orange)" : "var(--border)"}`, cursor: selectMode ? "pointer" : "default" }}
+              onClick={() => selectMode ? toggleSelect(photo.id) : null}
+            >
+              <div style={{ width: "100%", aspectRatio: "4/3", overflow: "hidden", position: "relative" }}>
+                {selectMode && (
+                  <div style={{ position: "absolute", top: 10, left: 10, zIndex: 10, width: 24, height: 24, borderRadius: 6, border: `2px solid ${isSelected ? "var(--orange)" : "rgba(255,255,255,0.7)"}`, background: isSelected ? "var(--orange)" : "rgba(0,0,0,0.5)", display: "grid", placeItems: "center", fontSize: 14, color: "#fff" }}>
+                    {isSelected ? "✓" : ""}
+                  </div>
+                )}
+                {!selectMode && (
+                  <button
+                    style={{ position: "absolute", top: 10, right: 10, zIndex: 6, background: "rgba(220,50,50,0.85)", border: "none", color: "#fff", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                    onClick={async e => {
+                      e.stopPropagation();
+                      if (!confirm("¿Eliminar esta foto?")) return;
+                      const res = await fetch(`/api/photos/${photo.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${session?.access_token}` } });
+                      if (res.ok) fetchPhotos();
+                    }}
+                  >🗑️</button>
+                )}
+                <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              </div>
+              <div style={{ padding: "10px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    {albumName && <div style={{ fontSize: 11, color: "var(--orange)", marginBottom: 2 }}>🗂️ {albumName}</div>}
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>📍 {photo.location}</div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+                      {photo.ride_date || ""}
+                      {photo.time_start ? ` · ${photo.time_start}${photo.time_end ? `–${photo.time_end}` : ""}` : ""}
                     </div>
                   </div>
-                );
-              })}
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 26, color: "var(--text)" }}>Q{photo.price}</div>
+                    <div style={{ fontSize: 10, background: "var(--success)", color: "#000", padding: "3px 8px", borderRadius: 6, fontWeight: 700 }}>✓ Publicada</div>
+                  </div>
+                </div>
+              </div>
             </div>
-          )}
-        </div>
-      );
-    }
+          );
+        })}
+      </div>
+    )}
+  </>
+)}
+      </div>
+    );
+  }
   
     // ── COMPRADOR ──────────────────────────────────────────────────
     return (
@@ -1859,35 +2315,79 @@ const renderVendorRequest = () => {
         {/* Info */}
         <div style={{ padding: "0 20px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginTop: -36, marginBottom: 16, position: "relative", zIndex: 2 }}>
-        <div style={{ width: 72, height: 72, borderRadius: "50%", overflow: "hidden", border: "3px solid var(--orange)", background: "var(--card)", flexShrink: 0 }}>
-              {(ph?.avatar_url || profile.avatar_url)
-                ? <img src={ph?.avatar_url || profile.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center", fontSize: 24 }}>👤</div>}
-            </div>
-            <button className="nav-btn" onClick={() => {
-              setEditMode(!editMode);
-              setEditForm({
-                name: profile.name || "",
-                bio: profile.bio || "",
-                handle: profile.handle || "",
-                phone: profile.phone || "",
-                instagram: profile.instagram || "",
-                tiktok: profile.tiktok || "",
-                facebook: profile.facebook || "",
-                telegram: profile.telegram || "",
-                whatsapp: profile.whatsapp || "",
-              });
-            }}>
-              {editMode ? "Cancelar" : "✏️ Editar"}
-            </button>
-          </div>
-
-          <div style={{ fontWeight: 700, fontSize: 20, marginBottom: 2, textAlign: "center" }}>{profile.name}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, justifyContent: "center" }}>
-  <div style={{ color: "var(--orange)", fontSize: 13 }}>{profile.handle}</div>
-  <span style={{ display: "inline-flex", width: 16, height: 16, borderRadius: "50%", background: "#0095f6", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 11, flexShrink: 0 }}>✓</span>
+  <div style={{ width: 72, height: 72, borderRadius: "50%", overflow: "hidden", border: "3px solid var(--orange)", background: "var(--card)", flexShrink: 0 }}>
+    {(ph?.avatar_url || profile.avatar_url)
+      ? <img src={ph?.avatar_url || profile.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center", fontSize: 24 }}>👤</div>}
+  </div>
+  <div style={{ display: "flex", gap: 8, flexDirection: "column", alignItems: "flex-end" }}>
+  {profile?.subscription_price && (
+    <motion.button
+      whileHover={{ scale: 1.05 }}
+      whileTap={{ scale: 0.95 }}
+      onClick={() => {
+        setEditMode(true);
+        setTimeout(() => {
+          document.getElementById("subscription-section")?.scrollIntoView({ behavior: "smooth" });
+        }, 100);
+      }}
+      style={{
+        background: "linear-gradient(135deg, rgba(255,107,0,0.15), rgba(255,107,0,0.05))",
+        border: "1px solid var(--orange)",
+        color: "var(--orange)",
+        padding: "8px 16px",
+        borderRadius: 10,
+        fontSize: 13,
+        fontWeight: 700,
+        cursor: "pointer",
+        fontFamily: "'DM Sans', sans-serif",
+      }}
+    >
+      💳 Manejar Suscripciónes
+    </motion.button>
+  )}
+  <motion.button
+    whileHover={{ scale: 1.05 }}
+    whileTap={{ scale: 0.95 }}
+    onClick={() => {
+      setEditMode(!editMode);
+      setEditForm({
+        name: profile.name || "",
+        bio: profile.bio || "",
+        handle: profile.handle || "",
+        phone: profile.phone || "",
+        instagram: profile.instagram || "",
+        tiktok: profile.tiktok || "",
+        facebook: profile.facebook || "",
+        telegram: profile.telegram || "",
+        whatsapp: profile.whatsapp || "",
+      });
+    }}
+    style={{
+      background: editMode ? "rgba(255,68,68,0.1)" : "rgba(255,255,255,0.06)",
+      border: `1px solid ${editMode ? "rgba(255,68,68,0.5)" : "rgba(255,255,255,0.15)"}`,
+      color: editMode ? "#ff4444" : "var(--text)",
+      padding: "8px 16px",
+      borderRadius: 10,
+      fontSize: 13,
+      fontWeight: 700,
+      cursor: "pointer",
+      fontFamily: "'DM Sans', sans-serif",
+    }}
+  >
+    {editMode ? "✕ Cancelar" : "✏️ Editar Perfil"}
+  </motion.button>
 </div>
-          {profile.bio && <div style={{ color: "var(--muted)", fontSize: 13, marginBottom: 20, lineHeight: 1.6 }}>{profile.bio}</div>}
+</div>
+              <div style={{ fontWeight: 700, fontSize: 20, marginBottom: 2, textAlign: "center" }}>{profile.name}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, justifyContent: "center" }}>
+                <div style={{ color: "var(--orange)", fontSize: 13 }}>{profile.handle}</div>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text)", flexShrink: 0 }}>
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                  <polyline points="22 4 12 14.01 9 11.01"/>
+                </svg>
+              </div>
+              {profile.bio && <div style={{ color: "var(--muted)", fontSize: 13, marginBottom: 20, lineHeight: 1.6 }}>{profile.bio}</div>}
             {/* Redes sociales — modo lectura */}
 {(profile.instagram || profile.tiktok || profile.facebook || profile.telegram || profile.whatsapp) && (
   <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 20 }}>
@@ -2031,9 +2531,48 @@ const renderVendorRequest = () => {
                 <input className="form-input" value={editForm.name} onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
               </div>
               <div className="form-group">
-                <label className="form-label">Handle</label>
-                <input className="form-input" value={editForm.handle} onChange={e => setEditForm({ ...editForm, handle: e.target.value })} />
-              </div>
+    <label className="form-label">Handle</label>
+  <div style={{ position: "relative" }}>
+    <input 
+      className="form-input" 
+      value={editForm.handle} 
+      onChange={async e => {
+        const val = e.target.value;
+        setEditForm({ ...editForm, handle: val });
+        
+        if (val.length < 3) return;
+        
+        // Verificar disponibilidad
+        const res = await fetch(`/api/auth/check-handle?handle=${encodeURIComponent(val)}`, {
+          headers: { Authorization: `Bearer ${session?.access_token}` }
+        });
+        const data = await res.json();
+        setHandleAvailable(data.available);
+      }}
+      style={{ paddingRight: 40 }}
+    />
+    {editForm.handle.length >= 3 && handleAvailable !== null && (
+      <span style={{ 
+        position: "absolute", right: 12, top: "50%", 
+        transform: "translateY(-50%)",
+        color: handleAvailable ? "var(--success)" : "#ff4444",
+        fontSize: 16
+      }}>
+        {handleAvailable ? "✓" : "✕"}
+      </span>
+    )}
+  </div>
+  {editForm.handle.length >= 3 && handleAvailable === false && (
+    <div style={{ fontSize: 12, color: "#ff4444", marginTop: 4 }}>
+      Ese usuario no está disponible.
+    </div>
+  )}
+  {editForm.handle.length >= 3 && handleAvailable === true && (
+    <div style={{ fontSize: 12, color: "var(--success)", marginTop: 4 }}>
+      ¡Disponible!
+    </div>
+  )}
+</div>
               <div className="form-group">
                 <label className="form-label">Bio</label>
                 <input className="form-input" value={editForm.bio} onChange={e => setEditForm({ ...editForm, bio: e.target.value })} />
@@ -2125,36 +2664,124 @@ const renderVendorRequest = () => {
                 {editLoading ? "GUARDANDO..." : "GUARDAR CAMBIOS"}
               </button>
 
-              {/* Suscripción */}
-              <div style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
-                <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1, marginBottom: 14 }}>SUSCRIPCIÓN</div>
-                <div className="form-group">
-                  <label className="form-label">Precio mensual (Q) — 0 = sin suscripción</label>
-                  <input className="form-input" type="number" placeholder="0" defaultValue={profile.subscription_price || ""} id="sub-price-input" />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Beneficios (uno por línea)</label>
-                  <textarea className="form-input" rows={3} defaultValue={(profile.subscription_benefits || []).join("\n")} id="sub-benefits-input" style={{ resize: "vertical", lineHeight: 1.6 }} />
-                </div>
-                <button className="nav-btn primary" onClick={async () => {
-                  const price = document.getElementById("sub-price-input").value;
-                  const benefits = document.getElementById("sub-benefits-input").value.split("\n").map(b => b.trim()).filter(Boolean);
-                  const res = await fetch("/api/auth/subscription-settings", {
-                    method: "PUT",
-                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-                    body: JSON.stringify({ subscription_price: price ? parseFloat(price) : null, subscription_benefits: benefits }),
-                  });
-                  const data = await res.json();
-                  if (res.ok) {
-                    setProfile(prev => ({ ...prev, subscription_price: data.photographer.subscription_price, subscription_benefits: data.photographer.subscription_benefits }));
-                    showToast("Configuración de suscripción guardada.")
-                  } else setMessage(data.error);
-                }}>
-                  Guardar configuración
-                </button>
+             {/* Suscripción */}
+<div id="subscription-section" style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
+  <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1, marginBottom: 14 }}>SUSCRIPCIÓN</div>
+  <div className="form-group">
+    <label className="form-label">Precio mensual (Q) — 0 = sin suscripción</label>
+    <input className="form-input" type="number" placeholder="0" defaultValue={profile.subscription_price || ""} id="sub-price-input" />
+  </div>
+  <div className="form-group">
+    <label className="form-label">Beneficios (uno por línea)</label>
+    <textarea className="form-input" rows={3} defaultValue={(profile.subscription_benefits || []).join("\n")} id="sub-benefits-input" style={{ resize: "vertical", lineHeight: 1.6 }} />
+  </div>
+  <button className="nav-btn primary" onClick={async () => {
+    const price = document.getElementById("sub-price-input").value;
+    const benefits = document.getElementById("sub-benefits-input").value.split("\n").map(b => b.trim()).filter(Boolean);
+    const res = await fetch("/api/auth/subscription-settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+      body: JSON.stringify({ subscription_price: price ? parseFloat(price) : null, subscription_benefits: benefits }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      setProfile(prev => ({ ...prev, subscription_price: data.photographer.subscription_price, subscription_benefits: data.photographer.subscription_benefits }));
+      showToast("✓ Configuración de suscripción guardada.");
+    } else setMessage(data.error);
+  }}>
+    Guardar configuración
+  </button>
+
+  {/* Mis suscripciones activas e historial */}
+  <div style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+      <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 16, letterSpacing: 1 }}>MIS SUSCRIPCIONES</div>
+      <button className="nav-btn" style={{ fontSize: 12 }} onClick={() => fetchAllSubscriptions()}>🔄 Cargar</button>
+    </div>
+
+    {subsLoading ? (
+      <div className="empty"><div className="empty-icon">⏳</div><div>Cargando...</div></div>
+    ) : allSubscriptions.length === 0 ? (
+      <div style={{ fontSize: 13, color: "var(--muted)" }}>No tenés suscripciones registradas.</div>
+    ) : (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {allSubscriptions.filter(s => s.status === "active").length > 0 && (
+          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--success)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>✓ Activas</div>
+        )}
+        {allSubscriptions.filter(s => s.status === "active").map(sub => (
+          <div key={sub.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: 14, borderRadius: 12, background: "rgba(61,220,132,0.06)", border: "1px solid rgba(61,220,132,0.25)" }}>
+            <div style={{ width: 44, height: 44, borderRadius: "50%", overflow: "hidden", background: "var(--card)", flexShrink: 0 }}>
+              {sub.photographer?.avatar_url
+                ? <img src={sub.photographer.avatar_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}>👤</div>}
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{sub.photographer?.name}</div>
+              <div style={{ fontSize: 12, color: "var(--orange)" }}>{sub.photographer?.handle}</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                Q{sub.price}/mes · Vence: {new Date(sub.expires_at).toLocaleDateString("es-GT")}
               </div>
             </div>
-          )}
+            <motion.button
+              whileTap={{ scale: 0.95 }}
+              onClick={async () => {
+                if (!confirm("¿Cancelar esta suscripción?")) return;
+                const res = await fetch(`/api/auth/subscriptions/${sub.id}/cancel`, {
+                  method: "PUT",
+                  headers: { Authorization: `Bearer ${session?.access_token}` }
+                });
+                if (res.ok) { showToast("Suscripción cancelada."); fetchAllSubscriptions(); }
+              }}
+              style={{ background: "rgba(255,68,68,0.1)", border: "1px solid rgba(255,68,68,0.4)", color: "#ff4444", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+            >
+              Cancelar
+            </motion.button>
+          </div>
+        ))}
+
+        {allSubscriptions.filter(s => s.status !== "active").length > 0 && (
+          <>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 1, marginTop: 8, marginBottom: 4 }}>Historial</div>
+            {allSubscriptions.filter(s => s.status !== "active").map(sub => (
+              <div key={sub.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: 14, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", opacity: 0.7 }}>
+                <div style={{ width: 44, height: 44, borderRadius: "50%", overflow: "hidden", background: "var(--card)", flexShrink: 0 }}>
+                  {sub.photographer?.avatar_url
+                    ? <img src={sub.photographer.avatar_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}>👤</div>}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{sub.photographer?.name}</div>
+                  <div style={{ fontSize: 12, color: "var(--orange)" }}>{sub.photographer?.handle}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                    Q{sub.price}/mes · {sub.status === "cancelled" ? "Cancelada" : "Vencida"} · {new Date(sub.expires_at).toLocaleDateString("es-GT")}
+                  </div>
+                </div>
+                <motion.button
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => {
+                    if (user && sub.photographer.id === selectedPhotographer?.id || 
+                        photographers.find(p => p.id === sub.photographer.id)?.user_id === user?.id) {
+                      setView(VIEWS.VENDOR_REQUEST);
+                      setActiveTab("profile");
+                    } else {
+                      fetchPhotographerProfile(sub.photographer.id);
+                      setView(VIEWS.PHOTOGRAPHER_PROFILE);
+                    }
+                  }}
+                  style={{ background: "var(--card)", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+                >
+                  Ver perfil
+                </motion.button>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    )}
+  </div>
+</div>
+</div>
+)}
 
           {/* Sus fotos */}
           {!editMode && (
@@ -2273,7 +2900,9 @@ const renderVendorRequest = () => {
             {albums.map(album => {
   const albumPhotos = photos.filter(p => p.photographer?.user_id === user?.id && p.album_id === album.id);
   if (albumPhotos.length === 0) return null;
-  const cover = (album.cover_url?.split("?")[0]) || albumPhotos[0]?.watermark_url;
+  const cover = album.cover_url 
+  ? album.cover_url.split("?")[0] + `?t=${album.id}`
+  : albumPhotos[0]?.watermark_url;
 
   return (
     <div key={album.id} 
@@ -2333,32 +2962,74 @@ const renderVendorRequest = () => {
         )}
 
         {/* Fotos sueltas */}
-        <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1, marginBottom: 12 }}>
-          📸 FOTOS · {photos.filter(p => p.photographer?.user_id === user?.id).length}
+<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+  <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
+    📸 FOTOS · {photos.filter(p => p.photographer?.user_id === user?.id).length}
+  </div>
+  <div style={{ display: "flex", gap: 4 }}>
+    {[{ mode: "grid", icon: "⊞" }, { mode: "feed", icon: "☰" }].map(({ mode, icon }) => (
+      <button
+        key={mode}
+        onClick={() => setPhotoViewMode(mode)}
+        style={{
+          background: photoViewMode === mode ? "var(--orange)" : "var(--surface)",
+          border: `1px solid ${photoViewMode === mode ? "var(--orange)" : "var(--border)"}`,
+          color: photoViewMode === mode ? "#fff" : "var(--muted)",
+          borderRadius: 8, padding: "6px 10px", cursor: "pointer",
+          fontSize: 16, transition: "all 0.2s",
+        }}
+      >{icon}</button>
+    ))}
+  </div>
+</div>
+
+{photos.filter(p => p.photographer?.user_id === user?.id).length === 0 ? (
+  <div className="empty">
+    <div className="empty-icon">📷</div>
+    <div>Todavía no subiste fotos.</div>
+    <button className="nav-btn primary" style={{ marginTop: 16 }} onClick={() => { setActiveTab("upload"); setView(VIEWS.UPLOAD); }}>
+      Subir primera foto
+    </button>
+  </div>
+) : photoViewMode === "grid" ? (
+  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 2, marginLeft: -20, marginRight: -20 }}>
+    {photos.filter(p => p.photographer?.user_id === user?.id).map(photo => (
+      <div
+        key={photo.id}
+        onClick={() => { setSelected(photo); setView(VIEWS.DETAIL); }}
+        style={{ aspectRatio: "1", overflow: "hidden", position: "relative", background: "var(--card)", cursor: "pointer" }}
+      >
+        <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      </div>
+    ))}
+  </div>
+) : (
+  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    {photos.filter(p => p.photographer?.user_id === user?.id).map(photo => (
+      <div
+        key={photo.id}
+        onClick={() => { setSelected(photo); setView(VIEWS.DETAIL); }}
+        style={{ borderRadius: 14, overflow: "hidden", background: "var(--surface)", border: "1px solid var(--border)", cursor: "pointer" }}
+      >
+        <div style={{ width: "100%", aspectRatio: "4/3", overflow: "hidden" }}>
+          <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         </div>
-        {photos.filter(p => p.photographer?.user_id === user?.id).length === 0 ? (
-          <div className="empty">
-            <div className="empty-icon">📷</div>
-            <div>Todavía no subiste fotos.</div>
-            <button className="nav-btn primary" style={{ marginTop: 16 }} onClick={() => { setActiveTab("upload"); setView(VIEWS.UPLOAD); }}>
-              Subir primera foto
-            </button>
+        <div style={{ padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>📍 {photo.location}</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+              {photo.ride_date || ""}
+              {photo.time_start ? ` · ${photo.time_start}${photo.time_end ? `–${photo.time_end}` : ""}` : ""}
+            </div>
           </div>
-        ) : (
-          <div className="grid" style={{ marginLeft: -20, marginRight: -20 }}>
-            {photos.filter(p => p.photographer?.user_id === user?.id).map(photo => (
-              <div key={photo.id} className="card">
-                <WatermarkedImage src={photo.watermark_url} photographer={profile?.name || "MOTOSHOT"} purchased={true} />
-                <div className="card-overlay">
-                  <div className="card-photographer">📍 {photo.location}</div>
-                  <div className="card-footer">
-                    <div className="card-price">Q{photo.price}</div>
-                  </div>
-                </div>
-              </div>
-            ))}
+          <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 26, color: "var(--text)" }}>
+            Q{photo.price}
           </div>
-        )}
+        </div>
+      </div>
+    ))}
+  </div>
+)}
       </div>
             )}
           </>
@@ -2407,7 +3078,7 @@ const renderVendorRequest = () => {
       <div className="upload-view">
         <div className="section-title">SOLICITAR PERFIL</div>
         <div className="section-sub">Completá el formulario para verificar tu cuenta.</div>
-        {message && <div className="upload-success-banner">{message}</div>}
+
         <div className="form-group">
           <label className="form-label">Nombre completo</label>
           <input className="form-input" value={vendorForm.name} onChange={e => setVendorForm({ ...vendorForm, name: e.target.value })} placeholder="Juan Pérez" />
@@ -2566,7 +3237,6 @@ const renderVendorRequest = () => {
     <div className="upload-view">
       <div className="section-title">{authMode === "login" ? "INICIAR SESIÓN" : "REGISTRARSE"}</div>
       <div className="section-sub">Creá una cuenta o iniciá sesión para comprar fotos.</div>
-      {message && <div className="upload-success-banner">{message}</div>}
       {authMode === "register" && (
         <div className="form-group">
           <label className="form-label">Nombre completo</label>
@@ -2809,21 +3479,14 @@ const renderVendorRequest = () => {
           onClick={() => setView(VIEWS.VENDOR_REQUEST)}
           style={{
             display: "inline-flex", alignItems: "center", gap: 6,
-            padding: "6px 12px", borderRadius: 999, cursor: "pointer",
-            background: "rgba(0,149,246,0.12)", border: "1px solid #0095f6",
-            color: "#0095f6", fontSize: 12, fontWeight: 700,
-            textTransform: "uppercase", letterSpacing: 0.5,
-            transition: "background 0.2s",
+            cursor: "pointer", color: "var(--text)", fontSize: 13, fontWeight: 700,
           }}
         >
           {profile?.name || "Fotógrafo"}
-          <span style={{
-  display: "inline-flex", width: 16, height: 16, borderRadius: "50%",
-  background: "transparent",
-  border: "1.5px solid var(--text)",
-  alignItems: "center", justifyContent: "center",
-  color: "var(--text)", fontSize: 10, flexShrink: 0,
-}}>✓</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+            <polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
         </span>
         ) : (
           <button className="nav-btn" onClick={() => setView(VIEWS.VENDOR_REQUEST)}>
@@ -2990,29 +3653,32 @@ const renderVendorRequest = () => {
   )}
   {/* Toast global */}
 <AnimatePresence>
-  {message && (
-   <motion.div
-   initial={{ opacity: 0, y: -60, scale: 0.95, x: "-50%" }}
-   animate={{ opacity: 1, y: 0, scale: 1, x: "-50%" }}
-   exit={{ opacity: 0, y: -60, scale: 0.95, x: "-50%" }}
-   transition={{ type: "spring", stiffness: 400, damping: 30 }}
-   style={{
-     position: "fixed", top: 70, left: "50%",
-     zIndex: 999, maxWidth: 340, width: "90%", 
-        background: message.startsWith("✓") || message.includes("actualiz") || message.includes("activa") || message.includes("guardad") || message.includes("exitosa")
-          ? "rgba(61,220,132,0.12)" : "rgba(255,107,0,0.12)",
-        border: `1px solid ${message.startsWith("✓") || message.includes("actualiz") || message.includes("activa") || message.includes("guardad") || message.includes("exitosa")
-          ? "var(--success)" : "var(--orange)"}`,
+{message && (
+  <motion.div
+    initial={{ opacity: 0, y: -60, scale: 0.95, x: "-50%" }}
+    animate={{ opacity: 1, y: 0, scale: 1, x: "-50%" }}
+    exit={{ opacity: 0, y: -60, scale: 0.95, x: "-50%" }}
+    transition={{ type: "spring", stiffness: 400, damping: 30 }}
+    style={(() => {
+      const isSuccess = message.startsWith("✓") || message.includes("actualiz") || message.includes("activa") || message.includes("guardad") || message.includes("exitosa");
+      const isError = message.toLowerCase().includes("invalid") || message.toLowerCase().includes("error") || message.toLowerCase().includes("incorrect") || message.toLowerCase().includes("fallid");
+      const toastColor = isSuccess ? "var(--success)" : isError ? "#ff4444" : "var(--orange)";
+      const toastBg = isSuccess ? "rgba(61,220,132,0.12)" : isError ? "rgba(255,68,68,0.12)" : "rgba(255,107,0,0.12)";
+      return {
+        position: "fixed", top: 70, left: "50%",
+        zIndex: 999, maxWidth: 340, width: "90%",
+        background: toastBg,
+        border: `1px solid ${toastColor}`,
         borderRadius: 12, padding: "12px 20px",
-        color: message.startsWith("✓") || message.includes("actualiz") || message.includes("activa") || message.includes("guardad") || message.includes("exitosa")
-          ? "var(--success)" : "var(--orange)",
+        color: toastColor,
         fontSize: 14, fontWeight: 600, textAlign: "center",
         backdropFilter: "blur(12px)",
-      }}
-    >
-      {message}
-    </motion.div>
-  )}
+      };
+    })()}
+  >
+    {message}
+  </motion.div>
+)}
 </AnimatePresence>
   {globalLoading.active && (
           <div style={{
