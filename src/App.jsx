@@ -1229,11 +1229,20 @@ useEffect(() => {
         setEmailAlreadyExists(true);
         return;
       }
-      if (!res.ok) throw new Error(translateAuthError(data.error) || "Error al registrar.");
+
+      const registrationOk =
+        res.ok &&
+        data.success !== false &&
+        (data.confirmationSent === true || data.alreadySent === true || data.success === true);
+
+      if (!registrationOk) {
+        throw new Error(translateAuthError(data.error) || "Error al registrar.");
+      }
 
       const remaining = MIN_AUTH_LOADING_MS - (Date.now() - startedAt);
       if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
 
+      setMessage("");
       setShowEmailConfirm(true);
     } catch (err) {
       showToast(translateAuthError(err.message) || "Error al registrar.");
