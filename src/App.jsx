@@ -41,6 +41,20 @@ const isEmailConfirmationRedirect = () => {
   );
 };
 
+const requestConfirmationEmail = async (email, name) => {
+  const res = await fetch("/api/auth/send-confirmation", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email,
+      name: name || "",
+      redirectTo: getEmailConfirmRedirectUrl(),
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Error al enviar correo de confirmación");
+};
+
 const PHONE_COUNTRIES = [
   { flag: "🇬🇹", name: "Guatemala", code: "+502" },
   { flag: "🇲🇽", name: "México", code: "+52" },
@@ -1144,15 +1158,22 @@ useEffect(() => {
         return;
       }
   
-      // Usuario nuevo
-      await fetch("/api/auth/welcome", {
+      // Usuario nuevo — confirmación vía Resend (más confiable que el correo default de Supabase)
+      try {
+        await requestConfirmationEmail(authForm.email, name);
+      } catch (err) {
+        console.error("Confirm email:", err);
+        showToast("No pudimos enviar el correo de confirmación. Usá «reenviar correo».");
+      }
+
+      fetch("/api/auth/welcome", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: authForm.email,
           name
         })
-      });
+      }).catch((err) => console.error("Welcome email:", err));
   
       setShowEmailConfirm(true);
   
@@ -5142,11 +5163,7 @@ const renderVendorRequest = () => {
     const handleResend = async () => {
       if (resendCooldown > 0 || resendCount >= 3) return;
       try {
-        await supabase.auth.resend({
-          type: "signup",
-          email: authForm.email,
-          options: { emailRedirectTo: getEmailConfirmRedirectUrl() },
-        });
+        await requestConfirmationEmail(authForm.email, authForm.name);
         setResendCount(prev => prev + 1);
         setResendCooldown(60);
         const interval = setInterval(() => {
@@ -5340,12 +5357,7 @@ const renderVendorRequest = () => {
           <span
           onClick={async () => {
             try {
-              const { error } = await supabase.auth.resend({
-                type: "signup",
-                email: authForm.email,
-                options: { emailRedirectTo: getEmailConfirmRedirectUrl() },
-              });
-              if (error) throw error;
+              await requestConfirmationEmail(authForm.email, authForm.name);
               setResendCount(prev => prev + 1);
               setResendCooldown(60);
               const interval = setInterval(() => {
@@ -5398,11 +5410,7 @@ const renderVendorRequest = () => {
           onClick={async () => {
             if (resendCooldown > 0 || resendCount >= 3) return;
             try {
-              await supabase.auth.resend({
-          type: "signup",
-          email: authForm.email,
-          options: { emailRedirectTo: getEmailConfirmRedirectUrl() },
-        });
+              await requestConfirmationEmail(authForm.email, authForm.name);
               setResendCount(prev => prev + 1);
               setResendCooldown(60);
               const interval = setInterval(() => {
