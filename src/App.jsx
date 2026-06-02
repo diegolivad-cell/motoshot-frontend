@@ -41,6 +41,17 @@ const isEmailConfirmationRedirect = () => {
   );
 };
 
+const DISPOSABLE_EMAIL_DOMAINS = new Set([
+  "wshu.net", "guerrillamail.com", "guerrillamail.net", "mailinator.com",
+  "tempmail.com", "temp-mail.org", "yopmail.com", "10minutemail.com",
+  "discard.email", "getnada.com", "maildrop.cc", "sharklasers.com",
+]);
+
+const isLikelyDisposableEmail = (email) => {
+  const domain = (email || "").split("@")[1]?.toLowerCase().trim();
+  return !!domain && DISPOSABLE_EMAIL_DOMAINS.has(domain);
+};
+
 const requestConfirmationEmail = async (email, name) => {
   const res = await fetch("/api/auth/send-confirmation", {
     method: "POST",
@@ -53,6 +64,7 @@ const requestConfirmationEmail = async (email, name) => {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Error al enviar correo de confirmación");
+  return data;
 };
 
 const PHONE_COUNTRIES = [
@@ -1136,6 +1148,10 @@ useEffect(() => {
     const name = (authForm.name ?? "").trim();
     if (!name) {
       showToast("Ingresá tu nombre para continuar.");
+      return;
+    }
+    if (isLikelyDisposableEmail(authForm.email)) {
+      showToast("Los correos temporales (como @wshu.net) no reciben nuestros emails. Usá Gmail u Outlook.");
       return;
     }
     try {
@@ -5184,8 +5200,14 @@ const renderVendorRequest = () => {
         <h2 style={{ color: "var(--text)", fontSize: 22, fontWeight: 800, textAlign: "center", marginBottom: 12 }}>
           Revisá tu correo
         </h2>
-        <p style={{ color: "var(--muted)", fontSize: 15, textAlign: "center", maxWidth: 300, lineHeight: 1.6, marginBottom: 32 }}>
-          Te enviamos un enlace de confirmación a <strong style={{ color: "var(--orange)" }}>{authForm.email}</strong>. Confirmá tu cuenta para poder ingresar.
+        <p style={{ color: "var(--muted)", fontSize: 15, textAlign: "center", maxWidth: 320, lineHeight: 1.6, marginBottom: 16 }}>
+          Te enviamos un enlace de confirmación a:
+        </p>
+        <p style={{ color: "var(--orange)", fontSize: 16, fontWeight: 800, textAlign: "center", maxWidth: 320, lineHeight: 1.4, marginBottom: 24, wordBreak: "break-all" }}>
+          {authForm.email}
+        </p>
+        <p style={{ color: "var(--muted)", fontSize: 14, textAlign: "center", maxWidth: 320, lineHeight: 1.6, marginBottom: 32 }}>
+          Abrí <strong style={{ color: "var(--text)" }}>exactamente esa bandeja</strong> (no otra dirección temporal). Confirmá tu cuenta para poder ingresar.
         </p>
         <AppButton
           onClick={() => { setShowEmailConfirm(false); setAuthMode("login"); }}
