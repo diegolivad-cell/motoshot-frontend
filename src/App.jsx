@@ -1155,44 +1155,26 @@ useEffect(() => {
       return;
     }
     try {
-      const { data, error } = await supabase.auth.signUp({
-        email: authForm.email,
-        password: authForm.password,
-        options: {
-          data: { name },
-          emailRedirectTo: getEmailConfirmRedirectUrl(),
-        },
-      });
-      if (error) throw error;
-  
-      const isNewUser = data?.user?.identities?.length > 0;
-  
-      if (!isNewUser) {
-        // Email ya existe — mostrar banner específico en lugar de showEmailConfirm
-        setShowUnconfirmedBanner(false);
-        setEmailAlreadyExists(true); // nuevo estado
-        return;
-      }
-  
-      // Usuario nuevo — confirmación vía Resend (más confiable que el correo default de Supabase)
-      try {
-        await requestConfirmationEmail(authForm.email, name);
-      } catch (err) {
-        console.error("Confirm email:", err);
-        showToast("No pudimos enviar el correo de confirmación. Usá «reenviar correo».");
-      }
-
-      fetch("/api/auth/welcome", {
+      const res = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: authForm.email,
-          name
-        })
-      }).catch((err) => console.error("Welcome email:", err));
-  
+          password: authForm.password,
+          name,
+          redirectTo: getEmailConfirmRedirectUrl(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.status === 409 || data.code === "EMAIL_EXISTS") {
+        setShowUnconfirmedBanner(false);
+        setEmailAlreadyExists(true);
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || "Error al registrar.");
+
       setShowEmailConfirm(true);
-  
     } catch (err) {
       showToast(err.message || "Error al registrar.");
     }
