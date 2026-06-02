@@ -2,7 +2,7 @@
 import { flushSync } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { motion, AnimatePresence } from "framer-motion";
-import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, MotoShotBrandMark } from "./icons";
+import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
 
 const VIEWS = {
@@ -5016,6 +5016,30 @@ const renderVendorRequest = () => {
     .form-input { width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 12px 14px; border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color 0.2s; }
     .form-input:focus { border-color: var(--orange); }
     .form-input::placeholder { color: var(--muted); }
+    .password-toggle-btn {
+      position: absolute;
+      right: 6px;
+      top: 0;
+      bottom: 0;
+      width: 36px;
+      height: 36px;
+      margin: auto 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      color: var(--muted);
+      border-radius: 8px;
+      flex-shrink: 0;
+      -webkit-tap-highlight-color: transparent;
+      transition: color 0.2s, background 0.2s;
+    }
+    .password-toggle-btn:hover { color: var(--orange); background: rgba(255,107,0,0.1); }
+    .password-toggle-btn:active { background: rgba(255,107,0,0.16); }
+    .password-toggle-btn:focus-visible { outline: 2px solid rgba(255,107,0,0.45); outline-offset: 1px; }
     .dropzone { border: 2px dashed var(--border); border-radius: 12px; padding: 40px 20px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--surface); }
     .dropzone:hover, .dropzone.active { border-color: var(--orange); background: var(--orange-glow); }
     .dropzone-icon { font-size: 36px; margin-bottom: 10px; }
@@ -5305,23 +5329,12 @@ const renderVendorRequest = () => {
               value={newPassword}
               onChange={e => setNewPassword(e.target.value)}
               placeholder="********"
-              style={{ paddingRight: 44 }}
+              style={{ paddingRight: 48 }}
             />
-            <AppButton onClick={() => setShowPassword(!showPassword)}
-  style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 18 }}>
-  {showPassword ? (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
-      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
-      <line x1="1" y1="1" x2="23" y2="23"/>
-    </svg>
-  ) : (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-      <circle cx="12" cy="12" r="3"/>
-    </svg>
-  )}
-</AppButton>
+            <PasswordVisibilityToggle
+              visible={showPassword}
+              onToggle={() => setShowPassword((v) => !v)}
+            />
           </div>
           {pw.length > 0 && (
             <div style={{ marginTop: 10 }}>
@@ -5429,7 +5442,7 @@ const renderVendorRequest = () => {
           {authForm.email}
         </p>
         <p style={{ color: "var(--muted)", fontSize: 14, textAlign: "center", maxWidth: 320, lineHeight: 1.6, marginBottom: 32 }}>
-          Abrí <strong style={{ color: "var(--text)" }}>exactamente esa bandeja</strong> (no otra dirección temporal). Confirmá tu cuenta para poder ingresar.
+          Confirmá tu cuenta para poder ingresar.
         </p>
         <AppButton
           onClick={() => {
@@ -5597,23 +5610,12 @@ const renderVendorRequest = () => {
               value={authForm.password}
               onChange={e => setAuthForm({ ...authForm, password: e.target.value })}
               placeholder="********"
-              style={{ paddingRight: 44 }}
+              style={{ paddingRight: 48 }}
             />
-            <AppButton onClick={() => setShowPassword(!showPassword)}
-              style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 18 }}>
-              {showPassword ? (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
-                  <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
-                  <line x1="1" y1="1" x2="23" y2="23"/>
-                </svg>
-              ) : (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                  <circle cx="12" cy="12" r="3"/>
-                </svg>
-              )}
-            </AppButton>
+            <PasswordVisibilityToggle
+              visible={showPassword}
+              onToggle={() => setShowPassword((v) => !v)}
+            />
           </div>
           {authMode === "register" && pw.length > 0 && (
             <div style={{ marginTop: 10 }}>

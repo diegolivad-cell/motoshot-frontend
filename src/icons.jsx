@@ -227,6 +227,19 @@ const ICONS = {
   circle: (
     <circle cx="12" cy="12" r="8" strokeWidth="1.8" />
   ),
+  eye: (
+    <>
+      <path d="M3 12c2.8-4.2 6.2-6.5 9-6.5s6.2 2.3 9 6.5c-2.8 4.2-6.2 6.5-9 6.5S5.8 16.2 3 12z" strokeWidth="1.8" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="2.75" strokeWidth="1.8" />
+    </>
+  ),
+  eyeOff: (
+    <>
+      <path d="M3 12c2.8-4.2 6.2-6.5 9-6.5s6.2 2.3 9 6.5c-2.8 4.2-6.2 6.5-9 6.5S5.8 16.2 3 12z" strokeWidth="1.8" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="2.75" strokeWidth="1.8" />
+      <path d="M5 5l14 14" strokeWidth="1.8" strokeLinecap="round" />
+    </>
+  ),
   success: (
     <>
       <circle cx="12" cy="12" r="9" strokeWidth="1.8" />
@@ -307,6 +320,20 @@ export function VerifiedBadge({ size = 16 }) {
     <span style={{ display: "inline-flex", width: size, height: size, borderRadius: "50%", background: "#0095f6", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
       <AppIcon name="check" size={size * 0.55} color="#fff" />
     </span>
+  );
+}
+
+export function PasswordVisibilityToggle({ visible, onToggle, className = "" }) {
+  return (
+    <button
+      type="button"
+      className={`password-toggle-btn${className ? ` ${className}` : ""}`}
+      aria-label={visible ? "Ocultar contraseña" : "Mostrar contraseña"}
+      aria-pressed={visible}
+      onClick={onToggle}
+    >
+      <AppIcon name={visible ? "eyeOff" : "eye"} size={18} color="currentColor" />
+    </button>
   );
 }
 
