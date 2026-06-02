@@ -594,7 +594,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
   }, [showEmailConfirmedPage, syncAuthFromSupabase, processAuthCallbackFromUrl]);
 
   useEffect(() => {
-    if (authMode !== "register") {
+    const mode = authMode;
+    if (mode !== "register" && mode !== "login") {
       setEmailAvailability(null);
       return undefined;
     }
@@ -603,7 +604,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
     const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
     if (!valid) {
       setEmailAvailability(null);
-      setEmailAlreadyExists(false);
+      if (mode === "register") setEmailAlreadyExists(false);
       return undefined;
     }
 
@@ -626,10 +627,12 @@ function WatermarkedImage({ src, photographer, purchased }) {
         if (controller.signal.aborted) return;
 
         if (res.ok && data.exists) {
-          setEmailAvailability("taken");
+          setEmailAvailability("exists");
+        } else if (res.ok) {
+          setEmailAvailability("not_found");
+          if (mode === "register") setEmailAlreadyExists(false);
         } else {
-          setEmailAvailability("available");
-          setEmailAlreadyExists(false);
+          setEmailAvailability(null);
         }
       } catch (err) {
         if (err.name !== "AbortError") {
@@ -5493,15 +5496,18 @@ const renderVendorRequest = () => {
     const strengthLabel = pwStrength <= 2 ? "Débil" : pwStrength <= 3 ? "Regular" : pwStrength === 4 ? "Buena" : "Fuerte";
     const passwordsMatch = authForm.password === authForm.confirmPassword;
     const nameValid = (authForm.name ?? "").trim().length > 0;
-    const emailTaken = emailAvailability === "taken" || emailAlreadyExists;
+    const emailTaken = authMode === "register" && (emailAvailability === "exists" || emailAlreadyExists);
+    const emailNotRegistered = authMode === "login" && emailAvailability === "not_found";
     const emailChecking = emailAvailability === "checking";
     const emailBorderColor = !authForm.email
       ? "var(--border)"
-      : !emailValid || emailTaken
+      : !emailValid || emailTaken || emailNotRegistered
         ? "#ff4444"
         : emailChecking
           ? "var(--border)"
-          : "var(--success)";
+          : emailValid
+            ? "var(--success)"
+            : "var(--border)";
     const canRegister =
       rules.every(r => r.ok) &&
       passwordsMatch &&
@@ -5510,6 +5516,7 @@ const renderVendorRequest = () => {
       nameValid &&
       !emailTaken &&
       !emailChecking;
+    const canLogin = emailValid && !emailNotRegistered && !emailChecking;
   
     const formBusy = authSubmitting || globalLoading.active;
 
@@ -5594,7 +5601,12 @@ const renderVendorRequest = () => {
       Este correo ya se encuentra registrado
     </div>
   )}
-  {authMode === "register" && emailValid && emailChecking && (
+  {authMode === "login" && emailValid && emailNotRegistered && (
+    <div style={{ fontSize: 12, color: "#ff4444", marginTop: 4 }}>
+      Este correo no se encuentra registrado
+    </div>
+  )}
+  {(authMode === "register" || authMode === "login") && emailValid && emailChecking && (
     <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
       Verificando correo…
     </div>
@@ -5760,10 +5772,10 @@ const renderVendorRequest = () => {
   </div>
 )}
         <AppButton className="upload-btn"
-          disabled={formBusy || (authMode === "register" && !canRegister)}
+          disabled={formBusy || (authMode === "register" && !canRegister) || (authMode === "login" && !canLogin)}
           style={{
-            opacity: formBusy || (authMode === "register" && !canRegister) ? 0.5 : 1,
-            cursor: formBusy || (authMode === "register" && !canRegister) ? "not-allowed" : "pointer",
+            opacity: formBusy || (authMode === "register" && !canRegister) || (authMode === "login" && !canLogin) ? 0.5 : 1,
+            cursor: formBusy || (authMode === "register" && !canRegister) || (authMode === "login" && !canLogin) ? "not-allowed" : "pointer",
           }}
           onClick={authMode === "login" ? handleLogin : handleSignUp}>
           {formBusy && authMode === "register"
