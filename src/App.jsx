@@ -52,6 +52,43 @@ const isLikelyDisposableEmail = (email) => {
   return !!domain && DISPOSABLE_EMAIL_DOMAINS.has(domain);
 };
 
+/** Traduce mensajes de Supabase / Auth al español */
+const translateAuthError = (message) => {
+  if (!message) return "Ocurrió un error. Intentá de nuevo.";
+  const m = String(message);
+  const lower = m.toLowerCase();
+  const secondsMatch = m.match(/after (\d+) second/i);
+  if (
+    lower.includes("security purposes") ||
+    lower.includes("only request") ||
+    lower.includes("rate limit")
+  ) {
+    const secs = secondsMatch?.[1];
+    return secs
+      ? `Por seguridad, podés volver a intentar en ${secs} segundos.`
+      : "Por seguridad, esperá un momento antes de volver a intentar.";
+  }
+  if (lower.includes("already") && (lower.includes("registered") || lower.includes("exists"))) {
+    return "Este correo ya está registrado.";
+  }
+  if (lower.includes("email not confirmed")) {
+    return "Tu cuenta aún no está confirmada. Revisá tu correo.";
+  }
+  if (lower.includes("invalid login credentials")) {
+    return "Email o contraseña incorrectos.";
+  }
+  if (lower.includes("user not found")) {
+    return "El email ingresado no existe.";
+  }
+  if (lower.includes("invalid email")) {
+    return "El correo no es válido.";
+  }
+  if (lower.includes("password") && lower.includes("least")) {
+    return "La contraseña debe tener al menos 6 caracteres.";
+  }
+  return m;
+};
+
 const requestConfirmationEmail = async (email, name) => {
   const res = await fetch("/api/auth/send-confirmation", {
     method: "POST",
@@ -63,7 +100,7 @@ const requestConfirmationEmail = async (email, name) => {
     }),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Error al enviar correo de confirmación");
+  if (!res.ok) throw new Error(translateAuthError(data.error) || "Error al enviar correo de confirmación");
   return data;
 };
 
@@ -318,6 +355,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [postForm, setPostForm] = useState({ body: "", image_url: "" });
   const [postLoading, setPostLoading] = useState(false);
   const [globalLoading, setGlobalLoading] = useState({ active: false, message: "" });
+  const authSubmittingRef = useRef(false);
   const showToast = (msg) => {
     setMessage(msg);
     setTimeout(() => setMessage(""), 3000);
@@ -1144,6 +1182,7 @@ useEffect(() => {
   };
 
   const handleSignUp = async () => {
+    if (authSubmittingRef.current || globalLoading.active) return;
     setMessage("");
     const name = (authForm.name ?? "").trim();
     if (!name) {
@@ -1154,6 +1193,8 @@ useEffect(() => {
       showToast("Los correos temporales (como @wshu.net) no reciben nuestros emails. Usá Gmail u Outlook.");
       return;
     }
+    authSubmittingRef.current = true;
+    setGlobalLoading({ active: true, message: "Creando tu cuenta y enviando correo..." });
     try {
       const res = await fetch("/api/auth/register", {
         method: "POST",
@@ -1172,11 +1213,14 @@ useEffect(() => {
         setEmailAlreadyExists(true);
         return;
       }
-      if (!res.ok) throw new Error(data.error || "Error al registrar.");
+      if (!res.ok) throw new Error(translateAuthError(data.error) || "Error al registrar.");
 
       setShowEmailConfirm(true);
     } catch (err) {
-      showToast(err.message || "Error al registrar.");
+      showToast(translateAuthError(err.message) || "Error al registrar.");
+    } finally {
+      authSubmittingRef.current = false;
+      setGlobalLoading({ active: false, message: "" });
     }
   };
 
@@ -5172,7 +5216,7 @@ const renderVendorRequest = () => {
         }, 1000);
         showToast("Listo: Correo reenviado.");
       } catch (err) {
-        showToast("Error al reenviar. Intentá más tarde.");
+        showToast(translateAuthError(err.message) || "Error al reenviar. Intentá más tarde.");
       }
     };
   
@@ -5373,7 +5417,7 @@ const renderVendorRequest = () => {
               showToast("Listo: Correo reenviado.");
             } catch (err) {
               console.error("Resend error:", err);
-              showToast("Error: " + err.message);
+              showToast(translateAuthError(err.message) || "Error al reenviar.");
             }
           }}
           style={{ color: "var(--text)", fontWeight: 700, cursor: "pointer", textDecoration: "underline" }}>
@@ -5424,8 +5468,8 @@ const renderVendorRequest = () => {
                 });
               }, 1000);
               showToast("Listo: Correo de activación reenviado.");
-            } catch {
-              showToast("Error al reenviar.");
+            } catch (err) {
+              showToast(translateAuthError(err.message) || "Error al reenviar.");
             }
           }}
           style={{
@@ -5446,10 +5490,17 @@ const renderVendorRequest = () => {
   </div>
 )}
         <AppButton className="upload-btn"
-          disabled={authMode === "register" && !canRegister}
-          style={{ opacity: authMode === "register" && !canRegister ? 0.5 : 1, cursor: authMode === "register" && !canRegister ? "not-allowed" : "pointer" }}
+          disabled={globalLoading.active || (authMode === "register" && !canRegister)}
+          style={{
+            opacity: globalLoading.active || (authMode === "register" && !canRegister) ? 0.5 : 1,
+            cursor: globalLoading.active || (authMode === "register" && !canRegister) ? "not-allowed" : "pointer",
+          }}
           onClick={authMode === "login" ? handleLogin : handleSignUp}>
-          {authMode === "login" ? "INICIAR SESIÓN" : "CREAR CUENTA"}
+          {globalLoading.active && authMode === "register"
+            ? "ENVIANDO..."
+            : authMode === "login"
+            ? "INICIAR SESIÓN"
+            : "CREAR CUENTA"}
         </AppButton>
         {authMode === "login" && (
   <div style={{ textAlign: "center", marginTop: 8 }}>
