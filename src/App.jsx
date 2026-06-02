@@ -1,4 +1,5 @@
 ﻿import { useEffect, useState, useRef, useCallback } from "react";
+import { flushSync } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { motion, AnimatePresence } from "framer-motion";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, MotoShotBrandMark } from "./icons";
@@ -88,6 +89,13 @@ const translateAuthError = (message) => {
   }
   return m;
 };
+
+const MIN_AUTH_LOADING_MS = 700;
+
+const waitForNextPaint = () =>
+  new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
 
 const requestConfirmationEmail = async (email, name) => {
   const res = await fetch("/api/auth/send-confirmation", {
@@ -355,6 +363,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [postForm, setPostForm] = useState({ body: "", image_url: "" });
   const [postLoading, setPostLoading] = useState(false);
   const [globalLoading, setGlobalLoading] = useState({ active: false, message: "" });
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const authSubmittingRef = useRef(false);
   const showToast = (msg) => {
     setMessage(msg);
@@ -1182,7 +1191,7 @@ useEffect(() => {
   };
 
   const handleSignUp = async () => {
-    if (authSubmittingRef.current || globalLoading.active) return;
+    if (authSubmittingRef.current || authSubmitting) return;
     setMessage("");
     const name = (authForm.name ?? "").trim();
     if (!name) {
@@ -1193,8 +1202,15 @@ useEffect(() => {
       showToast("Los correos temporales (como @wshu.net) no reciben nuestros emails. Usá Gmail u Outlook.");
       return;
     }
+
     authSubmittingRef.current = true;
-    setGlobalLoading({ active: true, message: "Creando tu cuenta y enviando correo..." });
+    const startedAt = Date.now();
+    flushSync(() => {
+      setAuthSubmitting(true);
+      setGlobalLoading({ active: true, message: "Creando tu cuenta y enviando correo..." });
+    });
+    await waitForNextPaint();
+
     try {
       const res = await fetch("/api/auth/register", {
         method: "POST",
@@ -1215,11 +1231,15 @@ useEffect(() => {
       }
       if (!res.ok) throw new Error(translateAuthError(data.error) || "Error al registrar.");
 
+      const remaining = MIN_AUTH_LOADING_MS - (Date.now() - startedAt);
+      if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
+
       setShowEmailConfirm(true);
     } catch (err) {
       showToast(translateAuthError(err.message) || "Error al registrar.");
     } finally {
       authSubmittingRef.current = false;
+      setAuthSubmitting(false);
       setGlobalLoading({ active: false, message: "" });
     }
   };
@@ -5282,8 +5302,44 @@ const renderVendorRequest = () => {
     const nameValid = (authForm.name ?? "").trim().length > 0;
     const canRegister = rules.every(r => r.ok) && passwordsMatch && authForm.confirmPassword && emailValid && nameValid;
   
+    const formBusy = authSubmitting || globalLoading.active;
+
     return (
-      <div className="upload-view">
+      <div className="upload-view" style={{ position: "relative" }}>
+        {formBusy && authMode === "register" && (
+          <div
+            aria-busy="true"
+            aria-live="polite"
+            style={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 20,
+              background: "rgba(0,0,0,0.72)",
+              backdropFilter: "blur(4px)",
+              borderRadius: 12,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 14,
+              minHeight: 200,
+            }}
+          >
+            <div
+              style={{
+                width: 44,
+                height: 44,
+                border: "3px solid var(--border)",
+                borderTop: "3px solid var(--orange)",
+                borderRadius: "50%",
+                animation: "spin 0.8s linear infinite",
+              }}
+            />
+            <p style={{ margin: 0, color: "#fff", fontSize: 14, fontWeight: 600, textAlign: "center", padding: "0 24px" }}>
+              {globalLoading.message || "Creando tu cuenta y enviando correo..."}
+            </p>
+          </div>
+        )}
         <div className="section-title">{authMode === "login" ? "INICIAR SESIÓN" : "REGISTRARSE"}</div>
         <div className="section-sub">{authMode === "login" ? "Ingresá a tu cuenta para comprar fotos." : "Creá tu cuenta en MotoShot GT."}</div>
   
@@ -5490,13 +5546,13 @@ const renderVendorRequest = () => {
   </div>
 )}
         <AppButton className="upload-btn"
-          disabled={globalLoading.active || (authMode === "register" && !canRegister)}
+          disabled={formBusy || (authMode === "register" && !canRegister)}
           style={{
-            opacity: globalLoading.active || (authMode === "register" && !canRegister) ? 0.5 : 1,
-            cursor: globalLoading.active || (authMode === "register" && !canRegister) ? "not-allowed" : "pointer",
+            opacity: formBusy || (authMode === "register" && !canRegister) ? 0.5 : 1,
+            cursor: formBusy || (authMode === "register" && !canRegister) ? "not-allowed" : "pointer",
           }}
           onClick={authMode === "login" ? handleLogin : handleSignUp}>
-          {globalLoading.active && authMode === "register"
+          {formBusy && authMode === "register"
             ? "ENVIANDO..."
             : authMode === "login"
             ? "INICIAR SESIÓN"
@@ -5919,7 +5975,7 @@ const renderVendorRequest = () => {
 </AnimatePresence>
   {globalLoading.active && (
           <div style={{
-            position: "fixed", inset: 0, zIndex: 1000,
+            position: "fixed", inset: 0, zIndex: 10000,
             background: "rgba(0,0,0,0.75)", backdropFilter: "blur(6px)",
             display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16,
           }}>
