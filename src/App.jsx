@@ -24,22 +24,36 @@ const VIEWS = {
   CHANGE_PASSWORD: "change_password"
 };
 
+const PENDING_EMAIL_CONFIRM_KEY = "motoshot_pending_email_confirm";
+
 const getEmailConfirmRedirectUrl = () => {
-  if (typeof window === "undefined") return "https://motoshot.pro/?email_confirmed=1";
-  const base = `${window.location.origin}${window.location.pathname || "/"}`;
-  return `${base}${base.includes("?") ? "&" : "?"}email_confirmed=1`;
+  if (typeof window === "undefined") return "https://motoshot.pro/";
+  return `${window.location.origin}${window.location.pathname || "/"}`;
+};
+
+const getAuthCallbackParams = () => {
+  if (typeof window === "undefined") {
+    return { search: new URLSearchParams(), hash: new URLSearchParams() };
+  }
+  const search = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  return { search, hash };
 };
 
 const isEmailConfirmationRedirect = () => {
-  if (typeof window === "undefined") return false;
-  const search = new URLSearchParams(window.location.search);
-  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const { search, hash } = getAuthCallbackParams();
   return (
-    search.get("email_confirmed") === "1" ||
+    search.has("code") ||
+    search.get("type") === "signup" ||
     hash.get("type") === "signup" ||
     hash.get("type") === "email" ||
-    search.get("type") === "signup"
+    search.get("email_confirmed") === "1"
   );
+};
+
+const cleanAuthParamsFromUrl = () => {
+  if (typeof window === "undefined") return;
+  window.history.replaceState({}, document.title, window.location.pathname);
 };
 
 const DISPOSABLE_EMAIL_DOMAINS = new Set([
@@ -393,6 +407,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
   const [emailAlreadyExists, setEmailAlreadyExists] = useState(false);
+  const [emailAvailability, setEmailAvailability] = useState(null);
+  const emailCheckTimerRef = useRef(null);
+  const emailCheckAbortRef = useRef(null);
   const [successMode, setSuccessMode] = useState("purchase");
   
   // ── Upload states ──────────────────────────────────────────
@@ -410,8 +427,80 @@ function WatermarkedImage({ src, photographer, purchased }) {
     setView(VIEWS.SUCCESS);
     setShowEmailConfirm(false);
     setShowUnconfirmedBanner(false);
-    window.history.replaceState({}, document.title, window.location.pathname);
+    try {
+      sessionStorage.removeItem(PENDING_EMAIL_CONFIRM_KEY);
+    } catch (_) {
+      /* ignore */
+    }
+    cleanAuthParamsFromUrl();
   }, []);
+
+  const processAuthCallbackFromUrl = useCallback(async () => {
+    const { search, hash } = getAuthCallbackParams();
+    const authError = search.get("error") || hash.get("error");
+    const errorCode = search.get("error_code") || hash.get("error_code");
+    const confirmContext = isEmailConfirmationRedirect();
+    const fromConfirmEmail =
+      confirmContext ||
+      search.get("email_confirmed") === "1" ||
+      (typeof sessionStorage !== "undefined" &&
+        sessionStorage.getItem(PENDING_EMAIL_CONFIRM_KEY) === "1");
+
+    if (!fromConfirmEmail && !authError) return false;
+
+    const { data: { session } } = await supabase.auth.getSession();
+
+    if (authError && fromConfirmEmail) {
+      cleanAuthParamsFromUrl();
+      try {
+        sessionStorage.removeItem(PENDING_EMAIL_CONFIRM_KEY);
+      } catch (_) {
+        /* ignore */
+      }
+      const msg =
+        errorCode === "otp_expired"
+          ? "Este enlace ya expiró o ya se usó. Iniciá sesión y pedí reenviar el correo de confirmación."
+          : decodeURIComponent(
+              (search.get("error_description") ||
+                hash.get("error_description") ||
+                "No se pudo confirmar el correo.")
+                .replace(/\+/g, " ")
+            );
+      setMessage(msg);
+      setAuthMode("login");
+      setShowUnconfirmedBanner(true);
+      setShowEmailConfirm(false);
+      setView(VIEWS.AUTH);
+      return true;
+    }
+
+    const fromCode = search.has("code");
+    const pendingFlag =
+      typeof sessionStorage !== "undefined" &&
+      sessionStorage.getItem(PENDING_EMAIL_CONFIRM_KEY) === "1";
+
+    if (!session?.access_token || (!fromCode && !pendingFlag && !confirmContext)) {
+      return false;
+    }
+
+    let user = session.user;
+    if (!user?.email_confirmed_at) {
+      for (let attempt = 0; attempt < 4 && !user?.email_confirmed_at; attempt += 1) {
+        const { data: { user: refreshed } } = await supabase.auth.getUser();
+        if (refreshed) user = refreshed;
+        if (!user?.email_confirmed_at && attempt < 3) {
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      }
+    }
+
+    if (user?.email_confirmed_at) {
+      showEmailConfirmedPage({ ...session, user });
+      return true;
+    }
+
+    return false;
+  }, [showEmailConfirmedPage]);
 
   const clearAuthState = useCallback(async () => {
     try {
@@ -427,9 +516,22 @@ function WatermarkedImage({ src, photographer, purchased }) {
   }, []);
 
   const syncAuthFromSupabase = useCallback(async () => {
+    const { search, hash } = getAuthCallbackParams();
+    const pendingCallback =
+      search.has("code") ||
+      hash.has("access_token") ||
+      isEmailConfirmationRedirect();
+
+    const { data: { session: existing } } = await supabase.auth.getSession();
+    if (existing?.user) {
+      setSession(existing);
+      setUser(existing.user);
+      return;
+    }
+
     const { data: { user: validatedUser }, error } = await supabase.auth.getUser();
     if (error || !validatedUser) {
-      await clearAuthState();
+      if (!pendingCallback) await clearAuthState();
       return;
     }
     const { data: { session: s } } = await supabase.auth.getSession();
@@ -441,11 +543,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
   useEffect(() => {
     const initAuth = async () => {
       try {
-        const confirmFlow = isEmailConfirmationRedirect();
-        await syncAuthFromSupabase();
-        if (confirmFlow) {
-          const { data: { session: s } } = await supabase.auth.getSession();
-          if (s?.access_token) showEmailConfirmedPage(s);
+        const handledCallback = await processAuthCallbackFromUrl();
+        if (!handledCallback) {
+          await syncAuthFromSupabase();
         }
       } finally {
         setAuthReady(true);
@@ -472,14 +572,76 @@ function WatermarkedImage({ src, photographer, purchased }) {
       }
       if (
         (event === "SIGNED_IN" || event === "INITIAL_SESSION") &&
-        isEmailConfirmationRedirect() &&
-        s?.access_token
+        s?.access_token &&
+        s?.user?.email_confirmed_at
       ) {
-        showEmailConfirmedPage(s);
+        const { search, hash } = getAuthCallbackParams();
+        const pendingFlag =
+          typeof sessionStorage !== "undefined" &&
+          sessionStorage.getItem(PENDING_EMAIL_CONFIRM_KEY) === "1";
+        const fromConfirmLink =
+          search.has("code") ||
+          hash.get("type") === "signup" ||
+          hash.get("type") === "email" ||
+          search.get("type") === "signup" ||
+          pendingFlag;
+        if (fromConfirmLink) {
+          showEmailConfirmedPage(s);
+        }
       }
     });
     return () => listener.subscription.unsubscribe();
-  }, [showEmailConfirmedPage, syncAuthFromSupabase]);
+  }, [showEmailConfirmedPage, syncAuthFromSupabase, processAuthCallbackFromUrl]);
+
+  useEffect(() => {
+    if (authMode !== "register") {
+      setEmailAvailability(null);
+      return undefined;
+    }
+
+    const email = authForm.email.trim().toLowerCase();
+    const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    if (!valid) {
+      setEmailAvailability(null);
+      setEmailAlreadyExists(false);
+      return undefined;
+    }
+
+    if (emailCheckTimerRef.current) clearTimeout(emailCheckTimerRef.current);
+    setEmailAvailability("checking");
+
+    emailCheckTimerRef.current = setTimeout(async () => {
+      emailCheckAbortRef.current?.abort();
+      const controller = new AbortController();
+      emailCheckAbortRef.current = controller;
+
+      try {
+        const res = await fetch("/api/auth/check-email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+          signal: controller.signal,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (controller.signal.aborted) return;
+
+        if (res.ok && data.exists) {
+          setEmailAvailability("taken");
+        } else {
+          setEmailAvailability("available");
+          setEmailAlreadyExists(false);
+        }
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          setEmailAvailability(null);
+        }
+      }
+    }, 450);
+
+    return () => {
+      if (emailCheckTimerRef.current) clearTimeout(emailCheckTimerRef.current);
+    };
+  }, [authForm.email, authMode]);
 
   // ── Auto-logout por inactividad (15 min) ──────────────────
 const inactivityTimer = useRef(null);
@@ -1242,6 +1404,11 @@ useEffect(() => {
       const remaining = MIN_AUTH_LOADING_MS - (Date.now() - startedAt);
       if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
 
+      try {
+        sessionStorage.setItem(PENDING_EMAIL_CONFIRM_KEY, "1");
+      } catch (_) {
+        /* ignore */
+      }
       setMessage("");
       setShowEmailConfirm(true);
     } catch (err) {
@@ -5265,7 +5432,11 @@ const renderVendorRequest = () => {
           Abrí <strong style={{ color: "var(--text)" }}>exactamente esa bandeja</strong> (no otra dirección temporal). Confirmá tu cuenta para poder ingresar.
         </p>
         <AppButton
-          onClick={() => { setShowEmailConfirm(false); setAuthMode("login"); }}
+          onClick={() => {
+            setShowEmailConfirm(false);
+            setAuthMode("login");
+            setAuthForm((prev) => ({ ...prev, password: "", confirmPassword: "" }));
+          }}
           style={{ width: "100%", maxWidth: 300, background: "var(--orange)", color: "#fff", border: "none", borderRadius: 12, padding: "14px 32px", fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 20 }}>
           Ir al inicio de sesión
         </AppButton>
@@ -5309,7 +5480,23 @@ const renderVendorRequest = () => {
     const strengthLabel = pwStrength <= 2 ? "Débil" : pwStrength <= 3 ? "Regular" : pwStrength === 4 ? "Buena" : "Fuerte";
     const passwordsMatch = authForm.password === authForm.confirmPassword;
     const nameValid = (authForm.name ?? "").trim().length > 0;
-    const canRegister = rules.every(r => r.ok) && passwordsMatch && authForm.confirmPassword && emailValid && nameValid;
+    const emailTaken = emailAvailability === "taken" || emailAlreadyExists;
+    const emailChecking = emailAvailability === "checking";
+    const emailBorderColor = !authForm.email
+      ? "var(--border)"
+      : !emailValid || emailTaken
+        ? "#ff4444"
+        : emailChecking
+          ? "var(--border)"
+          : "var(--success)";
+    const canRegister =
+      rules.every(r => r.ok) &&
+      passwordsMatch &&
+      authForm.confirmPassword &&
+      emailValid &&
+      nameValid &&
+      !emailTaken &&
+      !emailChecking;
   
     const formBusy = authSubmitting || globalLoading.active;
 
@@ -5373,14 +5560,30 @@ const renderVendorRequest = () => {
 
         <div className="form-group">
   <label className="form-label">Email</label>
-  <input type="email" className="form-input"
+  <input
+    type="email"
+    className="form-input"
     value={authForm.email}
-    onChange={e => setAuthForm({ ...authForm, email: e.target.value })}
+    onChange={(e) => {
+      setAuthForm({ ...authForm, email: e.target.value });
+      setEmailAlreadyExists(false);
+    }}
     placeholder="email@example.com"
-    style={{ borderColor: authForm.email ? (emailValid ? "var(--success)" : "#ff4444") : "var(--border)" }} />
+    style={{ borderColor: emailBorderColor }}
+  />
   {authForm.email && !emailValid && (
     <div style={{ fontSize: 12, color: "#ff4444", marginTop: 4 }}>
       Ingresá un email válido. Ejemplo: nombre@correo.com
+    </div>
+  )}
+  {authMode === "register" && emailValid && emailTaken && (
+    <div style={{ fontSize: 12, color: "#ff4444", marginTop: 4 }}>
+      Este correo ya se encuentra registrado
+    </div>
+  )}
+  {authMode === "register" && emailValid && emailChecking && (
+    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+      Verificando correo…
     </div>
   )}
 </div>
