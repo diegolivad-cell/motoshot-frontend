@@ -407,9 +407,6 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
   const [emailAlreadyExists, setEmailAlreadyExists] = useState(false);
-  const [emailAvailability, setEmailAvailability] = useState(null);
-  const emailCheckTimerRef = useRef(null);
-  const emailCheckAbortRef = useRef(null);
   const [successMode, setSuccessMode] = useState("purchase");
   
   // ── Upload states ──────────────────────────────────────────
@@ -592,90 +589,6 @@ function WatermarkedImage({ src, photographer, purchased }) {
     });
     return () => listener.subscription.unsubscribe();
   }, [showEmailConfirmedPage, syncAuthFromSupabase, processAuthCallbackFromUrl]);
-
-  useEffect(() => {
-    const mode = authMode;
-    if (mode !== "register" && mode !== "login") {
-      setEmailAvailability(null);
-      return undefined;
-    }
-
-    const email = authForm.email.trim().toLowerCase();
-    const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-    if (!valid) {
-      setEmailAvailability(null);
-      if (mode === "register") setEmailAlreadyExists(false);
-      return undefined;
-    }
-
-    if (emailCheckTimerRef.current) clearTimeout(emailCheckTimerRef.current);
-    setEmailAvailability("checking");
-
-    emailCheckTimerRef.current = setTimeout(async () => {
-      emailCheckAbortRef.current?.abort();
-      const controller = new AbortController();
-      emailCheckAbortRef.current = controller;
-
-      try {
-        const res = await fetch("/api/auth/check-email", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email }),
-          signal: controller.signal,
-        });
-        const data = await res.json().catch(() => ({}));
-        if (controller.signal.aborted) return;
-
-        if (res.ok && data.exists) {
-          setEmailAvailability("exists");
-        } else if (res.ok) {
-          setEmailAvailability("not_found");
-          if (mode === "register") setEmailAlreadyExists(false);
-        } else {
-          setEmailAvailability(null);
-        }
-      } catch (err) {
-        if (err.name !== "AbortError") {
-          setEmailAvailability(null);
-        }
-      }
-    }, 450);
-
-    return () => {
-      if (emailCheckTimerRef.current) clearTimeout(emailCheckTimerRef.current);
-    };
-  }, [authForm.email, authMode]);
-
-  // ── Auto-logout por inactividad (15 min) ──────────────────
-const inactivityTimer = useRef(null);
-
-const resetInactivityTimer = useCallback(() => {
-  if (!isLoggedIn) return;
-  if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
-  inactivityTimer.current = setTimeout(() => {
-    supabase.auth.signOut();
-    setUser(null); setProfile(null); setSession(null);
-    setActiveTab("feed");
-    setView(VIEWS.PHOTOGRAPHERS);
-    showToast("Sesión cerrada por inactividad.");
-  }, 15 * 60 * 1000); // 15 minutos
-}, [isLoggedIn]);
-
-useEffect(() => {
-  if (!isLoggedIn) {
-    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
-    return;
-  }
-  const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
-  events.forEach(e => window.addEventListener(e, resetInactivityTimer, { passive: true }));
-  resetInactivityTimer(); // iniciar al loguearse
-
-  return () => {
-    events.forEach(e => window.removeEventListener(e, resetInactivityTimer));
-    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
-  };
-}, [isLoggedIn, resetInactivityTimer]);
-
 
 // ── Fetch photos ───────────────────────────────────────────
 const fetchPhotos = async () => {
@@ -5496,27 +5409,17 @@ const renderVendorRequest = () => {
     const strengthLabel = pwStrength <= 2 ? "Débil" : pwStrength <= 3 ? "Regular" : pwStrength === 4 ? "Buena" : "Fuerte";
     const passwordsMatch = authForm.password === authForm.confirmPassword;
     const nameValid = (authForm.name ?? "").trim().length > 0;
-    const emailTaken = authMode === "register" && (emailAvailability === "exists" || emailAlreadyExists);
-    const emailNotRegistered = authMode === "login" && emailAvailability === "not_found";
-    const emailChecking = emailAvailability === "checking";
     const emailBorderColor = !authForm.email
       ? "var(--border)"
-      : !emailValid || emailTaken || emailNotRegistered
-        ? "#ff4444"
-        : emailChecking
-          ? "var(--border)"
-          : emailValid
-            ? "var(--success)"
-            : "var(--border)";
+      : emailValid
+        ? "var(--success)"
+        : "#ff4444";
     const canRegister =
       rules.every(r => r.ok) &&
       passwordsMatch &&
       authForm.confirmPassword &&
       emailValid &&
-      nameValid &&
-      !emailTaken &&
-      !emailChecking;
-    const canLogin = emailValid && !emailNotRegistered && !emailChecking;
+      nameValid;
   
     const formBusy = authSubmitting || globalLoading.active;
 
@@ -5594,21 +5497,6 @@ const renderVendorRequest = () => {
   {authForm.email && !emailValid && (
     <div style={{ fontSize: 12, color: "#ff4444", marginTop: 4 }}>
       Ingresá un email válido. Ejemplo: nombre@correo.com
-    </div>
-  )}
-  {authMode === "register" && emailValid && emailTaken && (
-    <div style={{ fontSize: 12, color: "#ff4444", marginTop: 4 }}>
-      Este correo ya se encuentra registrado
-    </div>
-  )}
-  {authMode === "login" && emailValid && emailNotRegistered && (
-    <div style={{ fontSize: 12, color: "#ff4444", marginTop: 4 }}>
-      Este correo no se encuentra registrado
-    </div>
-  )}
-  {(authMode === "register" || authMode === "login") && emailValid && emailChecking && (
-    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
-      Verificando correo…
     </div>
   )}
 </div>
@@ -5772,10 +5660,10 @@ const renderVendorRequest = () => {
   </div>
 )}
         <AppButton className="upload-btn"
-          disabled={formBusy || (authMode === "register" && !canRegister) || (authMode === "login" && !canLogin)}
+          disabled={formBusy || (authMode === "register" && !canRegister)}
           style={{
-            opacity: formBusy || (authMode === "register" && !canRegister) || (authMode === "login" && !canLogin) ? 0.5 : 1,
-            cursor: formBusy || (authMode === "register" && !canRegister) || (authMode === "login" && !canLogin) ? "not-allowed" : "pointer",
+            opacity: formBusy || (authMode === "register" && !canRegister) ? 0.5 : 1,
+            cursor: formBusy || (authMode === "register" && !canRegister) ? "not-allowed" : "pointer",
           }}
           onClick={authMode === "login" ? handleLogin : handleSignUp}>
           {formBusy && authMode === "register"
