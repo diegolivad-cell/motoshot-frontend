@@ -379,9 +379,14 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [globalLoading, setGlobalLoading] = useState({ active: false, message: "" });
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const authSubmittingRef = useRef(false);
+  const toastTimerRef = useRef(null);
   const showToast = (msg) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setMessage(msg);
-    setTimeout(() => setMessage(""), 3000);
+    toastTimerRef.current = setTimeout(() => {
+      setMessage("");
+      toastTimerRef.current = null;
+    }, 3000);
   };
   const [selectedTag, setSelectedTag] = useState(null);
   const [heroScrollY, setHeroScrollY] = useState(0);
@@ -643,7 +648,7 @@ const fetchPurchases = async () => {
     setPurchases(data.purchases || []);
   } catch (err) {
     console.error(err);
-    setMessage("No se pudieron cargar tus compras.");
+    showToast("No se pudieron cargar tus compras.");
   } finally {
     setPurchasesLoading(false);
   }
@@ -677,7 +682,7 @@ const fetchVendorDashboard = async () => {
     setVendorStats(data);
   } catch (err) {
     console.error(err);
-    setMessage("No se pudo cargar el dashboard de vendedor.");
+    showToast("No se pudo cargar el dashboard de vendedor.");
   } finally {
     setVendorStatsLoading(false);
   }
@@ -6068,7 +6073,13 @@ const renderVendorRequest = () => {
     transition={{ type: "spring", stiffness: 400, damping: 30 }}
     style={(() => {
       const isSuccess = message.startsWith("Listo:") || message.includes("actualiz") || message.includes("activa") || message.includes("guardad") || message.includes("exitosa");
-      const isError = message.toLowerCase().includes("invalid") || message.toLowerCase().includes("error") || message.toLowerCase().includes("incorrect") || message.toLowerCase().includes("fallid");
+      const isError =
+        message.toLowerCase().includes("invalid") ||
+        message.toLowerCase().includes("error") ||
+        message.toLowerCase().includes("incorrect") ||
+        message.toLowerCase().includes("fallid") ||
+        message.toLowerCase().includes("no se pudo") ||
+        message.toLowerCase().includes("no se pudieron");
       const toastColor = isSuccess ? "var(--success)" : isError ? "#ff4444" : "var(--orange)";
       const toastBg = isSuccess ? "rgba(61,220,132,0.12)" : isError ? "rgba(255,68,68,0.12)" : "rgba(255,107,0,0.12)";
       return {
