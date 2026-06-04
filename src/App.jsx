@@ -4377,7 +4377,14 @@ const renderVendorRequest = () => {
 </div>
               <div className="form-group">
                 <label className="form-label">Bio</label>
-                <input className="form-input" value={editForm.bio} onChange={e => setEditForm({ ...editForm, bio: e.target.value })} />
+                <textarea
+                  className="form-input"
+                  rows={4}
+                  value={editForm.bio}
+                  onChange={e => setEditForm({ ...editForm, bio: e.target.value })}
+                  placeholder="Contá sobre tu trabajo, eventos, estilo..."
+                  style={{ resize: "vertical", lineHeight: 1.6, minHeight: 96 }}
+                />
               </div>
               <div className="form-group">
                 <label className="form-label">Teléfono</label>
