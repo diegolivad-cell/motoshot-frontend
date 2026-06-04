@@ -216,10 +216,6 @@ const HERO_POSTER_URL =
 const HERO_VIDEO_URL =
   "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/14022738_720_1280_60fps.mp4";
 
-/** APK/Capacitor: la WebView inyecta window.Capacitor (más fiable que userAgent). */
-const isCapacitorNativeApp = () =>
-  typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.() === true;
-
 function buildNavCurvePath(activeIndex, total, w = 400) {
   if (total <= 0) return `M0 0 H${w} V72 H0 Z`;
   const tabW = w / total;
@@ -403,6 +399,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [selectedTag, setSelectedTag] = useState(null);
   const [heroScrollY, setHeroScrollY] = useState(0);
   const [heroVideoReady, setHeroVideoReady] = useState(false);
+  const heroVideoRef = useRef(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMode, setSearchMode] = useState(false);
   const [unifiedSearch, setUnifiedSearch] = useState({ photographers: [], photos: [] });
@@ -1171,6 +1168,48 @@ useEffect(() => {
   window.addEventListener("scroll", onScroll, { passive: true });
   return () => window.removeEventListener("scroll", onScroll);
 }, []);
+
+  useEffect(() => {
+    if (view !== VIEWS.PHOTOGRAPHERS) return;
+    setHeroVideoReady(false);
+
+    let el = null;
+    let rafId = 0;
+    let retryPlay = null;
+    let stopRetry = null;
+    const markReady = () => setHeroVideoReady(true);
+
+    const bind = () => {
+      el = heroVideoRef.current;
+      if (!el) {
+        rafId = requestAnimationFrame(bind);
+        return;
+      }
+      el.addEventListener("loadeddata", markReady);
+      el.addEventListener("canplay", markReady);
+      el.addEventListener("playing", markReady);
+      const tryPlay = () => el.play().catch(() => {});
+      tryPlay();
+      retryPlay = setInterval(tryPlay, 400);
+      stopRetry = setTimeout(() => {
+        if (retryPlay) clearInterval(retryPlay);
+      }, 5000);
+    };
+
+    bind();
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      if (retryPlay) clearInterval(retryPlay);
+      if (stopRetry) clearTimeout(stopRetry);
+      if (el) {
+        el.removeEventListener("loadeddata", markReady);
+        el.removeEventListener("canplay", markReady);
+        el.removeEventListener("playing", markReady);
+      }
+    };
+  }, [view]);
+
   // ── Fetch profile ──────────────────────────────────────────
   useEffect(() => {
     if (!authReady) return;
@@ -2212,56 +2251,57 @@ const openPhotographerFromPhoto = (photo, e) => {
 const renderPhotographers = () => (
   <div style={{ paddingBottom: 100 }}>
     {/* Hero */}
-{/* Hero: banner estático siempre visible; video solo en web (no en APK) */}
+{/* Hero: STATICBANNER tapa el play nativo hasta que el video reproduce (web + APK) */}
 <div style={{ position: "relative", width: "100%", height: 320, overflow: "hidden", background: "#0a0a0a" }}>
+  <video
+    ref={heroVideoRef}
+    className="hero-video-bg"
+    autoPlay
+    muted
+    loop
+    playsInline
+    preload="auto"
+    disablePictureInPicture
+    controls={false}
+    onLoadedData={() => setHeroVideoReady(true)}
+    onCanPlay={() => setHeroVideoReady(true)}
+    onPlaying={() => setHeroVideoReady(true)}
+    style={{
+      position: "absolute",
+      inset: 0,
+      width: "100%",
+      height: "130%",
+      objectFit: "cover",
+      top: "-15%",
+      transform: `translateY(${heroScrollY * 0.5}px)`,
+      willChange: "transform",
+      zIndex: 0,
+      opacity: heroVideoReady ? 1 : 0,
+      transition: "opacity 0.45s ease",
+      pointerEvents: "none",
+    }}
+    src={HERO_VIDEO_URL}
+  />
   <img
     src={HERO_POSTER_URL}
     alt=""
     decoding="async"
     fetchPriority="high"
+    aria-hidden
     style={{
       position: "absolute",
       inset: 0,
       width: "100%",
       height: "100%",
       objectFit: "cover",
-      zIndex: 0,
-      opacity: !isCapacitorNativeApp() && heroVideoReady ? 0 : 1,
+      zIndex: 1,
+      opacity: heroVideoReady ? 0 : 1,
       transition: "opacity 0.45s ease",
       pointerEvents: "none",
     }}
   />
-  {!isCapacitorNativeApp() && (
-    <video
-      className="hero-video-bg"
-      autoPlay
-      muted
-      loop
-      playsInline
-      preload="auto"
-      disablePictureInPicture
-      controls={false}
-      onLoadedData={() => setHeroVideoReady(true)}
-      onCanPlay={() => setHeroVideoReady(true)}
-      style={{
-        position: "absolute",
-        inset: 0,
-        width: "100%",
-        height: "130%",
-        objectFit: "cover",
-        top: "-15%",
-        transform: `translateY(${heroScrollY * 0.5}px)`,
-        willChange: "transform",
-        zIndex: 1,
-        opacity: heroVideoReady ? 1 : 0,
-        transition: "opacity 0.45s ease",
-        pointerEvents: "none",
-      }}
-      src={HERO_VIDEO_URL}
-    />
-  )}
-<div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.65) 100%)" }} />
-<div style={{ position: "relative", zIndex: 2, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 20px", textAlign: "center" }}>
+<div style={{ position: "absolute", inset: 0, zIndex: 2, background: "linear-gradient(180deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.65) 100%)" }} />
+<div style={{ position: "relative", zIndex: 3, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 20px", textAlign: "center" }}>
     
     <motion.div
       initial={{ opacity: 0, y: 30 }}
