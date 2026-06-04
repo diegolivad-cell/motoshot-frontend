@@ -2759,9 +2759,11 @@ const renderPhotographers = () => (
               <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="folder" size={12} /> {ph.albums_count} álbum{ph.albums_count !== 1 ? "es" : ""}</span>
             )}
           </div>
-          {ph.subscription_price
-            ? <div style={{ background: "var(--orange)", color: "#fff", fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 20 }}>Sub Q{ph.subscription_price}/mes</div>
-            : <div style={{ color: "var(--success)", fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 20, border: "1px solid var(--success)" }}>Fotos sueltas</div>}
+          {ph.subscription_price ? (
+            <div style={{ background: "var(--orange)", color: "#fff", fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 20 }}>
+              Sub Q{ph.subscription_price}/mes
+            </div>
+          ) : null}
         </div>
       </div>
     </motion.div>
