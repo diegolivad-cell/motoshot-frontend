@@ -2190,7 +2190,7 @@ const renderPhotographers = () => (
               </div>
               <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{sub.photographer.name}</div>
               <div style={{ fontSize: 11, color: "var(--orange)" }}>{sub.photographer.handle}</div>
-              <div style={{ fontSize: 10, color: "var(--success)", marginTop: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}><AppIcon name="check" size={12} color="var(--success)" /> Suscrito</div>
+              <div style={{ fontSize: 10, color: "var(--orange)", marginTop: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 4, fontWeight: 700, letterSpacing: 0.4 }}><AppIcon name="star" size={10} color="var(--orange)" /> Suscrito</div>
             </div>
           ))}
         </div>
@@ -2518,23 +2518,27 @@ const renderPhotographerProfile = () => {
         </div>
 {selectedPhotographer?.subscription_price && user?.id !== selectedPhotographer?.user_id && (
   subscribed ? (
-    <div
+    <span
+      className="subscription-badge"
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 6,
-        padding: "8px 14px",
-        borderRadius: 10,
-        border: "1px solid var(--success)",
-        background: "rgba(61,220,132,0.1)",
-        color: "var(--success)",
-        fontSize: 12,
+        gap: 5,
+        padding: "6px 12px",
+        borderRadius: 999,
+        border: "1px solid rgba(255,107,0,0.35)",
+        background: "linear-gradient(135deg, rgba(255,107,0,0.14) 0%, rgba(255,107,0,0.04) 100%)",
+        color: "var(--orange)",
+        fontSize: 11,
         fontWeight: 700,
+        letterSpacing: 0.8,
+        textTransform: "uppercase",
         whiteSpace: "nowrap",
+        boxShadow: "0 0 0 1px rgba(255,107,0,0.06)",
       }}
     >
-      <AppIcon name="check" size={14} color="var(--success)" /> Suscrito
-    </div>
+      <AppIcon name="star" size={11} color="var(--orange)" /> Suscrito
+    </span>
   ) : (
     <AppButton
       className="nav-btn primary"
