@@ -366,10 +366,12 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const isLoggedIn = authReady && Boolean(user && session?.access_token);
   const [showPassword, setShowPassword] = useState(false);
   const [showSubscribeModal, setShowSubscribeModal] = useState(false);
+  const [subPayLoading, setSubPayLoading] = useState(false);
   const [albums, setAlbums] = useState([]);
   const [selectedAlbum, setSelectedAlbum] = useState(null);
   const [albumForm, setAlbumForm] = useState({ name: "", event_date: "" });
   const [showAlbumModal, setShowAlbumModal] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState(null);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedPhotos, setSelectedPhotos] = useState(new Set());
   const [profileTab, setProfileTab] = useState("medios");
@@ -649,9 +651,22 @@ const fetchAllSubscriptions = async () => {
   }
 };
 
+const openCancelSubscriptionConfirm = (subId) => {
+  setConfirmDialog({
+    title: "CANCELAR SUSCRIPCIÓN",
+    message: "¿Cancelar esta suscripción? Seguirás con acceso hasta la fecha de vencimiento.",
+    confirmLabel: "SÍ, CANCELAR",
+    cancelLabel: "NO",
+    destructive: true,
+    onConfirm: () => {
+      setConfirmDialog(null);
+      handleCancelSubscription(subId);
+    },
+  });
+};
+
 const handleCancelSubscription = async (subId) => {
   if (!session?.access_token) return;
-  if (!confirm("¿Cancelar esta suscripción? Seguirás con acceso hasta la fecha de vencimiento.")) return;
   const res = await fetch(`/api/auth/subscriptions/${subId}/cancel`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${session.access_token}` },
@@ -666,20 +681,42 @@ const handleCancelSubscription = async (subId) => {
   }
 };
 
-const handleReactivateSubscription = async (subId) => {
-  if (!session?.access_token) return;
-  const res = await fetch(`/api/auth/subscriptions/${subId}/reactivate`, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${session.access_token}` },
-  });
-  const data = await res.json().catch(() => ({}));
-  if (res.ok) {
-    showToast("Suscripción reactivada.");
-    await fetchAllSubscriptions();
-    await refreshMySubscriptions();
-  } else {
-    showToast(data.error || "No se pudo reactivar la suscripción.");
+const handleSubscriptionPayment = async (photographerId, subscriptionId = null) => {
+  if (!session?.access_token || !photographerId) return;
+  setSubPayLoading(true);
+  try {
+    const origin = window.location.origin;
+    const returnParams = new URLSearchParams({
+      paypal_return: "true",
+      subscription: "1",
+      photographer_id: photographerId,
+    });
+    if (subscriptionId) returnParams.set("subscription_id", subscriptionId);
+    const res = await fetch("/api/payments/create-subscription-order", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        photographer_id: photographerId,
+        subscription_id: subscriptionId || undefined,
+        return_url: `${origin}/?${returnParams.toString()}`,
+        cancel_url: `${origin}/?paypal_cancel=true&subscription=1`,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "No se pudo iniciar el pago");
+    window.location.href = data.approve_url;
+  } catch (err) {
+    setSubPayLoading(false);
+    showToast(err.message || "No se pudo iniciar el pago.");
   }
+};
+
+const handleReactivateSubscription = (sub) => {
+  if (!sub?.photographer?.id) return;
+  handleSubscriptionPayment(sub.photographer.id, sub.id);
 };
 
 const fetchAnnouncements = async () => {
@@ -1244,6 +1281,31 @@ useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const orderId = params.get("order_id") || params.get("token");
     const photoId = params.get("photo_id");
+    const photographerId = params.get("photographer_id");
+    const isSubscription = params.get("subscription") === "1";
+
+    if (params.get("paypal_return") && orderId && isSubscription && photographerId && session) {
+      setGlobalLoading({ active: true, message: "Confirmando suscripción..." });
+      fetch("/api/payments/capture-subscription-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({ order_id: orderId, photographer_id: photographerId }),
+      })
+        .then(async (r) => {
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(data.error || "Error");
+          await refreshMySubscriptions();
+          await fetchAllSubscriptions();
+          showToast("Suscripción activa.");
+          setShowSubscribeModal(false);
+          window.history.replaceState({}, document.title, window.location.pathname);
+        })
+        .catch((err) => {
+          showToast(err.message || "No se pudo completar el pago. Intentá de nuevo.");
+        })
+        .finally(() => setGlobalLoading({ active: false, message: "" }));
+      return;
+    }
 
     if (params.get("paypal_return") && orderId && photoId && session) {
       setPayStep(2);
@@ -1261,6 +1323,11 @@ useEffect(() => {
           window.history.replaceState({}, document.title, window.location.pathname);
         })
         .catch(() => { showToast("No se pudo completar el pago. Intentá de nuevo."); setPayStep(1); });
+    }
+    if (params.get("paypal_cancel") && isSubscription) {
+      showToast("Pago cancelado.");
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return;
     }
     if (params.get("paypal_cancel")) {
       setPayStep(0);
@@ -3796,7 +3863,7 @@ const renderMySubscriptionsSection = () => (
               </div>
             </div>
             <AppButton
-              onClick={() => handleCancelSubscription(sub.id)}
+              onClick={() => openCancelSubscriptionConfirm(sub.id)}
               style={{
                 background: "transparent",
                 border: "1px solid rgba(255,68,68,0.45)",
@@ -3846,7 +3913,8 @@ const renderMySubscriptionsSection = () => (
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
                   <AppButton
-                    onClick={() => handleReactivateSubscription(sub.id)}
+                    onClick={() => handleReactivateSubscription(sub)}
+                    disabled={subPayLoading}
                     style={{
                       background: "rgba(255,107,0,0.12)",
                       border: "1px solid rgba(255,107,0,0.45)",
@@ -5936,33 +6004,22 @@ const renderVendorRequest = () => {
           )}
           <AppButton
             className="pay-btn"
-            onClick={async () => {
+            disabled={subPayLoading || isSubscribedToPhotographer(selectedPhotographer?.id)}
+            onClick={() => {
               if (!user) { setShowSubscribeModal(false); setView(VIEWS.AUTH); return; }
               if (isSubscribedToPhotographer(selectedPhotographer?.id)) {
                 setShowSubscribeModal(false);
                 showToast("Ya estás suscrito a este fotógrafo.");
                 return;
               }
-              const res = await fetch(`/api/auth/subscribe/${selectedPhotographer?.id}`, {
-                method: "POST",
-                headers: { Authorization: `Bearer ${session?.access_token}` },
-              });
-              const data = await res.json();
-              setShowSubscribeModal(false);
-              if (res.ok) {
-                showToast("Suscripción activa.");
-                await refreshMySubscriptions();
-              } else {
-                showToast(data.error || "No se pudo suscribir.");
-                if (String(data.error || "").includes("Ya estás suscrito")) {
-                  await refreshMySubscriptions();
-                }
-              }
+              handleSubscriptionPayment(selectedPhotographer.id);
             }}
           >
-            {isSubscribedToPhotographer(selectedPhotographer?.id)
-              ? "SUSCRITO"
-              : `SUSCRIBIRME · Q${selectedPhotographer?.subscription_price}/MES`}
+            {subPayLoading
+              ? "REDIRIGIENDO A PAYPAL..."
+              : isSubscribedToPhotographer(selectedPhotographer?.id)
+                ? "SUSCRITO"
+                : `SUSCRIBIRME · Q${selectedPhotographer?.subscription_price}/MES`}
           </AppButton>
           <div style={{ marginTop: 14, fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
             <div>· Tu suscripción se renovará mensualmente hasta que la canceles.</div>
@@ -6036,6 +6093,62 @@ const renderVendorRequest = () => {
           </AppButton>
           <AppButton className="close-btn-secondary" style={{ marginTop: 10 }} onClick={() => setShowAlbumModal(false)}>
             Cancelar
+          </AppButton>
+        </div>
+      </motion.div>
+    </motion.div>
+  )}
+</AnimatePresence>
+
+<AnimatePresence>
+  {confirmDialog && (
+    <motion.div
+      className="modal-backdrop"
+      style={{ zIndex: 250 }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.2 }}
+      onClick={() => setConfirmDialog(null)}
+    >
+      <motion.div
+        className="modal"
+        initial={{ opacity: 0, scale: 0.92, y: 40 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.92, y: 40 }}
+        transition={{ type: "spring", stiffness: 380, damping: 28 }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="modal-header">
+          <div className="modal-title">{confirmDialog.title}</div>
+          <AppButton className="modal-close" onClick={() => setConfirmDialog(null)} aria-label="Cerrar">
+            <AppIcon name="x" size={18} />
+          </AppButton>
+        </div>
+        <div className="modal-body">
+          <p style={{ color: "var(--text)", fontSize: 15, lineHeight: 1.5, margin: "0 0 20px" }}>
+            {confirmDialog.message}
+          </p>
+          <AppButton
+            className={confirmDialog.destructive ? undefined : "pay-btn"}
+            onClick={confirmDialog.onConfirm}
+            style={confirmDialog.destructive ? {
+              width: "100%",
+              padding: 14,
+              background: "transparent",
+              border: "1.5px solid rgba(255,68,68,0.55)",
+              borderRadius: 10,
+              color: "#ff6b6b",
+              fontFamily: "'Bebas Neue', sans-serif",
+              fontSize: 18,
+              letterSpacing: 1,
+              cursor: "pointer",
+            } : undefined}
+          >
+            {confirmDialog.confirmLabel}
+          </AppButton>
+          <AppButton className="close-btn-secondary" style={{ marginTop: 10 }} onClick={() => setConfirmDialog(null)}>
+            {confirmDialog.cancelLabel}
           </AppButton>
         </div>
       </motion.div>
