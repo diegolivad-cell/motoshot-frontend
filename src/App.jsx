@@ -3813,6 +3813,17 @@ const renderCeoAccount = () => {
   );
 };
 
+const subscriptionsListScrollStyle = {
+  maxHeight: 300,
+  overflowY: "auto",
+  overflowX: "hidden",
+  WebkitOverflowScrolling: "touch",
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+  paddingRight: 4,
+};
+
 const renderMySubscriptionsSection = () => (
   <div style={{ marginBottom: 28, padding: 20, borderRadius: 14, background: "var(--surface)", border: "1px solid var(--border)" }}>
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 12 }}>
@@ -3833,10 +3844,11 @@ const renderMySubscriptionsSection = () => (
     ) : (
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {allSubscriptions.filter((s) => s.status === "active").length > 0 && (
+          <>
           <div style={{ fontSize: 11, fontWeight: 700, color: "var(--orange)", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 2 }}>
             Activas
           </div>
-        )}
+          <div style={subscriptionsListScrollStyle}>
         {allSubscriptions.filter((s) => s.status === "active").map((sub) => (
           <div
             key={sub.id}
@@ -3879,12 +3891,16 @@ const renderMySubscriptionsSection = () => (
             </AppButton>
           </div>
         ))}
+          </div>
+          </>
+        )}
 
         {allSubscriptions.filter((s) => s.status !== "active").length > 0 && (
           <>
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.8, marginTop: 8, marginBottom: 2 }}>
               Inactivas
             </div>
+            <div style={subscriptionsListScrollStyle}>
             {allSubscriptions.filter((s) => s.status !== "active").map((sub) => (
               <div
                 key={sub.id}
@@ -3949,6 +3965,7 @@ const renderMySubscriptionsSection = () => (
                 </div>
               </div>
             ))}
+            </div>
           </>
         )}
       </div>
