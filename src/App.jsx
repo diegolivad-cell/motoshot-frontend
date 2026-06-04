@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
 
+const API = import.meta.env.VITE_API_URL || "";
 const VIEWS = {
   PHOTOGRAPHERS: "photographers",
   PHOTOGRAPHER_PROFILE: "photographer_profile",
@@ -1185,10 +1186,11 @@ useEffect(() => {
           setPayStep(0);
           window.history.replaceState({}, document.title, window.location.pathname);
         })
-        .catch(() => { setMessage("No se pudo completar el pago. Intentá de nuevo."); setPayStep(1); });
+        .catch(() => { showToast("No se pudo completar el pago. Intentá de nuevo."); setPayStep(1); });
     }
     if (params.get("paypal_cancel")) {
-      setMessage("Pago cancelado.");
+      setPayStep(0);
+      showToast("Pago cancelado.");
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, [session]);
@@ -1226,7 +1228,7 @@ useEffect(() => {
       const data = await res.json();
       window.location.href = data.approve_url;
     } catch (err) {
-      console.error(err); setPayStep(1); setMessage("No se pudo iniciar el pago.");
+      console.error(err); setPayStep(1); showToast("No se pudo iniciar el pago.");
     }
   };
 
