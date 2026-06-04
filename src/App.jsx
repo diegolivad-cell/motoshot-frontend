@@ -649,6 +649,39 @@ const fetchAllSubscriptions = async () => {
   }
 };
 
+const handleCancelSubscription = async (subId) => {
+  if (!session?.access_token) return;
+  if (!confirm("¿Cancelar esta suscripción? Seguirás con acceso hasta la fecha de vencimiento.")) return;
+  const res = await fetch(`/api/auth/subscriptions/${subId}/cancel`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok) {
+    showToast("Suscripción cancelada.");
+    await fetchAllSubscriptions();
+    await refreshMySubscriptions();
+  } else {
+    showToast(data.error || "No se pudo cancelar la suscripción.");
+  }
+};
+
+const handleReactivateSubscription = async (subId) => {
+  if (!session?.access_token) return;
+  const res = await fetch(`/api/auth/subscriptions/${subId}/reactivate`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok) {
+    showToast("Suscripción reactivada.");
+    await fetchAllSubscriptions();
+    await refreshMySubscriptions();
+  } else {
+    showToast(data.error || "No se pudo reactivar la suscripción.");
+  }
+};
+
 const fetchAnnouncements = async () => {
   const res = await fetch("/api/auth/announcements");
   const data = await res.json();
@@ -1067,6 +1100,24 @@ const exportPayrollCsv = () => {
     if (view !== VIEWS.PHOTOGRAPHER_PROFILE || !isLoggedIn || !session) return;
     refreshMySubscriptions();
   }, [view, isLoggedIn, session, selectedPhotographer?.id, refreshMySubscriptions]);
+
+  useEffect(() => {
+    if (!authReady) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("manage_subscriptions") === "1") {
+      if (isLoggedIn) {
+        setActiveTab("profile");
+        setView(VIEWS.VENDOR_REQUEST);
+        fetchAllSubscriptions();
+      }
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, [authReady, isLoggedIn]);
+
+  useEffect(() => {
+    if (view !== VIEWS.VENDOR_REQUEST || !isLoggedIn || !session) return;
+    fetchAllSubscriptions();
+  }, [view, isLoggedIn, session]);
 
 useEffect(() => {
   const onScroll = () => setHeroScrollY(window.scrollY);
@@ -3695,6 +3746,148 @@ const renderCeoAccount = () => {
   );
 };
 
+const renderMySubscriptionsSection = () => (
+  <div style={{ marginBottom: 28, padding: 20, borderRadius: 14, background: "var(--surface)", border: "1px solid var(--border)" }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 12 }}>
+      <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1, display: "flex", alignItems: "center", gap: 8 }}>
+        <AppIcon name="star" size={18} color="var(--orange)" /> MIS SUSCRIPCIONES
+      </div>
+      <AppButton className="nav-btn" style={{ fontSize: 11, padding: "6px 10px" }} onClick={() => fetchAllSubscriptions()}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="refresh" size={12} /> Actualizar</span>
+      </AppButton>
+    </div>
+
+    {subsLoading ? (
+      <div className="empty" style={{ padding: "24px 0" }}><LoaderIcon size={36} /><div style={{ fontSize: 13, color: "var(--muted)" }}>Cargando...</div></div>
+    ) : allSubscriptions.length === 0 ? (
+      <p style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.6, margin: 0 }}>
+        No tenés suscripciones activas. Suscribite a un fotógrafo desde su perfil para acceder a contenido exclusivo.
+      </p>
+    ) : (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {allSubscriptions.filter((s) => s.status === "active").length > 0 && (
+          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--orange)", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 2 }}>
+            Activas
+          </div>
+        )}
+        {allSubscriptions.filter((s) => s.status === "active").map((sub) => (
+          <div
+            key={sub.id}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: 14,
+              borderRadius: 12,
+              background: "linear-gradient(135deg, rgba(255,107,0,0.1) 0%, rgba(255,107,0,0.03) 100%)",
+              border: "1px solid rgba(255,107,0,0.35)",
+            }}
+          >
+            <div style={{ width: 44, height: 44, borderRadius: "50%", overflow: "hidden", background: "var(--card)", flexShrink: 0, border: "2px solid var(--orange)" }}>
+              {sub.photographer?.avatar_url
+                ? <img src={sub.photographer.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}><AvatarPlaceholder size={20} /></div>}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{sub.photographer?.name}</div>
+              <div style={{ fontSize: 12, color: "var(--orange)" }}>{sub.photographer?.handle}</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                Q{sub.price}/mes · Vence: {new Date(sub.expires_at).toLocaleDateString("es-GT")}
+              </div>
+            </div>
+            <AppButton
+              onClick={() => handleCancelSubscription(sub.id)}
+              style={{
+                background: "transparent",
+                border: "1px solid rgba(255,68,68,0.45)",
+                color: "#ff6b6b",
+                borderRadius: 8,
+                padding: "6px 10px",
+                fontSize: 11,
+                fontWeight: 700,
+                flexShrink: 0,
+              }}
+            >
+              Cancelar
+            </AppButton>
+          </div>
+        ))}
+
+        {allSubscriptions.filter((s) => s.status !== "active").length > 0 && (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.8, marginTop: 8, marginBottom: 2 }}>
+              Inactivas
+            </div>
+            {allSubscriptions.filter((s) => s.status !== "active").map((sub) => (
+              <div
+                key={sub.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  padding: 14,
+                  borderRadius: 12,
+                  background: "var(--card)",
+                  border: "1px solid var(--border)",
+                  opacity: 0.92,
+                }}
+              >
+                <div style={{ width: 44, height: 44, borderRadius: "50%", overflow: "hidden", background: "var(--surface)", flexShrink: 0 }}>
+                  {sub.photographer?.avatar_url
+                    ? <img src={sub.photographer.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}><AvatarPlaceholder size={20} /></div>}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{sub.photographer?.name}</div>
+                  <div style={{ fontSize: 12, color: "var(--muted)" }}>{sub.photographer?.handle}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                    {sub.status === "cancelled" ? "Cancelada" : "Vencida"} · {new Date(sub.expires_at).toLocaleDateString("es-GT")}
+                  </div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+                  <AppButton
+                    onClick={() => handleReactivateSubscription(sub.id)}
+                    style={{
+                      background: "rgba(255,107,0,0.12)",
+                      border: "1px solid rgba(255,107,0,0.45)",
+                      color: "var(--orange)",
+                      borderRadius: 8,
+                      padding: "6px 10px",
+                      fontSize: 11,
+                      fontWeight: 700,
+                    }}
+                  >
+                    Reactivar
+                  </AppButton>
+                  <AppButton
+                    onClick={() => {
+                      if (sub.photographer?.id) {
+                        fetchPhotographerProfile(sub.photographer.id);
+                        setView(VIEWS.PHOTOGRAPHER_PROFILE);
+                      }
+                    }}
+                    style={{
+                      background: "transparent",
+                      border: "1px solid var(--border)",
+                      color: "var(--muted)",
+                      borderRadius: 8,
+                      padding: "6px 10px",
+                      fontSize: 11,
+                      fontWeight: 700,
+                    }}
+                  >
+                    Ver perfil
+                  </AppButton>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    )}
+  </div>
+);
+
 const renderVendorRequest = () => {
   // ── No logueado ────────────────────────────────────────────────
   if (!user) {
@@ -4120,96 +4313,12 @@ const renderVendorRequest = () => {
     if (res.ok) {
       setProfile(prev => ({ ...prev, subscription_price: data.photographer.subscription_price, subscription_benefits: data.photographer.subscription_benefits }));
       showToast("Listo: Configuración de suscripción guardada.");
-    } else setMessage(data.error);
+    } else showToast(data.error || "No se pudo guardar.");
   }}>
     Guardar configuración
   </AppButton>
 
-  {/* Mis suscripciones activas e historial */}
-  <div style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-      <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 16, letterSpacing: 1 }}>MIS SUSCRIPCIONES</div>
-      <AppButton className="nav-btn" style={{ fontSize: 12 }} onClick={() => fetchAllSubscriptions()}><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="refresh" size={14} /> Cargar</span></AppButton>
-    </div>
-
-    {subsLoading ? (
-      <div className="empty"><LoaderIcon size={44} /><div>Cargando...</div></div>
-    ) : allSubscriptions.length === 0 ? (
-      <div style={{ fontSize: 13, color: "var(--muted)" }}>No tenés suscripciones registradas.</div>
-    ) : (
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {allSubscriptions.filter(s => s.status === "active").length > 0 && (
-          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--success)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}><AppIcon name="check" size={12} color="var(--success)" /> Activas</div>
-        )}
-        {allSubscriptions.filter(s => s.status === "active").map(sub => (
-          <div key={sub.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: 14, borderRadius: 12, background: "rgba(61,220,132,0.06)", border: "1px solid rgba(61,220,132,0.25)" }}>
-            <div style={{ width: 44, height: 44, borderRadius: "50%", overflow: "hidden", background: "var(--card)", flexShrink: 0 }}>
-              {sub.photographer?.avatar_url
-                ? <img src={sub.photographer.avatar_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}><AvatarPlaceholder size={20} /></div>}
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>{sub.photographer?.name}</div>
-              <div style={{ fontSize: 12, color: "var(--orange)" }}>{sub.photographer?.handle}</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                Q{sub.price}/mes · Vence: {new Date(sub.expires_at).toLocaleDateString("es-GT")}
-              </div>
-            </div>
-            <AppButton
-              onClick={async () => {
-                if (!confirm("¿Cancelar esta suscripción?")) return;
-                const res = await fetch(`/api/auth/subscriptions/${sub.id}/cancel`, {
-                  method: "PUT",
-                  headers: { Authorization: `Bearer ${session?.access_token}` }
-                });
-                if (res.ok) { showToast("Suscripción cancelada."); fetchAllSubscriptions(); }
-              }}
-              style={{ background: "rgba(255,68,68,0.1)", border: "1px solid rgba(255,68,68,0.4)", color: "#ff4444", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
-            >
-              Cancelar
-            </AppButton>
-          </div>
-        ))}
-
-        {allSubscriptions.filter(s => s.status !== "active").length > 0 && (
-          <>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 1, marginTop: 8, marginBottom: 4 }}>Historial</div>
-            {allSubscriptions.filter(s => s.status !== "active").map(sub => (
-              <div key={sub.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: 14, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", opacity: 0.7 }}>
-                <div style={{ width: 44, height: 44, borderRadius: "50%", overflow: "hidden", background: "var(--card)", flexShrink: 0 }}>
-                  {sub.photographer?.avatar_url
-                    ? <img src={sub.photographer.avatar_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}><AvatarPlaceholder size={20} /></div>}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>{sub.photographer?.name}</div>
-                  <div style={{ fontSize: 12, color: "var(--orange)" }}>{sub.photographer?.handle}</div>
-                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                    Q{sub.price}/mes · {sub.status === "cancelled" ? "Cancelada" : "Vencida"} · {new Date(sub.expires_at).toLocaleDateString("es-GT")}
-                  </div>
-                </div>
-                <AppButton
-                  onClick={() => {
-                    if (user && sub.photographer.id === selectedPhotographer?.id || 
-                        photographers.find(p => p.id === sub.photographer.id)?.user_id === user?.id) {
-                      setView(VIEWS.VENDOR_REQUEST);
-                      setActiveTab("profile");
-                    } else {
-                      fetchPhotographerProfile(sub.photographer.id);
-                      setView(VIEWS.PHOTOGRAPHER_PROFILE);
-                    }
-                  }}
-                  style={{ background: "var(--card)", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
-                >
-                  Ver perfil
-                </AppButton>
-              </div>
-            ))}
-          </>
-        )}
-      </div>
-    )}
-  </div>
+  {renderMySubscriptionsSection()}
 </div>
 </div>
 )}
@@ -4217,6 +4326,9 @@ const renderVendorRequest = () => {
           {/* Sus fotos */}
           {!editMode && (
   <>
+    <div style={{ marginBottom: 24 }}>
+      {renderMySubscriptionsSection()}
+    </div>
     {/* Tabs */}
     <div style={{ display: "flex", borderBottom: "1px solid var(--border)", marginBottom: 20, marginLeft: -20, marginRight: -20, justifyContent: "center" }}>
       {[
@@ -4488,6 +4600,8 @@ const renderVendorRequest = () => {
           </div>
         </div>
 
+        {renderMySubscriptionsSection()}
+
         {/* CTA fotógrafo */}
         <div style={{ background: "linear-gradient(135deg, rgba(255,107,0,0.1), rgba(255,107,0,0.04))", border: "1px solid var(--orange)", borderRadius: 14, padding: 20, marginBottom: 28 }}>
           <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, letterSpacing: 1, marginBottom: 8 }}>¿SOS FOTÓGRAFO?</div>
@@ -4640,6 +4754,7 @@ const renderVendorRequest = () => {
         <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 2 }}>{user.email}</div>
         {profile.handle && <div style={{ fontSize: 12, color: "var(--orange)" }}>{profile.handle}</div>}
       </div>
+      {renderMySubscriptionsSection()}
       <div className="empty">
         <LoaderIcon size={44} />
         <div>Tu solicitud está <strong style={{ color: "var(--orange)" }}>{profile.verification_status}</strong>.<br />Esperá la aprobación del administrador.</div>
