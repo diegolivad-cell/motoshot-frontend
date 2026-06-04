@@ -518,6 +518,28 @@ function WatermarkedImage({ src, photographer, purchased }) {
     setMySubscriptions([]);
   }, []);
 
+  const refreshMySubscriptions = useCallback(async () => {
+    if (!session?.access_token) return;
+    try {
+      const res = await fetch("/api/auth/my-subscriptions", {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMySubscriptions(data.subscriptions || []);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }, [session]);
+
+  const isSubscribedToPhotographer = useCallback(
+    (photographerId) =>
+      !!photographerId &&
+      mySubscriptions.some((sub) => sub.photographer?.id === photographerId),
+    [mySubscriptions]
+  );
+
   const syncAuthFromSupabase = useCallback(async () => {
     const { search, hash } = getAuthCallbackParams();
     const pendingCallback =
@@ -1037,14 +1059,15 @@ const exportPayrollCsv = () => {
   useEffect(() => { fetchPhotos(); }, []);
   useEffect(() => { fetchPhotographers(); }, []);
   useEffect(() => {
-  if (!authReady || !isLoggedIn) return;
-  fetch("/api/auth/my-subscriptions", {
-    headers: { Authorization: `Bearer ${session.access_token}` }
-  })
-    .then(r => (r.ok ? r.json() : null))
-    .then(d => { if (d) setMySubscriptions(d.subscriptions || []); })
-    .catch(console.error);
-}, [authReady, isLoggedIn, session]);
+    if (!authReady || !isLoggedIn) return;
+    refreshMySubscriptions();
+  }, [authReady, isLoggedIn, refreshMySubscriptions]);
+
+  useEffect(() => {
+    if (view !== VIEWS.PHOTOGRAPHER_PROFILE || !isLoggedIn || !session) return;
+    refreshMySubscriptions();
+  }, [view, isLoggedIn, session, selectedPhotographer?.id, refreshMySubscriptions]);
+
 useEffect(() => {
   const onScroll = () => setHeroScrollY(window.scrollY);
   window.addEventListener("scroll", onScroll, { passive: true });
@@ -2469,7 +2492,10 @@ const renderPhotographers = () => (
     </div>
   </div>
 );
-const renderPhotographerProfile = () => (
+const renderPhotographerProfile = () => {
+  const subscribed = isSubscribedToPhotographer(selectedPhotographer?.id);
+
+  return (
   <div style={{ paddingBottom: 100 }}>
     {/* Banner */}
     <div style={{ width: "100%", height: 200, background: selectedPhotographer?.banner_url ? "none" : "linear-gradient(135deg, #1a1a1a, #ff6b0022)", overflow: "hidden", position: "relative" }}>
@@ -2491,15 +2517,35 @@ const renderPhotographerProfile = () => (
           }
         </div>
 {selectedPhotographer?.subscription_price && user?.id !== selectedPhotographer?.user_id && (
-  <AppButton
-    className="nav-btn primary"
-    onClick={() => {
-      if (!user) { setView(VIEWS.AUTH); return; }
-      setShowSubscribeModal(true);
-    }}
-  >
-    Suscribirse · Q{selectedPhotographer.subscription_price}/mes
-  </AppButton>
+  subscribed ? (
+    <div
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "8px 14px",
+        borderRadius: 10,
+        border: "1px solid var(--success)",
+        background: "rgba(61,220,132,0.1)",
+        color: "var(--success)",
+        fontSize: 12,
+        fontWeight: 700,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <AppIcon name="check" size={14} color="var(--success)" /> Suscrito
+    </div>
+  ) : (
+    <AppButton
+      className="nav-btn primary"
+      onClick={() => {
+        if (!user) { setView(VIEWS.AUTH); return; }
+        setShowSubscribeModal(true);
+      }}
+    >
+      Suscribirse · Q{selectedPhotographer.subscription_price}/mes
+    </AppButton>
+  )
 )}
 </div>
 
@@ -2795,7 +2841,8 @@ const renderPhotographerProfile = () => (
 })()}
     </div>
   </div>
-);
+  );
+};
   const renderDetail = () => (
     <div style={{ padding: "16px 20px 100px", maxWidth: 540, margin: "0 auto" }}>
       <AppButton className="nav-btn" style={{ marginBottom: 16 }} onClick={() => setView(detailReturnView)}><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="arrowRight" size={14} style={{ transform: "rotate(180deg)" }} /> Volver</span></AppButton>
@@ -5772,17 +5819,31 @@ const renderVendorRequest = () => {
             className="pay-btn"
             onClick={async () => {
               if (!user) { setShowSubscribeModal(false); setView(VIEWS.AUTH); return; }
+              if (isSubscribedToPhotographer(selectedPhotographer?.id)) {
+                setShowSubscribeModal(false);
+                showToast("Ya estás suscrito a este fotógrafo.");
+                return;
+              }
               const res = await fetch(`/api/auth/subscribe/${selectedPhotographer?.id}`, {
                 method: "POST",
                 headers: { Authorization: `Bearer ${session?.access_token}` },
               });
               const data = await res.json();
               setShowSubscribeModal(false);
-              if (res.ok) showToast("Suscripción activa.");
-              else setMessage(data.error);
+              if (res.ok) {
+                showToast("Suscripción activa.");
+                await refreshMySubscriptions();
+              } else {
+                showToast(data.error || "No se pudo suscribir.");
+                if (String(data.error || "").includes("Ya estás suscrito")) {
+                  await refreshMySubscriptions();
+                }
+              }
             }}
           >
-            SUSCRIBIRME · Q{selectedPhotographer?.subscription_price}/MES
+            {isSubscribedToPhotographer(selectedPhotographer?.id)
+              ? "SUSCRITO"
+              : `SUSCRIBIRME · Q${selectedPhotographer?.subscription_price}/MES`}
           </AppButton>
           <div style={{ marginTop: 14, fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
             <div>· Tu suscripción se renovará mensualmente hasta que la canceles.</div>
