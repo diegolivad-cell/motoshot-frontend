@@ -211,6 +211,15 @@ const formatPhoneDisplay = (fullPhone) => {
   return localNumber;
 };
 
+const HERO_POSTER_URL =
+  "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/STATICBANNER.png";
+const HERO_VIDEO_URL =
+  "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/14022738_720_1280_60fps.mp4";
+
+/** APK/Capacitor: la WebView inyecta window.Capacitor (más fiable que userAgent). */
+const isCapacitorNativeApp = () =>
+  typeof window !== "undefined" && window.Capacitor?.isNativePlatform?.() === true;
+
 function buildNavCurvePath(activeIndex, total, w = 400) {
   if (total <= 0) return `M0 0 H${w} V72 H0 Z`;
   const tabW = w / total;
@@ -393,6 +402,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   };
   const [selectedTag, setSelectedTag] = useState(null);
   const [heroScrollY, setHeroScrollY] = useState(0);
+  const [heroVideoReady, setHeroVideoReady] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMode, setSearchMode] = useState(false);
   const [unifiedSearch, setUnifiedSearch] = useState({ photographers: [], photos: [] });
@@ -2202,25 +2212,56 @@ const openPhotographerFromPhoto = (photo, e) => {
 const renderPhotographers = () => (
   <div style={{ paddingBottom: 100 }}>
     {/* Hero */}
-    {/* Hero con video */}
-{/* Hero con video */}
-<div style={{ position: "relative", width: "100%", height: 320, overflow: "hidden" }}>
-<video
-  autoPlay muted loop playsInline
-  style={{
-    position: "absolute",
-    inset: 0,
-    width: "100%",
-    height: "130%",
-    objectFit: "cover",
-    top: "-15%",
-    transform: `translateY(${heroScrollY * 0.5}px)`,
-    willChange: "transform",
-  }}
-  src="https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/14022738_720_1280_60fps.mp4"
-/>
-  <div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.65) 100%)" }} />
-  <div style={{ position: "relative", zIndex: 2, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 20px", textAlign: "center" }}>
+{/* Hero: banner estático siempre visible; video solo en web (no en APK) */}
+<div style={{ position: "relative", width: "100%", height: 320, overflow: "hidden", background: "#0a0a0a" }}>
+  <img
+    src={HERO_POSTER_URL}
+    alt=""
+    decoding="async"
+    fetchPriority="high"
+    style={{
+      position: "absolute",
+      inset: 0,
+      width: "100%",
+      height: "100%",
+      objectFit: "cover",
+      zIndex: 0,
+      opacity: !isCapacitorNativeApp() && heroVideoReady ? 0 : 1,
+      transition: "opacity 0.45s ease",
+      pointerEvents: "none",
+    }}
+  />
+  {!isCapacitorNativeApp() && (
+    <video
+      className="hero-video-bg"
+      autoPlay
+      muted
+      loop
+      playsInline
+      preload="auto"
+      disablePictureInPicture
+      controls={false}
+      onLoadedData={() => setHeroVideoReady(true)}
+      onCanPlay={() => setHeroVideoReady(true)}
+      style={{
+        position: "absolute",
+        inset: 0,
+        width: "100%",
+        height: "130%",
+        objectFit: "cover",
+        top: "-15%",
+        transform: `translateY(${heroScrollY * 0.5}px)`,
+        willChange: "transform",
+        zIndex: 1,
+        opacity: heroVideoReady ? 1 : 0,
+        transition: "opacity 0.45s ease",
+        pointerEvents: "none",
+      }}
+      src={HERO_VIDEO_URL}
+    />
+  )}
+<div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.65) 100%)" }} />
+<div style={{ position: "relative", zIndex: 2, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 20px", textAlign: "center" }}>
     
     <motion.div
       initial={{ opacity: 0, y: 30 }}
@@ -5102,6 +5143,10 @@ const renderVendorRequest = () => {
     .admin-status-rejected, .admin-status-suspended { color: #ff8a8a; border-color: rgba(255,138,138,0.35); background: rgba(255,138,138,0.08); }
     .hero { padding: 44px 20px 28px; text-align: center; background: radial-gradient(circle at top, rgba(255,107,0,0.12), transparent 70%); border-bottom: 1px solid var(--border); }
     .hero-sub { color: var(--muted); font-size: 15px; margin-top: 10px; font-weight: 300; }
+    .hero-video-bg { background: transparent; }
+    .hero-video-bg::-webkit-media-controls { display: none !important; }
+    .hero-video-bg::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
+    .hero-video-bg::-webkit-media-controls-overlay-play-button { display: none !important; }
     .search-bar { display: flex; gap: 10px; margin: 20px; }
     .search-input { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 12px 16px;
       border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color 0.2s; }
