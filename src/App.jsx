@@ -415,6 +415,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [adminWithdrawals, setAdminWithdrawals] = useState([]);
   const [vendorRequests, setVendorRequests] = useState([]);
   const [vendorRequestsLoading, setVendorRequestsLoading] = useState(false);
+  const [adminDocPreview, setAdminDocPreview] = useState(null);
   const [adminPhotographers, setAdminPhotographers] = useState([]);
   const [adminPhotographersLoading, setAdminPhotographersLoading] = useState(false);
   const [showUnconfirmedBanner, setShowUnconfirmedBanner] = useState(false);
@@ -955,6 +956,63 @@ const fetchAdminWithdrawals = async () => {
     console.error(err);
   }
 };
+
+const openAdminVerificationDoc = (url, label) => {
+  if (!url) {
+    showToast("Documento no disponible.");
+    return;
+  }
+  if (/\.pdf(\?|$)/i.test(url)) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  setAdminDocPreview({ url, label });
+};
+
+const renderAdminDocPreviewModal = () => (
+  <AnimatePresence>
+    {adminDocPreview && (
+      <motion.div
+        className="modal-backdrop"
+        style={{ zIndex: 260 }}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={() => setAdminDocPreview(null)}
+      >
+        <motion.div
+          className="modal"
+          style={{ maxWidth: 520 }}
+          initial={{ opacity: 0, scale: 0.92, y: 40 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.92, y: 40 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="modal-header">
+            <div className="modal-title">{adminDocPreview.label}</div>
+            <AppButton className="modal-close" onClick={() => setAdminDocPreview(null)} aria-label="Cerrar">
+              <AppIcon name="x" size={18} />
+            </AppButton>
+          </div>
+          <div className="modal-body" style={{ paddingTop: 8 }}>
+            <img
+              src={adminDocPreview.url}
+              alt={adminDocPreview.label}
+              style={{ width: "100%", maxHeight: "70vh", objectFit: "contain", borderRadius: 10, background: "#0a0a0a" }}
+            />
+            <AppButton
+              className="nav-btn"
+              style={{ marginTop: 14, width: "100%" }}
+              onClick={() => window.open(adminDocPreview.url, "_blank", "noopener,noreferrer")}
+            >
+              Abrir en pestaña nueva
+            </AppButton>
+          </div>
+        </motion.div>
+      </motion.div>
+    )}
+  </AnimatePresence>
+);
 
 const fetchVendorRequests = async () => {
   if (!session || !isStaff) return;
@@ -1853,6 +1911,28 @@ useEffect(() => {
                 <div style={{ fontSize: 11, color: "var(--muted)" }}>
                   ID verificación: <span style={{ color: "var(--text)" }}>{req.verification_id || "—"}</span>
                   {" · "}{new Date(req.created_at).toLocaleString("es-GT")}
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                  <AppButton
+                    className="nav-btn"
+                    style={{ fontSize: 11, padding: "6px 12px", opacity: req.doc_front_url ? 1 : 0.45 }}
+                    disabled={!req.doc_front_url}
+                    onClick={() => openAdminVerificationDoc(req.doc_front_url, "Documento frontal")}
+                  >
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <AppIcon name="image" size={12} /> Ver frontal
+                    </span>
+                  </AppButton>
+                  <AppButton
+                    className="nav-btn"
+                    style={{ fontSize: 11, padding: "6px 12px", opacity: req.doc_back_url ? 1 : 0.45 }}
+                    disabled={!req.doc_back_url}
+                    onClick={() => openAdminVerificationDoc(req.doc_back_url, "Documento posterior")}
+                  >
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <AppIcon name="image" size={12} /> Ver posterior
+                    </span>
+                  </AppButton>
                 </div>
               </div>
             </div>
@@ -6281,6 +6361,8 @@ const renderVendorRequest = () => {
     </motion.div>
   )}
 </AnimatePresence>
+
+{renderAdminDocPreviewModal()}
 
 <nav className="nav">
 <div className="nav-logo" onClick={() => { 
