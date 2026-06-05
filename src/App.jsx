@@ -1500,11 +1500,11 @@ useEffect(() => {
           cancel_url: `${window.location.origin}/?payment_cancel=true&photo_id=${selected.id}`,
         }),
       });
-      if (!res.ok) throw new Error("Error creando orden");
       const data = await res.json();
-      window.location.href = data.approve_url;
+      if (!res.ok) throw new Error(data.error || "Error creando orden");
+      window.location.href = data.approve_url || data.checkout_url;
     } catch (err) {
-      console.error(err); setPayStep(1); showToast("No se pudo iniciar el pago.");
+      console.error(err); setPayStep(1); showToast(err.message || "No se pudo iniciar el pago.");
     }
   };
 
@@ -6505,7 +6505,7 @@ const renderVendorRequest = () => {
         onClick={e => e.stopPropagation()}
       >
         <div className="modal-header">
-          <div className="modal-title">PAGAR CON PAYPAL</div>
+          <div className="modal-title">PAGAR CON RECURRENTE</div>
           <AppButton className="modal-close" onClick={() => setPayStep(0)} aria-label="Cerrar"><AppIcon name="x" size={18} /></AppButton>
         </div>
         {selected && (
@@ -6539,7 +6539,7 @@ const renderVendorRequest = () => {
                 className="pay-btn"
                 onClick={handlePayment}
               >
-                PAGAR Q{selected?.price} CON PAYPAL
+                PAGAR Q{selected?.price} CON RECURRENTE
               </AppButton>
             </>
           )}
