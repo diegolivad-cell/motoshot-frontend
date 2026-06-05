@@ -712,7 +712,7 @@ const handleSubscriptionPayment = async (photographerId, subscriptionId = null) 
   try {
     const origin = window.location.origin;
     const returnParams = new URLSearchParams({
-      paypal_return: "true",
+      payment_return: "true",
       subscription: "1",
       photographer_id: photographerId,
     });
@@ -727,7 +727,7 @@ const handleSubscriptionPayment = async (photographerId, subscriptionId = null) 
         photographer_id: photographerId,
         subscription_id: subscriptionId || undefined,
         return_url: `${origin}/?${returnParams.toString()}`,
-        cancel_url: `${origin}/?paypal_cancel=true&subscription=1`,
+        cancel_url: `${origin}/?payment_cancel=true&subscription=1`,
       }),
     });
     const data = await res.json();
@@ -1401,20 +1401,26 @@ useEffect(() => {
     }
   }, [user, pendingPurchase]);
 
-  // ── PayPal return ──────────────────────────────────────────
+  // ── Recurrente return ──────────────────────────────────────
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const orderId = params.get("order_id") || params.get("token");
+    const paymentReturn = params.get("payment_return") === "true" || params.get("paypal_return") === "true";
+    const paymentCancel = params.get("payment_cancel") === "true" || params.get("paypal_cancel") === "true";
+    const checkoutId = params.get("checkout_id") || params.get("order_id") || params.get("token");
     const photoId = params.get("photo_id");
     const photographerId = params.get("photographer_id");
     const isSubscription = params.get("subscription") === "1";
 
-    if (params.get("paypal_return") && orderId && isSubscription && photographerId && session) {
+    if (paymentReturn && isSubscription && photographerId && session) {
       setGlobalLoading({ active: true, message: "Confirmando suscripción..." });
       fetch("/api/payments/capture-subscription-order", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-        body: JSON.stringify({ order_id: orderId, photographer_id: photographerId }),
+        body: JSON.stringify({
+          checkout_id: checkoutId || undefined,
+          order_id: checkoutId || undefined,
+          photographer_id: photographerId,
+        }),
       })
         .then(async (r) => {
           const data = await r.json().catch(() => ({}));
@@ -1432,12 +1438,16 @@ useEffect(() => {
       return;
     }
 
-    if (params.get("paypal_return") && orderId && photoId && session) {
+    if (paymentReturn && photoId && session) {
       setPayStep(2);
       fetch("/api/payments/capture-order", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-        body: JSON.stringify({ order_id: orderId, photo_id: photoId }),
+        body: JSON.stringify({
+          checkout_id: checkoutId || undefined,
+          order_id: checkoutId || undefined,
+          photo_id: photoId,
+        }),
       })
         .then(r => { if (!r.ok) throw new Error("Error"); return r.json(); })
         .then(() => {
@@ -1449,12 +1459,12 @@ useEffect(() => {
         })
         .catch(() => { showToast("No se pudo completar el pago. Intentá de nuevo."); setPayStep(1); });
     }
-    if (params.get("paypal_cancel") && isSubscription) {
+    if (paymentCancel && isSubscription) {
       showToast("Pago cancelado.");
       window.history.replaceState({}, document.title, window.location.pathname);
       return;
     }
-    if (params.get("paypal_cancel")) {
+    if (paymentCancel) {
       setPayStep(0);
       showToast("Pago cancelado.");
       window.history.replaceState({}, document.title, window.location.pathname);
@@ -1486,8 +1496,8 @@ useEffect(() => {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
         body: JSON.stringify({
           photo_id: selected.id,
-          return_url: `${window.location.origin}/?paypal_return=true&photo_id=${selected.id}`,
-          cancel_url: `${window.location.origin}/?paypal_cancel=true&photo_id=${selected.id}`,
+          return_url: `${window.location.origin}/?payment_return=true&photo_id=${selected.id}`,
+          cancel_url: `${window.location.origin}/?payment_cancel=true&photo_id=${selected.id}`,
         }),
       });
       if (!res.ok) throw new Error("Error creando orden");
@@ -1732,7 +1742,7 @@ useEffect(() => {
   const renderHero = () => (
     <div className="hero">
       <MotoShotBrandMark variant="hero" className="hero-title" />
-      <div className="hero-sub">Comprá fotos de rodada con PayPal · Alta resolución garantizada</div>
+      <div className="hero-sub">Comprá fotos de rodada con Recurrente · Alta resolución garantizada</div>
       {isLoggedIn ? (
         <div style={{ marginTop: 12, color: "var(--text)", display: "flex", justifyContent: "center", gap: 12, flexWrap: "wrap", fontSize: 14 }}>
           <span>Bienvenido, {getUserDisplayName()}</span>
@@ -6522,7 +6532,7 @@ const renderVendorRequest = () => {
               <div className="pay-methods">
                 <div className="pay-method">
                   <div className="pay-method-dot"></div>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="creditCard" size={14} /> PayPal</span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="creditCard" size={14} /> Recurrente</span>
                 </div>
               </div>
               <AppButton
@@ -6536,7 +6546,7 @@ const renderVendorRequest = () => {
           {payStep === 2 && (
             <div className="processing">
               <div className="processing-spinner"></div>
-              <div className="processing-text">Redirigiendo a PayPal...</div>
+              <div className="processing-text">Redirigiendo a Recurrente...</div>
             </div>
           )}
         </div>
