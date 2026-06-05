@@ -4,6 +4,7 @@ import { supabase } from "./supabaseClient";
 import { motion, AnimatePresence } from "framer-motion";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
+import { dismissAppSplash, SPLASH_MIN_MS } from "./splash.js";
 
 const API = import.meta.env.VITE_API_URL || "";
 const VIEWS = {
@@ -215,17 +216,6 @@ const HERO_POSTER_URL =
   "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/STATICBANNER.png";
 const HERO_VIDEO_URL =
   "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/14022738_720_1280_60fps.mp4";
-
-const SPLASH_MIN_MS = 1200;
-const SPLASH_FADE_MS = 650;
-
-function dismissAppSplash() {
-  const el = document.getElementById("app-splash");
-  if (!el || el.dataset.dismissing === "1") return;
-  el.dataset.dismissing = "1";
-  el.classList.add("app-splash--out");
-  window.setTimeout(() => el.remove(), SPLASH_FADE_MS + 80);
-}
 
 function buildNavCurvePath(activeIndex, total, w = 400) {
   if (total <= 0) return `M0 0 H${w} V72 H0 Z`;
@@ -641,11 +631,14 @@ function WatermarkedImage({ src, photographer, purchased }) {
   }, [showEmailConfirmedPage, syncAuthFromSupabase, processAuthCallbackFromUrl]);
 
   useEffect(() => {
-    const startedAt = window.__MOTOSHOT_SPLASH_START__ || Date.now();
+    const visibleSince = window.__MOTOSHOT_SPLASH_VISIBLE_SINCE__ || Date.now();
     const minTimer = authReady
-      ? window.setTimeout(dismissAppSplash, Math.max(0, SPLASH_MIN_MS - (Date.now() - startedAt)))
+      ? window.setTimeout(
+          dismissAppSplash,
+          Math.max(0, SPLASH_MIN_MS - (Date.now() - visibleSince))
+        )
       : null;
-    const maxTimer = window.setTimeout(dismissAppSplash, 6000);
+    const maxTimer = window.setTimeout(dismissAppSplash, 7000);
     return () => {
       if (minTimer) window.clearTimeout(minTimer);
       window.clearTimeout(maxTimer);
