@@ -10,6 +10,9 @@ import {
   readPendingPayment,
   clearPendingPayment,
   openRecurrenteCheckout,
+  closePaymentBrowser,
+  buildPaymentReturnUrl,
+  buildPaymentCancelUrl,
   onNativePaymentResume,
 } from "./paymentFlow.js";
 
@@ -592,6 +595,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
       if (!syncRes.ok) throw new Error(syncData.error || "No se pudo confirmar el pago");
 
       if (syncData.subscriptions?.length) {
+        await closePaymentBrowser();
         clearPendingPayment();
         await refreshMySubscriptions();
         await fetchAllSubscriptions();
@@ -603,6 +607,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
 
       const purchase = syncData.purchases?.[0];
       if (purchase?.photo_id) {
+        await closePaymentBrowser();
         await finalizePhotoPurchase(purchase.photo_id);
         window.history.replaceState({}, document.title, window.location.pathname);
         return true;
@@ -623,6 +628,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago");
+        await closePaymentBrowser();
         await finalizePhotoPurchase(pending.photoId);
         window.history.replaceState({}, document.title, window.location.pathname);
         return true;
@@ -643,6 +649,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago");
+        await closePaymentBrowser();
         clearPendingPayment();
         await refreshMySubscriptions();
         await fetchAllSubscriptions();
@@ -827,13 +834,6 @@ const handleSubscriptionPayment = async (photographerId, subscriptionId = null) 
   if (!session?.access_token || !photographerId) return;
   setSubPayLoading(true);
   try {
-    const origin = window.location.origin;
-    const returnParams = new URLSearchParams({
-      payment_return: "true",
-      subscription: "1",
-      photographer_id: photographerId,
-    });
-    if (subscriptionId) returnParams.set("subscription_id", subscriptionId);
     const res = await fetch("/api/payments/create-subscription-order", {
       method: "POST",
       headers: {
@@ -843,8 +843,12 @@ const handleSubscriptionPayment = async (photographerId, subscriptionId = null) 
       body: JSON.stringify({
         photographer_id: photographerId,
         subscription_id: subscriptionId || undefined,
-        return_url: `${origin}/?${returnParams.toString()}`,
-        cancel_url: `${origin}/?payment_cancel=true&subscription=1`,
+        return_url: buildPaymentReturnUrl({
+          subscription: "1",
+          photographer_id: photographerId,
+          ...(subscriptionId ? { subscription_id: subscriptionId } : {}),
+        }),
+        cancel_url: buildPaymentCancelUrl({ subscription: "1" }),
       }),
     });
     const data = await res.json();
@@ -1546,8 +1550,10 @@ useEffect(() => {
 
   useEffect(() => {
     if (!authReady || !session) return;
-    return onNativePaymentResume(() => {
-      if (readPendingPayment()) syncPendingPayments();
+    return onNativePaymentResume((source) => {
+      if (readPendingPayment() || source === "pageLoaded" || source === "browser") {
+        syncPendingPayments();
+      }
     });
   }, [authReady, session, syncPendingPayments]);
 
@@ -1576,8 +1582,8 @@ useEffect(() => {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
         body: JSON.stringify({
           photo_id: selected.id,
-          return_url: `${window.location.origin}/?payment_return=true&photo_id=${selected.id}`,
-          cancel_url: `${window.location.origin}/?payment_cancel=true&photo_id=${selected.id}`,
+          return_url: buildPaymentReturnUrl({ photo_id: selected.id }),
+          cancel_url: buildPaymentCancelUrl({ photo_id: selected.id }),
         }),
       });
       const data = await res.json();

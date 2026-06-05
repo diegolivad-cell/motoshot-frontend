@@ -2,6 +2,26 @@ import { Capacitor } from "@capacitor/core";
 
 export const PENDING_PAYMENT_KEY = "motoshot_pending_payment";
 
+export function buildPaymentReturnUrl(params = {}) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "https://motoshot.pro";
+  const url = new URL(`${origin}/payment-complete.html`);
+  url.searchParams.set("payment_return", "true");
+  Object.entries(params).forEach(([key, value]) => {
+    if (value != null && value !== "") url.searchParams.set(key, String(value));
+  });
+  return url.toString();
+}
+
+export function buildPaymentCancelUrl(params = {}) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "https://motoshot.pro";
+  const url = new URL(`${origin}/payment-complete.html`);
+  url.searchParams.set("payment_cancel", "true");
+  Object.entries(params).forEach(([key, value]) => {
+    if (value != null && value !== "") url.searchParams.set(key, String(value));
+  });
+  return url.toString();
+}
+
 export function writePendingPayment(data) {
   const raw = JSON.stringify(data);
   try {
@@ -27,6 +47,16 @@ export function clearPendingPayment() {
   try {
     sessionStorage.removeItem(PENDING_PAYMENT_KEY);
     localStorage.removeItem(PENDING_PAYMENT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function closePaymentBrowser() {
+  if (!Capacitor.isNativePlatform()) return;
+  try {
+    const { Browser } = await import("@capacitor/browser");
+    await Browser.close();
   } catch {
     /* ignore */
   }
@@ -71,8 +101,10 @@ export function onNativePaymentResume(handler) {
     }
     try {
       const { Browser } = await import("@capacitor/browser");
-      const sub = await Browser.addListener("browserFinished", () => handler("browser"));
-      cleanups.push(() => sub.remove());
+      const finished = await Browser.addListener("browserFinished", () => handler("browser"));
+      cleanups.push(() => finished.remove());
+      const loaded = await Browser.addListener("browserPageLoaded", () => handler("pageLoaded"));
+      cleanups.push(() => loaded.remove());
     } catch (err) {
       console.warn("Capacitor Browser listener:", err);
     }
