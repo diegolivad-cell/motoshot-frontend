@@ -27,6 +27,24 @@ const VIEWS = {
 };
 
 const PENDING_EMAIL_CONFIRM_KEY = "motoshot_pending_email_confirm";
+const PENDING_PAYMENT_KEY = "motoshot_pending_payment";
+
+function readPendingPayment() {
+  try {
+    const raw = sessionStorage.getItem(PENDING_PAYMENT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingPayment() {
+  try {
+    sessionStorage.removeItem(PENDING_PAYMENT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
 
 const getEmailConfirmRedirectUrl = () => {
   if (typeof window === "undefined") return "https://motoshot.pro/";
@@ -732,7 +750,16 @@ const handleSubscriptionPayment = async (photographerId, subscriptionId = null) 
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "No se pudo iniciar el pago");
-    window.location.href = data.approve_url;
+    sessionStorage.setItem(
+      PENDING_PAYMENT_KEY,
+      JSON.stringify({
+        kind: "subscription",
+        photographerId,
+        subscriptionId: subscriptionId || null,
+        checkoutId: data.checkout_id || data.order_id || null,
+      })
+    );
+    window.location.href = data.approve_url || data.checkout_url;
   } catch (err) {
     setSubPayLoading(false);
     showToast(err.message || "No se pudo iniciar el pago.");
@@ -1403,19 +1430,50 @@ useEffect(() => {
 
   // ── Recurrente return ──────────────────────────────────────
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const paymentReturn = params.get("payment_return") === "true" || params.get("paypal_return") === "true";
-    const paymentCancel = params.get("payment_cancel") === "true" || params.get("paypal_cancel") === "true";
-    const checkoutId = params.get("checkout_id") || params.get("order_id") || params.get("token");
-    const photoId = params.get("photo_id");
-    const photographerId = params.get("photographer_id");
-    const isSubscription = params.get("subscription") === "1";
+    if (!authReady || !session) return;
 
-    if (paymentReturn && isSubscription && photographerId && session) {
+    const params = new URLSearchParams(window.location.search);
+    const pending = readPendingPayment();
+    const paymentCancel =
+      params.get("payment_cancel") === "true" || params.get("paypal_cancel") === "true";
+    const isSubscription =
+      params.get("subscription") === "1" || pending?.kind === "subscription";
+    const paymentReturn =
+      params.get("payment_return") === "true" ||
+      params.get("paypal_return") === "true" ||
+      Boolean(pending);
+
+    if (paymentCancel) {
+      clearPendingPayment();
+      if (isSubscription) {
+        showToast("Pago cancelado.");
+      } else {
+        setPayStep(0);
+        showToast("Pago cancelado.");
+      }
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return;
+    }
+
+    if (!paymentReturn) return;
+
+    const checkoutId =
+      params.get("checkout_id") ||
+      params.get("order_id") ||
+      params.get("token") ||
+      pending?.checkoutId ||
+      null;
+    const photoId = params.get("photo_id") || pending?.photoId || null;
+    const photographerId = params.get("photographer_id") || pending?.photographerId || null;
+
+    if (isSubscription && photographerId) {
       setGlobalLoading({ active: true, message: "Confirmando suscripción..." });
       fetch("/api/payments/capture-subscription-order", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
         body: JSON.stringify({
           checkout_id: checkoutId || undefined,
           order_id: checkoutId || undefined,
@@ -1425,9 +1483,10 @@ useEffect(() => {
         .then(async (r) => {
           const data = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(data.error || "Error");
+          clearPendingPayment();
           await refreshMySubscriptions();
           await fetchAllSubscriptions();
-          showToast("Suscripción activa.");
+          showToast("¡Suscripción activa!");
           setShowSubscribeModal(false);
           window.history.replaceState({}, document.title, window.location.pathname);
         })
@@ -1438,38 +1497,56 @@ useEffect(() => {
       return;
     }
 
-    if (paymentReturn && photoId && session) {
-      setPayStep(2);
-      fetch("/api/payments/capture-order", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-        body: JSON.stringify({
-          checkout_id: checkoutId || undefined,
-          order_id: checkoutId || undefined,
-          photo_id: photoId,
-        }),
-      })
-        .then(r => { if (!r.ok) throw new Error("Error"); return r.json(); })
-        .then(() => {
-          setPurchased(prev => [...new Set([...prev, photoId])]);
-          setSuccessMode("purchase");
-          setView(VIEWS.SUCCESS);
-          setPayStep(0);
-          window.history.replaceState({}, document.title, window.location.pathname);
-        })
-        .catch(() => { showToast("No se pudo completar el pago. Intentá de nuevo."); setPayStep(1); });
-    }
-    if (paymentCancel && isSubscription) {
-      showToast("Pago cancelado.");
-      window.history.replaceState({}, document.title, window.location.pathname);
-      return;
-    }
-    if (paymentCancel) {
-      setPayStep(0);
-      showToast("Pago cancelado.");
-      window.history.replaceState({}, document.title, window.location.pathname);
-    }
-  }, [session]);
+    if (!photoId) return;
+
+    let cancelled = false;
+    const confirmPurchase = async () => {
+      setGlobalLoading({ active: true, message: "Confirmando tu pago..." });
+      try {
+        const res = await fetch("/api/payments/capture-order", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            checkout_id: checkoutId || undefined,
+            order_id: checkoutId || undefined,
+            photo_id: photoId,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago");
+
+        let photo = photos.find((p) => p.id === photoId);
+        if (!photo) {
+          const photoRes = await fetch(`/api/photos/${photoId}`);
+          if (photoRes.ok) photo = await photoRes.json();
+        }
+        if (cancelled) return;
+
+        clearPendingPayment();
+        if (photo) setSelected(photo);
+        setPurchased((prev) => [...new Set([...prev, photoId])]);
+        setSuccessMode("purchase");
+        setView(VIEWS.SUCCESS);
+        setPayStep(0);
+        window.history.replaceState({}, document.title, window.location.pathname);
+      } catch (err) {
+        if (!cancelled) {
+          showToast(err.message || "No se pudo completar el pago. Intentá de nuevo.");
+          setPayStep(1);
+        }
+      } finally {
+        if (!cancelled) setGlobalLoading({ active: false, message: "" });
+      }
+    };
+
+    confirmPurchase();
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, session, photos]);
 
   const filteredPhotos = photos.filter(p => {
   if (searchTerm === "") return true;
@@ -1502,6 +1579,14 @@ useEffect(() => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Error creando orden");
+      sessionStorage.setItem(
+        PENDING_PAYMENT_KEY,
+        JSON.stringify({
+          kind: "photo",
+          photoId: selected.id,
+          checkoutId: data.checkout_id || data.order_id || null,
+        })
+      );
       window.location.href = data.approve_url || data.checkout_url;
     } catch (err) {
       console.error(err); setPayStep(1); showToast(err.message || "No se pudo iniciar el pago.");
@@ -5586,11 +5671,9 @@ const renderVendorRequest = () => {
         <div className="success-page-icon">
           <AppIcon name="success" size={64} color="var(--success)" />
         </div>
-        <h1 className="success-page-title">¡LISTO!</h1>
+        <h1 className="success-page-title">¡PAGO EXITOSO!</h1>
         <p className="success-page-sub">
-          {purchased.includes(selected?.id)
-            ? "Tu compra fue registrada. Descargá tu foto en alta resolución."
-            : "Tu foto está lista para descargar."}
+          Tu compra fue confirmada. Ya podés descargar tu foto en alta resolución.
         </p>
         {selected && (
           <div className="success-page-card">
