@@ -216,6 +216,10 @@ const HERO_POSTER_URL =
 const HERO_VIDEO_URL =
   "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/14022738_720_1280_60fps.mp4";
 
+const SPLASH_LOGO_SRC = "/favicon.png";
+const SPLASH_MIN_MS = 750;
+const SPLASH_FADE_MS = 600;
+
 function buildNavCurvePath(activeIndex, total, w = 400) {
   if (total <= 0) return `M0 0 H${w} V72 H0 Z`;
   const tabW = w / total;
@@ -361,6 +365,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [announcementForm, setAnnouncementForm] = useState({ title: "", body: "", image_url: "" });
   const [userRole, setUserRole] = useState(null);
   const [authReady, setAuthReady] = useState(false);
+  const [splashVisible, setSplashVisible] = useState(true);
+  const [splashFading, setSplashFading] = useState(false);
+  const splashStartRef = useRef(Date.now());
   const [payrollData, setPayrollData] = useState(null);
   const [payrollLoading, setPayrollLoading] = useState(false);
   const [ceoAdmins, setCeoAdmins] = useState([]);
@@ -628,6 +635,18 @@ function WatermarkedImage({ src, photographer, purchased }) {
     });
     return () => listener.subscription.unsubscribe();
   }, [showEmailConfirmedPage, syncAuthFromSupabase, processAuthCallbackFromUrl]);
+
+  useEffect(() => {
+    if (!authReady || !splashVisible || splashFading) return;
+    const elapsed = Date.now() - splashStartRef.current;
+    const wait = Math.max(0, SPLASH_MIN_MS - elapsed);
+    const fadeTimer = setTimeout(() => setSplashFading(true), wait);
+    const hideTimer = setTimeout(() => setSplashVisible(false), wait + SPLASH_FADE_MS);
+    return () => {
+      clearTimeout(fadeTimer);
+      clearTimeout(hideTimer);
+    };
+  }, [authReady, splashVisible, splashFading]);
 
 // ── Fetch photos ───────────────────────────────────────────
 const fetchPhotos = async () => {
@@ -6155,6 +6174,74 @@ const renderVendorRequest = () => {
   return (
     <>
       <style>{css}</style>
+      <AnimatePresence>
+        {splashVisible && (
+          <motion.div
+            key="app-splash"
+            initial={{ opacity: 1 }}
+            animate={{ opacity: splashFading ? 0 : 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: SPLASH_FADE_MS / 1000, ease: [0.4, 0, 0.2, 1] }}
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 20000,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "var(--bg)",
+              pointerEvents: splashFading ? "none" : "auto",
+            }}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.88 }}
+              animate={{
+                opacity: splashFading ? 0 : 1,
+                scale: splashFading ? 1.04 : [0.88, 1, 0.97, 1],
+              }}
+              transition={{
+                opacity: { duration: SPLASH_FADE_MS / 1000, ease: "easeOut" },
+                scale: splashFading
+                  ? { duration: SPLASH_FADE_MS / 1000, ease: "easeOut" }
+                  : { duration: 1.1, ease: "easeOut", times: [0, 0.45, 0.75, 1] },
+              }}
+              style={{
+                position: "relative",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <motion.div
+                aria-hidden
+                animate={{ opacity: [0.35, 0.65, 0.35], scale: [1, 1.12, 1] }}
+                transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
+                style={{
+                  position: "absolute",
+                  width: 160,
+                  height: 160,
+                  borderRadius: "50%",
+                  background:
+                    "radial-gradient(circle, rgba(255,107,0,0.4) 0%, transparent 72%)",
+                }}
+              />
+              <img
+                src={SPLASH_LOGO_SRC}
+                alt=""
+                width={96}
+                height={96}
+                style={{
+                  position: "relative",
+                  zIndex: 1,
+                  width: 96,
+                  height: 96,
+                  objectFit: "contain",
+                }}
+              />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <div className="app">
         {/* Modal suscripción */}
 <AnimatePresence>
