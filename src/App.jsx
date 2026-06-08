@@ -630,7 +630,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [uploadProgress, setUploadProgress] = useState({});
   const [videos, setVideos] = useState([]);
   const [videoSearchFilters, setVideoSearchFilters] = useState({
-    brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "",
+    brand: "", model: "", moto_color: "", helmet_color: "", dorsal: "", sector: "", time_start: "", time_end: "",
   });
   const [analyzingMedia, setAnalyzingMedia] = useState(false);
   const [autoTags, setAutoTags] = useState(null);
@@ -2225,7 +2225,10 @@ useEffect(() => {
 
   const handleVideoSearch = async () => {
     const params = new URLSearchParams();
-    Object.entries(videoSearchFilters).forEach(([k, v]) => { if (v) params.append(k, v); });
+    Object.entries(videoSearchFilters).forEach(([k, v]) => {
+      const trimmed = String(v ?? "").trim();
+      if (trimmed) params.append(k, trimmed);
+    });
     try {
       const res = await fetch(`/api/videos/search?${params}`);
       const data = await res.json();
@@ -4442,7 +4445,7 @@ const renderPhotographerProfile = () => {
   const renderVideoSearch = () => (
     <div style={{ padding: "20px", paddingBottom: 100 }}>
       <SectionTitleIcon icon="video">BUSCAR VIDEOS</SectionTitleIcon>
-      <div className="section-sub" style={{ marginBottom: 20 }}>Filtrá por marca, modelo, color y sector.</div>
+      <div className="section-sub" style={{ marginBottom: 20 }}>Completá solo los filtros que necesités — todos son opcionales.</div>
 
       <div style={{ background: "var(--surface)", borderRadius: 12, padding: 20, marginBottom: 24, border: "1px solid var(--border)" }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
@@ -4470,6 +4473,18 @@ const renderPhotographerProfile = () => {
           />
           <input
             className="form-input"
+            placeholder="Color de casco"
+            value={videoSearchFilters.helmet_color}
+            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, helmet_color: e.target.value })}
+          />
+          <input
+            className="form-input"
+            placeholder="Dorsal (ej: 42)"
+            value={videoSearchFilters.dorsal}
+            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, dorsal: e.target.value })}
+          />
+          <input
+            className="form-input"
             placeholder="Sector / Curva"
             value={videoSearchFilters.sector}
             onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, sector: e.target.value })}
@@ -4477,12 +4492,14 @@ const renderPhotographerProfile = () => {
           <input
             className="form-input"
             type="time"
+            title="Hora inicio"
             value={videoSearchFilters.time_start}
             onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, time_start: e.target.value })}
           />
           <input
             className="form-input"
             type="time"
+            title="Hora fin"
             value={videoSearchFilters.time_end}
             onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, time_end: e.target.value })}
           />
