@@ -2161,13 +2161,21 @@ useEffect(() => {
         const video = document.createElement("video");
         video.src = URL.createObjectURL(file);
         await new Promise((resolve) => { video.onloadeddata = resolve; });
-        video.currentTime = 5;
+        video.currentTime = Math.min(5, video.duration || 5);
         await new Promise((resolve) => { video.onseeked = resolve; });
+        const maxDim = 1280;
+        let w = video.videoWidth;
+        let h = video.videoHeight;
+        if (w > maxDim || h > maxDim) {
+          const scale = maxDim / Math.max(w, h);
+          w = Math.round(w * scale);
+          h = Math.round(h * scale);
+        }
         const canvas = document.createElement("canvas");
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        canvas.getContext("2d").drawImage(video, 0, 0);
-        imageBase64 = canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+        imageBase64 = canvas.toDataURL("image/jpeg", 0.75).split(",")[1];
         mimeType = "image/jpeg";
         URL.revokeObjectURL(video.src);
       } else {
