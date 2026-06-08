@@ -246,6 +246,19 @@ const ICONS = {
       <path d="M8 12l3 3 5-6" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </>
   ),
+  package: (
+    <>
+      <path d="M12 3l8 4v10l-8 4-8-4V7l8-4z" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M12 7v14M4 7l8 4 8-4" strokeWidth="1.8" strokeLinejoin="round" />
+    </>
+  ),
+  video: (
+    <>
+      <rect x="3" y="6" width="14" height="12" rx="2" strokeWidth="1.8" />
+      <path d="M17 10l4-2v8l-4-2" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M7 10h4" strokeWidth="1.8" strokeLinecap="round" />
+    </>
+  ),
   error: (
     <>
       <circle cx="12" cy="12" r="9" strokeWidth="1.8" />

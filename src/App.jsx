@@ -5,16 +5,32 @@ import { motion, AnimatePresence } from "framer-motion";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
 import { dismissAppSplash, SPLASH_MIN_MS } from "./splash.js";
+import { Capacitor } from "@capacitor/core";
+import { signInWithGoogleNative } from "./googleNativeAuth.js";
 import {
   writePendingPayment,
   readPendingPayment,
   clearPendingPayment,
   openRecurrenteCheckout,
   closePaymentBrowser,
+  stopPaymentPolling,
   buildPaymentReturnUrl,
   buildPaymentCancelUrl,
   onNativePaymentResume,
 } from "./paymentFlow.js";
+import {
+  buildOAuthExchangeUrl,
+  runOAuthExchangeOnce,
+  resetOAuthExchangeState,
+  restorePkceVerifier,
+  onNativeOAuthResume,
+  closeOAuthBrowser,
+  scheduleOAuthBrowserClose,
+  markOAuthReturnComplete,
+  storeOAuthRedirectUrl,
+  clearOAuthRedirectUrl,
+  isOAuthBrowserOpen,
+} from "./authFlow.js";
 
 const API = import.meta.env.VITE_API_URL || "";
 const VIEWS = {
@@ -33,14 +49,50 @@ const VIEWS = {
   DASHBOARD: "dashboard",
   MY_GALLERY: "my_gallery",
   RESET_PASSWORD: "reset_password",
-  CHANGE_PASSWORD: "change_password"
+  CHANGE_PASSWORD: "change_password",
+  UPLOAD_VIDEO: "upload_video",
+  VIDEO_SEARCH: "video_search",
+  PENDING_DELIVERIES: "pending_deliveries",
 };
 
 const PENDING_EMAIL_CONFIRM_KEY = "motoshot_pending_email_confirm";
 
 const getEmailConfirmRedirectUrl = () => {
-  if (typeof window === "undefined") return "https://motoshot.pro/";
-  return `${window.location.origin}${window.location.pathname || "/"}`;
+  if (typeof window === "undefined") return "https://motoshot.pro/?email_confirmed=1";
+  const url = new URL(window.location.origin + "/");
+  url.searchParams.set("email_confirmed", "1");
+  return url.toString();
+};
+
+const setPendingEmailConfirmation = () => {
+  try {
+    sessionStorage.setItem(PENDING_EMAIL_CONFIRM_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+};
+
+const clearPendingEmailConfirmation = () => {
+  try {
+    sessionStorage.removeItem(PENDING_EMAIL_CONFIRM_KEY);
+  } catch {
+    /* ignore */
+  }
+};
+
+const hasPendingEmailConfirmation = () =>
+  typeof sessionStorage !== "undefined" &&
+  sessionStorage.getItem(PENDING_EMAIL_CONFIRM_KEY) === "1";
+
+const shouldShowEmailConfirmedSuccess = () => {
+  const { search, hash } = getAuthCallbackParams();
+  return (
+    search.get("email_confirmed") === "1" ||
+    search.get("type") === "signup" ||
+    hash.get("type") === "signup" ||
+    hash.get("type") === "email" ||
+    hasPendingEmailConfirmation()
+  );
 };
 
 const getAuthCallbackParams = () => {
@@ -55,12 +107,47 @@ const getAuthCallbackParams = () => {
 const isEmailConfirmationRedirect = () => {
   const { search, hash } = getAuthCallbackParams();
   return (
-    search.has("code") ||
     search.get("type") === "signup" ||
     hash.get("type") === "signup" ||
     hash.get("type") === "email" ||
-    search.get("email_confirmed") === "1"
+    search.get("email_confirmed") === "1" ||
+    hasPendingEmailConfirmation()
   );
+};
+
+const PENDING_GOOGLE_OAUTH_KEY = "motoshot_oauth_google";
+
+const hasPendingGoogleOAuth = () =>
+  typeof sessionStorage !== "undefined" &&
+  sessionStorage.getItem(PENDING_GOOGLE_OAUTH_KEY) === "1";
+
+const setPendingGoogleOAuth = () => {
+  try {
+    sessionStorage.setItem(PENDING_GOOGLE_OAUTH_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+};
+
+const clearPendingGoogleOAuth = () => {
+  try {
+    sessionStorage.removeItem(PENDING_GOOGLE_OAUTH_KEY);
+  } catch {
+    /* ignore */
+  }
+};
+
+const isOAuthCallback = () => {
+  if (typeof window !== "undefined" && window.location.pathname.includes("oauth-complete")) {
+    return true;
+  }
+  if (typeof window !== "undefined" && window.location.pathname.includes("oauth-web")) {
+    return true;
+  }
+  const { search } = getAuthCallbackParams();
+  if (search.get("oauth") === "google" || hasPendingGoogleOAuth()) return true;
+  if (search.has("code") && !isEmailConfirmationRedirect()) return true;
+  return false;
 };
 
 const cleanAuthParamsFromUrl = () => {
@@ -112,6 +199,9 @@ const translateAuthError = (message) => {
   }
   if (lower.includes("password") && lower.includes("least")) {
     return "La contraseña debe tener al menos 6 caracteres.";
+  }
+  if (lower.includes("access_denied") || lower.includes("denied access")) {
+    return "Inicio con Google cancelado.";
   }
   return m;
 };
@@ -379,6 +469,17 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [grantAdminEmail, setGrantAdminEmail] = useState("");
   const isCEO = userRole === "ceo" || isCeo(user?.email);
   const isStaff = userRole === "ceo" || userRole === "admin" || isAdminEmail(user?.email);
+  const canDownloadPhoto = useCallback(
+    (photo) => {
+      if (!photo) return false;
+      if (isCEO) return true;
+      if (!user) return false;
+      if (purchased.includes(photo.id)) return true;
+      if (photo.photographer?.user_id === user.id) return true;
+      return false;
+    },
+    [isCEO, user, purchased]
+  );
   const isLoggedIn = authReady && Boolean(user && session?.access_token);
   const [showPassword, setShowPassword] = useState(false);
   const [showSubscribeModal, setShowSubscribeModal] = useState(false);
@@ -408,6 +509,88 @@ function WatermarkedImage({ src, photographer, purchased }) {
       toastTimerRef.current = null;
     }, 3000);
   };
+
+  const clearGoogleOAuthUi = useCallback(() => {
+    authSubmittingRef.current = false;
+    setAuthSubmitting(false);
+    setGlobalLoading({ active: false, message: "" });
+    clearPendingGoogleOAuth();
+  }, []);
+
+  const completeOAuthSignIn = useCallback(
+    async (oauthSession) => {
+      const oauthUser = oauthSession?.user;
+      if (!oauthSession?.access_token || !oauthUser) return;
+
+      markOAuthReturnComplete();
+      scheduleOAuthBrowserClose();
+
+      setSession(oauthSession);
+      setUser(oauthUser);
+      cleanAuthParamsFromUrl();
+      clearGoogleOAuthUi();
+      clearOAuthRedirectUrl();
+
+      const displayName =
+        oauthUser.user_metadata?.full_name ||
+        oauthUser.user_metadata?.name ||
+        oauthUser.email?.split("@")[0] ||
+        "rider";
+      const createdMs = oauthUser.created_at ? new Date(oauthUser.created_at).getTime() : 0;
+      const isNewUser = createdMs > 0 && Date.now() - createdMs < 3 * 60 * 1000;
+
+      if (isNewUser) {
+        setSuccessMode("oauth");
+        setView(VIEWS.SUCCESS);
+        fetch("/api/auth/welcome", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: oauthUser.email, name: displayName }),
+        }).catch(() => {});
+      } else {
+        setActiveTab("feed");
+        setView(VIEWS.PHOTOGRAPHERS);
+        showToast(`¡Hola de nuevo, ${displayName}!`);
+      }
+
+    },
+    [clearGoogleOAuthUi]
+  );
+
+  const handleGoogleAuth = useCallback(async () => {
+    if (authSubmittingRef.current || authSubmitting || globalLoading.active) return;
+    const isNative = Capacitor.isNativePlatform();
+    try {
+      authSubmittingRef.current = true;
+      setAuthSubmitting(true);
+      setGlobalLoading({ active: true, message: "Conectando con Google..." });
+
+      if (isNative) {
+        const session = await signInWithGoogleNative();
+        await completeOAuthSignIn(session);
+        return;
+      }
+
+      setPendingGoogleOAuth();
+      const redirectTo = `${window.location.origin}/oauth-web.html?oauth=google`;
+      storeOAuthRedirectUrl(redirectTo);
+      resetOAuthExchangeState();
+
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo,
+          queryParams: { access_type: "offline", prompt: "select_account" },
+        },
+      });
+      if (error) throw error;
+      if (data?.url) window.location.href = data.url;
+    } catch (err) {
+      clearGoogleOAuthUi();
+      const msg = translateAuthError(err?.message) || "No se pudo continuar con Google.";
+      showToast(msg);
+    }
+  }, [authSubmitting, globalLoading.active, clearGoogleOAuthUi, completeOAuthSignIn]);
   const [selectedTag, setSelectedTag] = useState(null);
   const [heroScrollY, setHeroScrollY] = useState(0);
   const [heroVideoReady, setHeroVideoReady] = useState(false);
@@ -422,6 +605,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [subsLoading, setSubsLoading] = useState(false);
   const [withdrawals, setWithdrawals] = useState([]);
   const [withdrawalsLoading, setWithdrawalsLoading] = useState(false);
+  const [bankAccountInput, setBankAccountInput] = useState("");
+  const [bankAccountSaving, setBankAccountSaving] = useState(false);
   const [showEmailConfirm, setShowEmailConfirm] = useState(false);
   const [adminWithdrawals, setAdminWithdrawals] = useState([]);
   const [vendorRequests, setVendorRequests] = useState([]);
@@ -442,7 +627,22 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [uploadLoading, setUploadLoading] = useState(false);
   const [uploadFiles, setUploadFiles] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({});
-
+  const [videos, setVideos] = useState([]);
+  const [videoSearchFilters, setVideoSearchFilters] = useState({
+    brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "",
+  });
+  const [analyzingMedia, setAnalyzingMedia] = useState(false);
+  const [autoTags, setAutoTags] = useState(null);
+  const [pendingDeliveries, setPendingDeliveries] = useState([]);
+  const [videoFile, setVideoFile] = useState(null);
+  const [videoForm, setVideoForm] = useState({
+    price: "", sector: "", event_time_start: "", event_time_end: "", album_id: "",
+  });
+  const [videoUploadLoading, setVideoUploadLoading] = useState(false);
+  const [selectedVideo, setSelectedVideo] = useState(null);
+  const [purchasedVideos, setPurchasedVideos] = useState([]);
+  const videoRefs = useRef({});
+  const playingVideos = useRef([]);
 
   const showEmailConfirmedPage = useCallback((s) => {
     if (!s?.user?.email_confirmed_at) return;
@@ -452,11 +652,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
     setView(VIEWS.SUCCESS);
     setShowEmailConfirm(false);
     setShowUnconfirmedBanner(false);
-    try {
-      sessionStorage.removeItem(PENDING_EMAIL_CONFIRM_KEY);
-    } catch (_) {
-      /* ignore */
-    }
+    setGlobalLoading({ active: false, message: "" });
+    clearPendingEmailConfirmation();
     cleanAuthParamsFromUrl();
   }, []);
 
@@ -468,20 +665,42 @@ function WatermarkedImage({ src, photographer, purchased }) {
     const fromConfirmEmail =
       confirmContext ||
       search.get("email_confirmed") === "1" ||
-      (typeof sessionStorage !== "undefined" &&
-        sessionStorage.getItem(PENDING_EMAIL_CONFIRM_KEY) === "1");
+      hasPendingEmailConfirmation();
 
     if (!fromConfirmEmail && !authError) return false;
 
-    const { data: { session } } = await supabase.auth.getSession();
+    if (search.has("code")) {
+      try {
+        await supabase.auth.exchangeCodeForSession(window.location.href);
+      } catch (err) {
+        console.error("exchangeCodeForSession:", err);
+      }
+    } else if (hash.has("access_token") || hash.has("refresh_token")) {
+      const accessToken = hash.get("access_token") || "";
+      const refreshToken = hash.get("refresh_token") || "";
+      if (accessToken && refreshToken) {
+        try {
+          await supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken,
+          });
+        } catch (err) {
+          console.error("setSession(from hash):", err);
+        }
+      }
+    }
+
+    let session = null;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const { data } = await supabase.auth.getSession();
+      session = data.session;
+      if (session?.access_token) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
 
     if (authError && fromConfirmEmail) {
       cleanAuthParamsFromUrl();
-      try {
-        sessionStorage.removeItem(PENDING_EMAIL_CONFIRM_KEY);
-      } catch (_) {
-        /* ignore */
-      }
+      clearPendingEmailConfirmation();
       const msg =
         errorCode === "otp_expired"
           ? "Este enlace ya expiró o ya se usó. Iniciá sesión y pedí reenviar el correo de confirmación."
@@ -499,33 +718,126 @@ function WatermarkedImage({ src, photographer, purchased }) {
       return true;
     }
 
-    const fromCode = search.has("code");
-    const pendingFlag =
-      typeof sessionStorage !== "undefined" &&
-      sessionStorage.getItem(PENDING_EMAIL_CONFIRM_KEY) === "1";
-
-    if (!session?.access_token || (!fromCode && !pendingFlag && !confirmContext)) {
-      return false;
-    }
+    if (!session?.access_token) return false;
 
     let user = session.user;
     if (!user?.email_confirmed_at) {
-      for (let attempt = 0; attempt < 4 && !user?.email_confirmed_at; attempt += 1) {
+      for (let attempt = 0; attempt < 8 && !user?.email_confirmed_at; attempt += 1) {
         const { data: { user: refreshed } } = await supabase.auth.getUser();
         if (refreshed) user = refreshed;
-        if (!user?.email_confirmed_at && attempt < 3) {
-          await new Promise((r) => setTimeout(r, 150));
+        if (!user?.email_confirmed_at && attempt < 7) {
+          await new Promise((r) => setTimeout(r, 200));
         }
       }
     }
 
-    if (user?.email_confirmed_at) {
+    if (user?.email_confirmed_at && shouldShowEmailConfirmedSuccess()) {
       showEmailConfirmedPage({ ...session, user });
       return true;
     }
 
     return false;
   }, [showEmailConfirmedPage]);
+
+  const processOAuthFromCallbackUrl = useCallback(
+    async (callbackUrl) => {
+      if (!callbackUrl) return false;
+
+      return runOAuthExchangeOnce(async () => {
+        restorePkceVerifier();
+
+        const { data: existingSession } = await supabase.auth.getSession();
+        if (existingSession.session?.access_token) {
+          scheduleOAuthBrowserClose();
+          await completeOAuthSignIn(existingSession.session);
+          return true;
+        }
+
+        const exchangeUrl = buildOAuthExchangeUrl(callbackUrl);
+        if (!exchangeUrl) return false;
+
+        const incoming = (() => {
+          if (callbackUrl.startsWith("com.motoshotgt.app://")) {
+            return new URLSearchParams(callbackUrl.split("?")[1] || "");
+          }
+          try {
+            return new URL(callbackUrl).searchParams;
+          } catch {
+            return new URLSearchParams(callbackUrl.split("?")[1] || "");
+          }
+        })();
+
+        const authError = incoming.get("error");
+        if (authError) {
+          clearGoogleOAuthUi();
+          cleanAuthParamsFromUrl();
+          const errorDescription = (
+            incoming.get("error_description") || authError
+          ).replace(/\+/g, " ");
+          showToast(translateAuthError(errorDescription));
+          setView(VIEWS.AUTH);
+          return true;
+        }
+
+        if (!incoming.get("code")) return false;
+
+        try {
+          await supabase.auth.exchangeCodeForSession(exchangeUrl);
+        } catch (err) {
+          const { data: retrySession } = await supabase.auth.getSession();
+          if (!retrySession.session?.access_token) {
+            console.error("exchangeCodeForSession:", err?.message || err);
+            throw err;
+          }
+        }
+
+        let oauthSession = null;
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const { data } = await supabase.auth.getSession();
+          oauthSession = data.session;
+          if (oauthSession?.access_token) break;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+
+        if (oauthSession?.access_token) {
+          scheduleOAuthBrowserClose();
+          await completeOAuthSignIn(oauthSession);
+          return true;
+        }
+
+        throw new Error("No se pudo completar el inicio con Google.");
+      });
+    },
+    [clearGoogleOAuthUi, completeOAuthSignIn]
+  );
+
+  const processOAuthCallbackFromUrl = useCallback(async () => {
+    const { search } = getAuthCallbackParams();
+    if (search.get("oauth") === "google" && search.get("completed") === "1") {
+      const { data } = await supabase.auth.getSession();
+      if (data.session?.access_token) {
+        await completeOAuthSignIn(data.session);
+        return true;
+      }
+    }
+    if (search.get("oauth") === "google" && search.get("error")) {
+      clearGoogleOAuthUi();
+      cleanAuthParamsFromUrl();
+      showToast(translateAuthError(search.get("error")));
+      setView(VIEWS.AUTH);
+      return true;
+    }
+    if (!isOAuthCallback()) return false;
+    try {
+      return await processOAuthFromCallbackUrl(window.location.href);
+    } catch (err) {
+      clearGoogleOAuthUi();
+      cleanAuthParamsFromUrl();
+      showToast(translateAuthError(err?.message) || "No se pudo ingresar con Google.");
+      setView(VIEWS.AUTH);
+      return true;
+    }
+  }, [clearGoogleOAuthUi, completeOAuthSignIn, processOAuthFromCallbackUrl]);
 
   const clearAuthState = useCallback(async () => {
     try {
@@ -565,24 +877,51 @@ function WatermarkedImage({ src, photographer, purchased }) {
     }
     clearPendingPayment();
     if (photo) setSelected(photo);
+    setSelectedVideo(null);
     setPurchased((prev) => [...new Set([...prev, photoId])]);
     setSuccessMode("purchase");
     setView(VIEWS.SUCCESS);
     setPayStep(0);
   }, [photos]);
 
-  const syncPendingPayments = useCallback(async () => {
+  const finalizeVideoPurchase = useCallback(async (videoId) => {
+    const video = videos.find((v) => v.id === videoId) || { id: videoId };
+    clearPendingPayment();
+    setSelectedVideo(video);
+    setSelected(null);
+    setPurchasedVideos((prev) => [...new Set([...prev, videoId])]);
+    setSuccessMode("video");
+    setView(VIEWS.SUCCESS);
+    setPayStep(0);
+  }, [videos]);
+
+  const handlePaymentCancelled = useCallback(() => {
+    stopPaymentPolling();
+    clearPendingPayment();
+    paymentSyncInFlight.current = false;
+    setGlobalLoading({ active: false, message: "" });
+    setPayStep(1);
+    setSubPayLoading(false);
+    showToast("Pago cancelado.");
+  }, []);
+
+  const syncPendingPayments = useCallback(async ({ silent = false } = {}) => {
     if (!session?.access_token || paymentSyncInFlight.current) return false;
+    if (isOAuthCallback() || successMode === "oauth" || successMode === "email") return false;
 
     const pending = readPendingPayment();
     const params = new URLSearchParams(window.location.search);
     const paymentReturn =
       params.get("payment_return") === "true" ||
       params.get("paypal_return") === "true";
-    if (!pending && !paymentReturn) return false;
+    const paypalToken = params.get("token");
+    const videoIdFromUrl = params.get("video_id");
+    if (!pending && !paymentReturn && !(paypalToken && videoIdFromUrl)) return false;
 
     paymentSyncInFlight.current = true;
-    setGlobalLoading({ active: true, message: "Confirmando tu pago..." });
+    if (!silent) {
+      setGlobalLoading({ active: true, message: "Confirmando tu pago..." });
+    }
     try {
       const syncRes = await fetch("/api/payments/sync-pending", {
         method: "POST",
@@ -595,6 +934,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
       if (!syncRes.ok) throw new Error(syncData.error || "No se pudo confirmar el pago");
 
       if (syncData.subscriptions?.length) {
+        stopPaymentPolling();
         await closePaymentBrowser();
         clearPendingPayment();
         await refreshMySubscriptions();
@@ -607,8 +947,85 @@ function WatermarkedImage({ src, photographer, purchased }) {
 
       const purchase = syncData.purchases?.[0];
       if (purchase?.photo_id) {
+        stopPaymentPolling();
         await closePaymentBrowser();
         await finalizePhotoPurchase(purchase.photo_id);
+        window.history.replaceState({}, document.title, window.location.pathname);
+        return true;
+      }
+
+      const videoPurchase = syncData.video_purchases?.[0];
+      if (videoPurchase?.video_id) {
+        stopPaymentPolling();
+        await closePaymentBrowser();
+        await finalizeVideoPurchase(videoPurchase.video_id);
+        window.history.replaceState({}, document.title, window.location.pathname);
+        return true;
+      }
+
+      const resolvedVideoId = pending?.videoId || videoIdFromUrl;
+      if (paypalToken && resolvedVideoId) {
+        const res = await fetch("/api/payments/capture-video-paypal-order", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            order_id: paypalToken,
+            paypal_order_id: paypalToken,
+            video_id: resolvedVideoId,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago PayPal");
+        stopPaymentPolling();
+        await closePaymentBrowser();
+        await finalizeVideoPurchase(resolvedVideoId);
+        window.history.replaceState({}, document.title, window.location.pathname);
+        return true;
+      }
+
+      if (pending?.kind === "video" && pending.videoId) {
+        if (pending.provider === "paypal" && (pending.orderId || paypalToken)) {
+          const res = await fetch("/api/payments/capture-video-paypal-order", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({
+              order_id: pending.orderId || paypalToken,
+              paypal_order_id: pending.orderId || paypalToken,
+              video_id: pending.videoId,
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago PayPal");
+          stopPaymentPolling();
+          await closePaymentBrowser();
+          await finalizeVideoPurchase(pending.videoId);
+          window.history.replaceState({}, document.title, window.location.pathname);
+          return true;
+        }
+
+        const res = await fetch("/api/payments/capture-video-order", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            checkout_id: pending.checkoutId || undefined,
+            order_id: pending.checkoutId || undefined,
+            video_id: pending.videoId,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago");
+        stopPaymentPolling();
+        await closePaymentBrowser();
+        await finalizeVideoPurchase(pending.videoId);
         window.history.replaceState({}, document.title, window.location.pathname);
         return true;
       }
@@ -628,6 +1045,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago");
+        stopPaymentPolling();
         await closePaymentBrowser();
         await finalizePhotoPurchase(pending.photoId);
         window.history.replaceState({}, document.title, window.location.pathname);
@@ -649,6 +1067,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago");
+        stopPaymentPolling();
         await closePaymentBrowser();
         clearPendingPayment();
         await refreshMySubscriptions();
@@ -661,13 +1080,17 @@ function WatermarkedImage({ src, photographer, purchased }) {
 
       return false;
     } catch (err) {
-      showToast(err.message || "No se pudo completar el pago. Volvé a la app e intentá de nuevo.");
+      if (!silent) {
+        showToast(err.message || "No se pudo completar el pago. Volvé a la app e intentá de nuevo.");
+      }
       return false;
     } finally {
       paymentSyncInFlight.current = false;
-      setGlobalLoading({ active: false, message: "" });
+      if (!silent) {
+        setGlobalLoading({ active: false, message: "" });
+      }
     }
-  }, [session, finalizePhotoPurchase, refreshMySubscriptions]);
+  }, [session, successMode, finalizePhotoPurchase, finalizeVideoPurchase, refreshMySubscriptions]);
 
   const isSubscribedToPhotographer = useCallback(
     (photographerId) =>
@@ -679,9 +1102,21 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const syncAuthFromSupabase = useCallback(async () => {
     const { search, hash } = getAuthCallbackParams();
     const pendingCallback =
+      isOAuthCallback() ||
       search.has("code") ||
       hash.has("access_token") ||
       isEmailConfirmationRedirect();
+
+    if (search.has("code") && isOAuthCallback()) {
+      if (!(Capacitor.isNativePlatform() && hasPendingGoogleOAuth())) {
+        try {
+          const exchangeUrl = buildOAuthExchangeUrl(window.location.href) || window.location.href;
+          await supabase.auth.exchangeCodeForSession(exchangeUrl);
+        } catch (err) {
+          console.error("exchangeCodeForSession(oauth):", err);
+        }
+      }
+    }
 
     const { data: { session: existing } } = await supabase.auth.getSession();
     if (existing?.user) {
@@ -704,11 +1139,17 @@ function WatermarkedImage({ src, photographer, purchased }) {
   useEffect(() => {
     const initAuth = async () => {
       try {
-        const handledCallback = await processAuthCallbackFromUrl();
-        if (!handledCallback) {
-          await syncAuthFromSupabase();
+        const handledOAuth = await processOAuthCallbackFromUrl();
+        if (!handledOAuth) {
+          const handledCallback = await processAuthCallbackFromUrl();
+          if (!handledCallback) {
+            await syncAuthFromSupabase();
+          }
         }
       } finally {
+        if (!Capacitor.isNativePlatform() && hasPendingGoogleOAuth()) {
+          clearGoogleOAuthUi();
+        }
         setAuthReady(true);
       }
     };
@@ -727,6 +1168,14 @@ function WatermarkedImage({ src, photographer, purchased }) {
       if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
         setSession(s);
         setUser(s?.user ?? null);
+        if (
+          Capacitor.isNativePlatform() &&
+          hasPendingGoogleOAuth() &&
+          s?.access_token &&
+          event === "SIGNED_IN"
+        ) {
+          completeOAuthSignIn(s).catch(() => {});
+        }
       }
       if (event === "PASSWORD_RECOVERY") {
         setShowPasswordReset(true);
@@ -734,25 +1183,113 @@ function WatermarkedImage({ src, photographer, purchased }) {
       if (
         (event === "SIGNED_IN" || event === "INITIAL_SESSION") &&
         s?.access_token &&
-        s?.user?.email_confirmed_at
+        s?.user?.email_confirmed_at &&
+        shouldShowEmailConfirmedSuccess()
       ) {
-        const { search, hash } = getAuthCallbackParams();
-        const pendingFlag =
-          typeof sessionStorage !== "undefined" &&
-          sessionStorage.getItem(PENDING_EMAIL_CONFIRM_KEY) === "1";
-        const fromConfirmLink =
-          search.has("code") ||
-          hash.get("type") === "signup" ||
-          hash.get("type") === "email" ||
-          search.get("type") === "signup" ||
-          pendingFlag;
-        if (fromConfirmLink) {
-          showEmailConfirmedPage(s);
-        }
+        showEmailConfirmedPage(s);
       }
     });
     return () => listener.subscription.unsubscribe();
-  }, [showEmailConfirmedPage, syncAuthFromSupabase, processAuthCallbackFromUrl]);
+  }, [
+    showEmailConfirmedPage,
+    syncAuthFromSupabase,
+    processAuthCallbackFromUrl,
+    processOAuthCallbackFromUrl,
+    clearGoogleOAuthUi,
+    completeOAuthSignIn,
+  ]);
+
+  const resumeNativeGoogleOAuth = useCallback(async () => {
+    if (!Capacitor.isNativePlatform() || !hasPendingGoogleOAuth()) return false;
+    await new Promise((r) => setTimeout(r, 400));
+
+    const { data } = await supabase.auth.getSession();
+    if (data.session?.access_token) {
+      await completeOAuthSignIn(data.session);
+      return true;
+    }
+    return false;
+  }, [completeOAuthSignIn]);
+
+  useEffect(() => {
+    return onNativeOAuthResume(async (source, callbackUrl) => {
+      if (source === "appUrlCancel") {
+        clearGoogleOAuthUi();
+        showToast("Inicio con Google cancelado.");
+        setView(VIEWS.AUTH);
+        return;
+      }
+
+      if (source === "browserClosed") {
+        scheduleOAuthBrowserClose();
+        const { data } = await supabase.auth.getSession();
+        if (data.session?.access_token && hasPendingGoogleOAuth()) {
+          await completeOAuthSignIn(data.session);
+          return;
+        }
+        const resumed = await resumeNativeGoogleOAuth();
+        if (resumed) return;
+        if (!hasPendingGoogleOAuth()) return;
+        clearGoogleOAuthUi();
+        showToast("Inicio con Google cancelado.");
+        setView(VIEWS.AUTH);
+        return;
+      }
+
+      if (!callbackUrl) return;
+      setGlobalLoading({ active: true, message: "Completando inicio con Google..." });
+      try {
+        await processOAuthFromCallbackUrl(callbackUrl);
+      } catch (err) {
+        clearGoogleOAuthUi();
+        showToast(translateAuthError(err?.message) || "No se pudo ingresar con Google.");
+        setView(VIEWS.AUTH);
+      }
+    });
+  }, [clearGoogleOAuthUi, processOAuthFromCallbackUrl, resumeNativeGoogleOAuth]);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let removed = false;
+    let listener = null;
+
+    (async () => {
+      const { App } = await import("@capacitor/app");
+      if (removed) return;
+      listener = await App.addListener("appStateChange", ({ isActive }) => {
+        if (!isActive || !hasPendingGoogleOAuth()) return;
+        resumeNativeGoogleOAuth().catch(() => {});
+        if (isOAuthBrowserOpen()) scheduleOAuthBrowserClose();
+      });
+    })();
+
+    return () => {
+      removed = true;
+      listener?.remove?.();
+    };
+  }, [resumeNativeGoogleOAuth]);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || !authReady || !isLoggedIn) return;
+    if (!isOAuthBrowserOpen() && !hasPendingGoogleOAuth()) return;
+    scheduleOAuthBrowserClose();
+  }, [authReady, isLoggedIn]);
+
+  useEffect(() => {
+    const onPageShow = (event) => {
+      if (!event.persisted || !hasPendingGoogleOAuth()) return;
+      clearGoogleOAuthUi();
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, [clearGoogleOAuthUi]);
+
+  useEffect(() => {
+    if (!authReady || !session?.user?.email_confirmed_at) return;
+    if (!shouldShowEmailConfirmedSuccess()) return;
+    if (view === VIEWS.SUCCESS && successMode === "email") return;
+    showEmailConfirmedPage(session);
+  }, [authReady, session, view, successMode, showEmailConfirmedPage]);
 
   useEffect(() => {
     const visibleSince = window.__MOTOSHOT_SPLASH_VISIBLE_SINCE__ || Date.now();
@@ -800,17 +1337,38 @@ const fetchAllSubscriptions = async () => {
   }
 };
 
+const openConfirmDialog = useCallback(
+  ({
+    title = "CONFIRMAR",
+    message,
+    confirmLabel = "CONFIRMAR",
+    cancelLabel = "CANCELAR",
+    destructive = false,
+    onConfirm,
+  }) => {
+    setConfirmDialog({
+      title,
+      message,
+      confirmLabel,
+      cancelLabel,
+      destructive,
+      onConfirm: () => {
+        setConfirmDialog(null);
+        onConfirm?.();
+      },
+    });
+  },
+  []
+);
+
 const openCancelSubscriptionConfirm = (subId) => {
-  setConfirmDialog({
+  openConfirmDialog({
     title: "CANCELAR SUSCRIPCIÓN",
     message: "¿Cancelar esta suscripción? Seguirás con acceso hasta la fecha de vencimiento.",
     confirmLabel: "SÍ, CANCELAR",
     cancelLabel: "NO",
     destructive: true,
-    onConfirm: () => {
-      setConfirmDialog(null);
-      handleCancelSubscription(subId);
-    },
+    onConfirm: () => handleCancelSubscription(subId),
   });
 };
 
@@ -859,7 +1417,9 @@ const handleSubscriptionPayment = async (photographerId, subscriptionId = null) 
       subscriptionId: subscriptionId || null,
       checkoutId: data.checkout_id || data.order_id || null,
     });
-    await openRecurrenteCheckout(data.approve_url || data.checkout_url);
+    await openRecurrenteCheckout(data.approve_url || data.checkout_url, () =>
+      syncPendingPayments({ silent: true })
+    );
     setSubPayLoading(false);
   } catch (err) {
     setSubPayLoading(false);
@@ -1088,6 +1648,34 @@ const fetchMyWithdrawals = async () => {
   }
 };
 
+const handleSaveBankAccount = async () => {
+  const cleaned = bankAccountInput.trim();
+  if (cleaned.length < 10) {
+    showToast("Ingresá banco, tipo de cuenta y número (mín. 10 caracteres).");
+    return;
+  }
+  setBankAccountSaving(true);
+  try {
+    const res = await fetch("/api/auth/bank-account", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session?.access_token}`,
+      },
+      body: JSON.stringify({ bank_account: cleaned }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    setProfile(data.photographer);
+    setBankAccountInput(data.photographer?.bank_account || cleaned);
+    showToast("Cuenta bancaria guardada.");
+  } catch (err) {
+    showToast(err.message || "No se pudo guardar la cuenta.");
+  } finally {
+    setBankAccountSaving(false);
+  }
+};
+
 const fetchAdminWithdrawals = async () => {
   if (!session) return;
   try {
@@ -1192,10 +1780,16 @@ const fetchAdminPhotographers = async () => {
   }
 };
 
-const handleVendorVerification = async (id, status) => {
+const handleVendorVerification = (id, status) => {
   if (!session) return;
   const label = status === "approved" ? "aprobar" : "rechazar";
-  if (!confirm(`¿Confirmás ${label} esta solicitud de fotógrafo?`)) return;
+  openConfirmDialog({
+    title: status === "approved" ? "APROBAR FOTÓGRAFO" : "RECHAZAR SOLICITUD",
+    message: `¿Confirmás ${label} esta solicitud de fotógrafo?`,
+    confirmLabel: status === "approved" ? "SÍ, APROBAR" : "SÍ, RECHAZAR",
+    cancelLabel: "NO",
+    destructive: status !== "approved",
+    onConfirm: async () => {
   const res = await fetch(`/api/auth/admin/photographers/${id}/verification`, {
     method: "PUT",
     headers: {
@@ -1213,12 +1807,20 @@ const handleVendorVerification = async (id, status) => {
   } else {
     showToast(data.error || "No se pudo actualizar la solicitud.");
   }
+    },
+  });
 };
 
-const handlePhotographerActive = async (id, active) => {
+const handlePhotographerActive = (id, active) => {
   if (!session || !isCEO) return;
   const action = active ? "reactivar" : "suspender";
-  if (!confirm(`¿Confirmás ${action} este perfil de fotógrafo?`)) return;
+  openConfirmDialog({
+    title: active ? "REACTIVAR FOTÓGRAFO" : "SUSPENDER FOTÓGRAFO",
+    message: `¿Confirmás ${action} este perfil de fotógrafo?`,
+    confirmLabel: active ? "SÍ, REACTIVAR" : "SÍ, SUSPENDER",
+    cancelLabel: "NO",
+    destructive: !active,
+    onConfirm: async () => {
   const res = await fetch(`/api/auth/admin/photographers/${id}/active`, {
     method: "PUT",
     headers: {
@@ -1235,6 +1837,8 @@ const handlePhotographerActive = async (id, active) => {
   } else {
     showToast(data.error || "No se pudo actualizar el perfil.");
   }
+    },
+  });
 };
 
 const fetchCeoPayroll = async () => {
@@ -1292,8 +1896,15 @@ const handleGrantAdmin = async () => {
   }
 };
 
-const handleRevokeAdmin = async (email) => {
-  if (!session || !confirm(`¿Revocar permisos de administrador a ${email}?`)) return;
+const handleRevokeAdmin = (email) => {
+  if (!session) return;
+  openConfirmDialog({
+    title: "REVOCAR ADMIN",
+    message: `¿Revocar permisos de administrador a ${email}?`,
+    confirmLabel: "SÍ, REVOCAR",
+    cancelLabel: "NO",
+    destructive: true,
+    onConfirm: async () => {
   const res = await fetch(`/api/auth/ceo/admins/${encodeURIComponent(email)}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${session.access_token}` },
@@ -1305,6 +1916,8 @@ const handleRevokeAdmin = async (email) => {
   } else {
     showToast(data.error || "No se pudo revocar.");
   }
+    },
+  });
 };
 
 const exportPayrollCsv = () => {
@@ -1461,6 +2074,9 @@ useEffect(() => {
     const tabByView = {
       [VIEWS.PHOTOGRAPHERS]: "feed",
       [VIEWS.UPLOAD]: "upload",
+      [VIEWS.UPLOAD_VIDEO]: "uploadVideo",
+      [VIEWS.VIDEO_SEARCH]: "videos",
+      [VIEWS.PENDING_DELIVERIES]: "deliveries",
       [VIEWS.DASHBOARD]: "dash",
       [VIEWS.MY_PURCHASES]: "purchases",
       [VIEWS.MY_GALLERY]: "gallery",
@@ -1486,6 +2102,10 @@ useEffect(() => {
   }, [view, isStaff, isCEO, session]);
 
   useEffect(() => {
+    setBankAccountInput(profile?.bank_account || "");
+  }, [profile?.bank_account]);
+
+  useEffect(() => {
     const isApproved = profile?.verification_status === "approved";
     const needsStats = (view === VIEWS.DASHBOARD || view === VIEWS.VENDOR_REQUEST) && isApproved && session?.access_token && user;
     if (needsStats) {
@@ -1503,6 +2123,102 @@ useEffect(() => {
       fetchPurchases();
     }
   }, [view, profile, session, user]);
+
+  const fetchPendingDeliveries = useCallback(async () => {
+    if (!profile?.id || profile.verification_status !== "approved" || !session?.access_token) return;
+    try {
+      const res = await fetch(`/api/photos/pending-delivery/${profile.id}`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPendingDeliveries(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error("fetchPendingDeliveries:", err);
+    }
+  }, [profile?.id, profile?.verification_status, session?.access_token]);
+
+  useEffect(() => {
+    fetchPendingDeliveries();
+  }, [fetchPendingDeliveries, view]);
+
+  const analyzeMediaWithAI = async (file) => {
+    if (!session?.access_token) return;
+    setAnalyzingMedia(true);
+    setAutoTags(null);
+    try {
+      let imageBase64;
+      let mimeType;
+      if (file.type.startsWith("video/")) {
+        const video = document.createElement("video");
+        video.src = URL.createObjectURL(file);
+        await new Promise((resolve) => { video.onloadeddata = resolve; });
+        video.currentTime = 5;
+        await new Promise((resolve) => { video.onseeked = resolve; });
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext("2d").drawImage(video, 0, 0);
+        imageBase64 = canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
+        mimeType = "image/jpeg";
+        URL.revokeObjectURL(video.src);
+      } else {
+        const reader = new FileReader();
+        await new Promise((resolve) => {
+          reader.onload = resolve;
+          reader.readAsDataURL(file);
+        });
+        imageBase64 = reader.result.split(",")[1];
+        mimeType = file.type;
+      }
+      const endpoint = file.type.startsWith("video/") ? "/api/videos/analyze-frame" : "/api/photos/analyze";
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ imageBase64, mimeType }),
+      });
+      const data = await res.json();
+      if (res.ok) setAutoTags(data);
+      else showToast(data.error || "No se pudo analizar el archivo.");
+    } catch (err) {
+      console.error("Error analizando media:", err);
+      showToast("Error al analizar con IA.");
+    } finally {
+      setAnalyzingMedia(false);
+    }
+  };
+
+  const handleVideoSearch = async () => {
+    const params = new URLSearchParams();
+    Object.entries(videoSearchFilters).forEach(([k, v]) => { if (v) params.append(k, v); });
+    try {
+      const res = await fetch(`/api/videos/search?${params}`);
+      const data = await res.json();
+      setVideos(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error("handleVideoSearch:", err);
+      showToast("Error al buscar videos.");
+    }
+  };
+
+  const handleVideoHover = (videoId, isEntering) => {
+    const videoEl = videoRefs.current[videoId];
+    if (!videoEl) return;
+    if (isEntering) {
+      if (playingVideos.current.length >= 3) {
+        const oldest = playingVideos.current.shift();
+        const oldEl = videoRefs.current[oldest];
+        if (oldEl) { oldEl.pause(); oldEl.currentTime = 0; }
+      }
+      playingVideos.current.push(videoId);
+      videoEl.play().catch(() => {});
+    } else {
+      playingVideos.current = playingVideos.current.filter((id) => id !== videoId);
+      videoEl.pause();
+      videoEl.currentTime = 0;
+    }
+  };
 
   useEffect(() => {
     if (view !== VIEWS.VENDOR_REQUEST && editMode) {
@@ -1538,24 +2254,37 @@ useEffect(() => {
       params.get("payment_cancel") === "true" || params.get("paypal_cancel") === "true";
 
     if (paymentCancel) {
-      clearPendingPayment();
-      setPayStep(0);
-      showToast("Pago cancelado.");
+      handlePaymentCancelled();
       window.history.replaceState({}, document.title, window.location.pathname);
       return;
     }
 
     syncPendingPayments();
-  }, [authReady, session, syncPendingPayments]);
+  }, [authReady, session, syncPendingPayments, handlePaymentCancelled]);
 
   useEffect(() => {
     if (!authReady || !session) return;
     return onNativePaymentResume((source) => {
-      if (readPendingPayment() || source === "pageLoaded" || source === "browser") {
-        syncPendingPayments();
+      if (source === "browserCancelled" || source === "appUrlCancel") {
+        handlePaymentCancelled();
+        return;
       }
+
+      const syncSources = new Set([
+        "pageLoaded",
+        "browserAfterReturn",
+        "appUrlOpen",
+        "launchUrl",
+        "resume",
+      ]);
+      if (!readPendingPayment() && !syncSources.has(source)) return;
+      const showLoading =
+        source === "appUrlOpen" ||
+        source === "launchUrl" ||
+        source === "browserAfterReturn";
+      syncPendingPayments({ silent: !showLoading });
     });
-  }, [authReady, session, syncPendingPayments]);
+  }, [authReady, session, syncPendingPayments, handlePaymentCancelled]);
 
   const filteredPhotos = photos.filter(p => {
   if (searchTerm === "") return true;
@@ -1570,7 +2299,15 @@ useEffect(() => {
   // ── Handlers ───────────────────────────────────────────────
   const handleBuy = (photo) => {
     if (!user) { setPendingPurchase(photo); setMessage(""); setView(VIEWS.AUTH); return; }
+    setSelectedVideo(null);
     setSelected(photo); setPayStep(1);
+  };
+
+  const handleBuyVideo = (video) => {
+    if (!user) { setMessage(""); setView(VIEWS.AUTH); return; }
+    setSelected(null);
+    setSelectedVideo(video);
+    setPayStep(1);
   };
 
   const handlePayment = async () => {
@@ -1593,10 +2330,95 @@ useEffect(() => {
         photoId: selected.id,
         checkoutId: data.checkout_id || data.order_id || null,
       });
-      await openRecurrenteCheckout(data.approve_url || data.checkout_url);
+      await openRecurrenteCheckout(data.approve_url || data.checkout_url, () =>
+        syncPendingPayments({ silent: true })
+      );
       setPayStep(1);
     } catch (err) {
-      console.error(err); setPayStep(1); showToast(err.message || "No se pudo iniciar el pago.");
+      console.error(err); setPayStep(1);       showToast(err.message || "No se pudo iniciar el pago.");
+    }
+  };
+
+  const handleVideoPayment = async () => {
+    if (!selectedVideo) return;
+    setPayStep(2);
+    try {
+      const res = await fetch("/api/payments/create-video-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({
+          video_id: selectedVideo.id,
+          return_url: buildPaymentReturnUrl({ video_id: selectedVideo.id }),
+          cancel_url: buildPaymentCancelUrl({ video_id: selectedVideo.id }),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error creando orden");
+      writePendingPayment({
+        kind: "video",
+        videoId: selectedVideo.id,
+        checkoutId: data.checkout_id || data.order_id || null,
+        provider: "recurrente",
+      });
+      await openRecurrenteCheckout(data.approve_url || data.checkout_url, () =>
+        syncPendingPayments({ silent: true })
+      );
+      setPayStep(1);
+    } catch (err) {
+      console.error(err);
+      setPayStep(1);
+      showToast(err.message || "No se pudo iniciar el pago.");
+    }
+  };
+
+  const handleVideoPayPalPayment = async () => {
+    if (!selectedVideo) return;
+    setPayStep(2);
+    try {
+      const res = await fetch("/api/payments/create-video-paypal-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({
+          video_id: selectedVideo.id,
+          return_url: buildPaymentReturnUrl({ video_id: selectedVideo.id, paypal_return: "true" }),
+          cancel_url: buildPaymentCancelUrl({ video_id: selectedVideo.id, paypal_cancel: "true" }),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error creando orden PayPal");
+      writePendingPayment({
+        kind: "video",
+        videoId: selectedVideo.id,
+        orderId: data.order_id || data.paypal_order_id || null,
+        provider: "paypal",
+      });
+      await openRecurrenteCheckout(data.approve_url, () =>
+        syncPendingPayments({ silent: true })
+      );
+      setPayStep(1);
+    } catch (err) {
+      console.error(err);
+      setPayStep(1);
+      showToast(err.message || "No se pudo iniciar PayPal.");
+    }
+  };
+
+  const handleVideoDownload = async () => {
+    if (!selectedVideo?.id || !session?.access_token) return;
+    try {
+      const res = await fetch(`/api/videos/${selectedVideo.id}/download`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al descargar");
+      if (data.status === "pending") {
+        showToast(data.message || "El fotógrafo está preparando tu video.");
+        return;
+      }
+      if (data.download_url) window.open(data.download_url, "_blank");
+    } catch (err) {
+      console.error(err);
+      showToast("Error al descargar el video.");
     }
   };
 
@@ -1695,11 +2517,7 @@ useEffect(() => {
       const remaining = MIN_AUTH_LOADING_MS - (Date.now() - startedAt);
       if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
 
-      try {
-        sessionStorage.setItem(PENDING_EMAIL_CONFIRM_KEY, "1");
-      } catch (_) {
-        /* ignore */
-      }
+      setPendingEmailConfirmation();
       setMessage("");
       setShowEmailConfirm(true);
     } catch (err) {
@@ -1772,6 +2590,50 @@ useEffect(() => {
     }
   };
 
+  const revokeUploadPreview = (item) => {
+    if (item?.url) URL.revokeObjectURL(item.url);
+  };
+
+  const addUploadFiles = (fileList) => {
+    const picked = Array.from(fileList || []);
+    if (picked.length === 0) return;
+    setUploadFiles((prev) => {
+      const existing = new Set(prev.map((item) => `${item.file.name}|${item.file.size}|${item.file.lastModified}`));
+      const next = [...prev];
+      picked.forEach((file) => {
+        const key = `${file.name}|${file.size}|${file.lastModified}`;
+        if (existing.has(key)) return;
+        existing.add(key);
+        next.push({
+          id: `${key}-${Math.random().toString(36).slice(2, 9)}`,
+          file,
+          url: URL.createObjectURL(file),
+          tags: "",
+        });
+      });
+      return next;
+    });
+    setUploadProgress({});
+  };
+
+  const removeUploadFile = (id) => {
+    if (uploadLoading) return;
+    setUploadFiles((prev) => {
+      const item = prev.find((entry) => entry.id === id);
+      revokeUploadPreview(item);
+      return prev.filter((entry) => entry.id !== id);
+    });
+  };
+
+  const clearUploadFiles = () => {
+    if (uploadLoading) return;
+    uploadFiles.forEach(revokeUploadPreview);
+    setUploadFiles([]);
+    setUploadProgress({});
+    const input = document.getElementById("photo-input");
+    if (input) input.value = "";
+  };
+
   const handleUploadPhoto = async () => {
     if (uploadFiles.length === 0) return setMessage("Seleccioná al menos una foto.");
     if (!uploadForm.location || !uploadForm.ride_date || !uploadForm.price)
@@ -1785,14 +2647,14 @@ useEffect(() => {
     uploadFiles.forEach(f => { initialProgress[f.file.name] = "pending"; });
   
     const results = await Promise.allSettled(
-      uploadFiles.map(async ({ file }) => {
+      uploadFiles.map(async ({ file, tags }) => {
         setUploadProgress(prev => ({ ...prev, [file.name]: "uploading" }));
         const formData = new FormData();
         formData.append("photo", file);
         formData.append("location", uploadForm.location);
         formData.append("ride_date", uploadForm.ride_date);
         formData.append("price", uploadForm.price);
-        formData.append("tags", uploadForm.tags);
+        formData.append("tags", tags || uploadForm.tags || "");
         formData.append("time_start", uploadForm.time_start || "");
         formData.append("time_end", uploadForm.time_end || "");
         formData.append("album_id", uploadForm.album_id || "");
@@ -1815,9 +2677,12 @@ useEffect(() => {
       showToast("Listo: Fotos publicadas exitosamente.");
       fetchPhotos();
       setTimeout(() => {
+        uploadFiles.forEach(revokeUploadPreview);
         setUploadFiles([]);
         setUploadProgress({});
         setUploadForm({ location: "", ride_date: "", price: "", tags: "", time_start: "", time_end: "", album_id: "" });
+        const input = document.getElementById("photo-input");
+        if (input) input.value = "";
       }, 3000);
     }
     if (failed > 0) setMessage(`${failed} foto(s) no se pudieron subir.`);
@@ -1865,6 +2730,7 @@ useEffect(() => {
           {filteredPhotos.map(photo => (
             <div key={photo.id} className="card" onClick={() => openPhotoDetail(photo, VIEWS.GALLERY)}>
               {purchased.includes(photo.id) && <div className="card-bought-badge" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="check" size={12} color="#000" /> Comprada</div>}
+              {isCEO && !purchased.includes(photo.id) && <div className="card-ceo-badge" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="check" size={12} color="#000" /> CEO · HD</div>}
               {user && photo.photographer?.user_id === user?.id && (
             <AppButton
             style={{
@@ -1873,27 +2739,35 @@ useEffect(() => {
               color: "#fff", borderRadius: 6, padding: "4px 10px",
               fontSize: 11, fontWeight: 700, cursor: "pointer",
     }}
-              onClick={async e => {
+              onClick={e => {
               e.stopPropagation();
-      if (!confirm("¿Eliminar esta foto?")) return;
-      const res = await fetch(`/api/photos/${photo.id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${session?.access_token}` },
+      openConfirmDialog({
+        title: "ELIMINAR FOTO",
+        message: "¿Eliminar esta foto? Esta acción no se puede deshacer.",
+        confirmLabel: "SÍ, ELIMINAR",
+        cancelLabel: "NO",
+        destructive: true,
+        onConfirm: async () => {
+          const res = await fetch(`/api/photos/${photo.id}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${session?.access_token}` },
           });
           if (res.ok) fetchPhotos();
+        },
+      });
           }}
          >
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="trash" size={14} /> Eliminar</span>
             </AppButton>
               )}
               <div className="card-photo-badge">{photo.photographer?.name || "MOTOSHOT"}</div>
-              <WatermarkedImage src={photo.watermark_url} photographer={photo.photographer?.name || "MOTOSHOT"} purchased={purchased.includes(photo.id)} />
+              <WatermarkedImage src={photo.watermark_url} photographer={photo.photographer?.name || "MOTOSHOT"} purchased={canDownloadPhoto(photo)} />
               <div className="card-overlay">
                 <div className="card-photographer">{photo.photographer?.name || "MOTOSHOT"}</div>
                 <div className="card-location"><IconText icon="pin" size={12}>{photo.location}</IconText></div>
             <div className="card-footer">
             <div className="card-price">Q{photo.price}</div>
-            { !purchased.includes(photo.id) && photo.photographer?.user_id !== user?.id ? (
+            { !canDownloadPhoto(photo) ? (
             <AppButton
             className="card-buy"
             onClick={e => { e.stopPropagation(); handleBuy(photo); }}
@@ -1902,8 +2776,7 @@ useEffect(() => {
           </AppButton>
   ) : (
     <AppButton
-      className="card-buy"
-      style={{ background: "#3ddc84", color: "#000" }}
+      className="card-buy card-buy-download"
       onClick={e => {
         e.stopPropagation();
         setSelected(photo);
@@ -2175,22 +3048,29 @@ useEffect(() => {
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <span style={{
               fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20,
-              background: w.status === "paid" ? "rgba(61,220,132,0.12)" : w.status === "pending" ? "rgba(255,107,0,0.12)" : "rgba(100,100,100,0.12)",
+              background: w.status === "paid" ? "rgba(255,107,0,0.12)" : w.status === "pending" ? "rgba(255,107,0,0.12)" : "rgba(100,100,100,0.12)",
               color: w.status === "paid" ? "var(--success)" : w.status === "pending" ? "var(--orange)" : "var(--muted)",
             }}>
               {w.status === "paid" ? (<span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="check" size={12} color="var(--success)" /> Pagado</span>) : w.status === "pending" ? (<span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><LoaderIcon size={14} /> Pendiente</span>) : "Cancelado"}
             </span>
             {w.status === "pending" && (
               <AppButton
-                onClick={async () => {
-                  if (!confirm(`¿Marcar como pagado Q${Number(w.amount).toFixed(2)} a ${w.photographer?.name}?`)) return;
-                  const res = await fetch(`/api/auth/withdrawals/${w.id}/pay`, {
-                    method: "PUT",
-                    headers: { Authorization: `Bearer ${session?.access_token}` }
+                onClick={() => {
+                  openConfirmDialog({
+                    title: "MARCAR COMO PAGADO",
+                    message: `¿Marcar como pagado Q${Number(w.amount).toFixed(2)} a ${w.photographer?.name}?`,
+                    confirmLabel: "SÍ, CONFIRMAR",
+                    cancelLabel: "NO",
+                    onConfirm: async () => {
+                      const res = await fetch(`/api/auth/withdrawals/${w.id}/pay`, {
+                        method: "PUT",
+                        headers: { Authorization: `Bearer ${session?.access_token}` }
+                      });
+                      if (res.ok) { showToast("Listo: Marcado como pagado."); fetchAdminWithdrawals(); }
+                    },
                   });
-                  if (res.ok) { showToast("Listo: Marcado como pagado."); fetchAdminWithdrawals(); }
                 }}
-                style={{ background: "rgba(61,220,132,0.1)", border: "1px solid var(--success)", color: "var(--success)", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+                style={{ background: "rgba(255,107,0,0.1)", border: "1px solid var(--success)", color: "var(--success)", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
               >
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="check" size={12} color="var(--success)" /> Marcar pagado</span>
               </AppButton>
@@ -3310,7 +4190,7 @@ const renderPhotographerProfile = () => {
       {selected && (
         <>
           <div style={{ borderRadius: 12, overflow: "hidden", aspectRatio: "4/3", background: "var(--card)", marginBottom: 16 }}>
-            <WatermarkedImage src={selected.watermark_url} photographer={selected.photographer?.name || "MOTOSHOT"} purchased={purchased.includes(selected.id)} />
+            <WatermarkedImage src={selected.watermark_url} photographer={selected.photographer?.name || "MOTOSHOT"} purchased={canDownloadPhoto(selected)} />
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
             <div>
@@ -3330,13 +4210,13 @@ const renderPhotographerProfile = () => {
               ))}
             </div>
           )}
-        {!user || (!purchased.includes(selected.id) && selected.photographer?.user_id !== user?.id) ? (
+        {!canDownloadPhoto(selected) ? (
   <AppButton className="pay-btn" onClick={() => handleBuy(selected)}>
     Comprar — Q{selected.price}
   </AppButton>
 ) : (
   <AppButton className="download-btn" onClick={handleDownload}>
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} /> Descarga en HD</span>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} /> {isCEO && !purchased.includes(selected.id) ? "Descargar HD gratis (CEO)" : "Descarga en HD"}</span>
   </AppButton>
 )}
 
@@ -3345,6 +4225,377 @@ const renderPhotographerProfile = () => {
     </div>
   );
 
+
+  const renderVideoUpload = () => {
+    if (!user) {
+      return (
+        <div className="upload-view">
+          <SectionTitleIcon icon="video">SUBIR VIDEO</SectionTitleIcon>
+          <div className="empty"><EmptyIcon name="lock" /><div>Iniciá sesión para subir videos.</div></div>
+        </div>
+      );
+    }
+    if (!profile || profile.verification_status !== "approved") {
+      return (
+        <div className="upload-view">
+          <SectionTitleIcon icon="video">SUBIR VIDEO</SectionTitleIcon>
+          <div className="empty"><EmptyIcon name="clipboard" /><div>Necesitás un perfil de fotógrafo aprobado.</div></div>
+        </div>
+      );
+    }
+
+    const handleVideoFileSelect = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      setVideoFile(file);
+      await analyzeMediaWithAI(file);
+    };
+
+    const handleVideoSubmit = async () => {
+      if (!videoFile || !session?.access_token) return;
+      setVideoUploadLoading(true);
+      const formData = new FormData();
+      formData.append("video", videoFile);
+      formData.append("photographer_id", profile.id);
+      formData.append("price", videoForm.price);
+      formData.append("sector", videoForm.sector);
+      formData.append("event_time_start", videoForm.event_time_start);
+      formData.append("event_time_end", videoForm.event_time_end);
+      formData.append("album_id", videoForm.album_id);
+      if (autoTags) {
+        formData.append("moto_brand", autoTags.moto_brand || "");
+        formData.append("moto_model", autoTags.moto_model || "");
+        formData.append("moto_color", autoTags.moto_color || "");
+        formData.append("helmet_color", autoTags.helmet_color || "");
+        formData.append("suit_color", autoTags.suit_color || "");
+        formData.append("dorsal", autoTags.dorsal || "");
+      }
+      try {
+        const res = await fetch("/api/videos/upload", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${session.access_token}` },
+          body: formData,
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast("Listo: video subido exitosamente.");
+          setVideoFile(null);
+          setAutoTags(null);
+          setVideoForm({ price: "", sector: "", event_time_start: "", event_time_end: "", album_id: "" });
+        } else {
+          showToast(data.error || "No se pudo subir el video.");
+        }
+      } catch (err) {
+        console.error("Error subiendo video:", err);
+        showToast("Error al subir el video.");
+      } finally {
+        setVideoUploadLoading(false);
+      }
+    };
+
+    return (
+      <div className="upload-view">
+        <SectionTitleIcon icon="video">SUBIR VIDEO</SectionTitleIcon>
+        <div className="section-sub">MP4, MOV o AVI — máx 500MB. La IA detecta marca y colores del frame 5s.</div>
+
+        <div
+          className={`dropzone${videoFile ? " active" : ""}`}
+          style={{ marginBottom: 20 }}
+          onClick={() => document.getElementById("videoInput").click()}
+        >
+          <input
+            id="videoInput"
+            type="file"
+            accept="video/mp4,video/quicktime,video/avi"
+            style={{ display: "none" }}
+            onChange={handleVideoFileSelect}
+          />
+          <div className="dropzone-icon" style={{ display: "grid", placeItems: "center" }}>
+            <AppIcon name="video" size={36} color="var(--muted)" />
+          </div>
+          <div className="dropzone-text">
+            {videoFile ? (
+              <span style={{ color: "var(--orange)", fontWeight: 700 }}>{videoFile.name}</span>
+            ) : (
+              <><span style={{ color: "var(--orange)" }}>Tocá para seleccionar</span> un video</>
+            )}
+          </div>
+        </div>
+
+        {analyzingMedia && (
+          <div className="empty" style={{ padding: "24px 0" }}>
+            <LoaderIcon size={36} />
+            <div>Analizando video con IA...</div>
+            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>Detectando marca, modelo y colores</div>
+          </div>
+        )}
+
+        {autoTags && !analyzingMedia && (
+          <div style={{ background: "var(--surface)", borderRadius: 12, padding: 16, marginBottom: 20, border: "1px solid var(--border)" }}>
+            <div style={{ color: "var(--orange)", fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+              <AppIcon name="search" size={16} color="var(--orange)" />
+              Tags detectados (podés editar)
+            </div>
+            {[
+              { label: "Marca", key: "moto_brand" },
+              { label: "Modelo", key: "moto_model" },
+              { label: "Color moto", key: "moto_color" },
+              { label: "Color casco", key: "helmet_color" },
+              { label: "Color traje", key: "suit_color" },
+              { label: "Dorsal", key: "dorsal" },
+            ].map(({ label, key }) => (
+              <div key={key} className="form-group" style={{ marginBottom: 10 }}>
+                <label className="form-label">{label}</label>
+                <input
+                  className="form-input"
+                  value={autoTags[key] || ""}
+                  onChange={(e) => setAutoTags({ ...autoTags, [key]: e.target.value })}
+                />
+              </div>
+            ))}
+            <div style={{ color: "var(--muted)", fontSize: 12 }}>Confianza: {autoTags.confidence ?? 0}%</div>
+          </div>
+        )}
+
+        <div className="form-group">
+          <label className="form-label">Sector / Curva</label>
+          <input
+            className="form-input"
+            placeholder="Ej: Curva del Rodeo"
+            value={videoForm.sector}
+            onChange={(e) => setVideoForm({ ...videoForm, sector: e.target.value })}
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label">Hora (rango)</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              className="form-input"
+              type="time"
+              value={videoForm.event_time_start}
+              onChange={(e) => setVideoForm({ ...videoForm, event_time_start: e.target.value })}
+            />
+            <input
+              className="form-input"
+              type="time"
+              value={videoForm.event_time_end}
+              onChange={(e) => setVideoForm({ ...videoForm, event_time_end: e.target.value })}
+            />
+          </div>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Precio (Q)</label>
+          <input
+            className="form-input"
+            type="number"
+            placeholder="Ej: 150"
+            value={videoForm.price}
+            onChange={(e) => setVideoForm({ ...videoForm, price: e.target.value })}
+          />
+        </div>
+        <AppButton
+          className="pay-btn"
+          disabled={!videoFile || analyzingMedia || videoUploadLoading}
+          onClick={handleVideoSubmit}
+        >
+          {videoUploadLoading ? "SUBIENDO..." : analyzingMedia ? "ANALIZANDO..." : "SUBIR VIDEO"}
+        </AppButton>
+      </div>
+    );
+  };
+
+  const renderVideoSearch = () => (
+    <div style={{ padding: "20px", paddingBottom: 100 }}>
+      <SectionTitleIcon icon="video">BUSCAR VIDEOS</SectionTitleIcon>
+      <div className="section-sub" style={{ marginBottom: 20 }}>Filtrá por marca, modelo, color y sector.</div>
+
+      <div style={{ background: "var(--surface)", borderRadius: 12, padding: 20, marginBottom: 24, border: "1px solid var(--border)" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+          <select
+            className="form-input"
+            value={videoSearchFilters.brand}
+            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, brand: e.target.value })}
+          >
+            <option value="">Todas las marcas</option>
+            {["Ducati", "Honda", "Yamaha", "Kawasaki", "BMW", "Suzuki", "KTM", "Aprilia", "Triumph"].map((b) => (
+              <option key={b} value={b}>{b}</option>
+            ))}
+          </select>
+          <input
+            className="form-input"
+            placeholder="Modelo (ej: V4S, R1)"
+            value={videoSearchFilters.model}
+            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, model: e.target.value })}
+          />
+          <input
+            className="form-input"
+            placeholder="Color de moto"
+            value={videoSearchFilters.moto_color}
+            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, moto_color: e.target.value })}
+          />
+          <input
+            className="form-input"
+            placeholder="Sector / Curva"
+            value={videoSearchFilters.sector}
+            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, sector: e.target.value })}
+          />
+          <input
+            className="form-input"
+            type="time"
+            value={videoSearchFilters.time_start}
+            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, time_start: e.target.value })}
+          />
+          <input
+            className="form-input"
+            type="time"
+            value={videoSearchFilters.time_end}
+            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, time_end: e.target.value })}
+          />
+        </div>
+        <AppButton className="pay-btn" style={{ marginTop: 16 }} onClick={handleVideoSearch}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <AppIcon name="search" size={16} /> BUSCAR VIDEOS
+          </span>
+        </AppButton>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 20 }}>
+        {videos.map((video) => (
+          <div
+            key={video.id}
+            style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }}
+            onMouseEnter={() => handleVideoHover(video.id, true)}
+            onMouseLeave={() => handleVideoHover(video.id, false)}
+          >
+            <div style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}>
+              <video
+                ref={(el) => { videoRefs.current[video.id] = el; }}
+                src={video.preview_url}
+                muted
+                loop
+                playsInline
+                preload="none"
+                style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover" }}
+              />
+              {video.duration_seconds ? (
+                <div style={{ position: "absolute", bottom: 8, right: 8, background: "rgba(0,0,0,0.8)", color: "#fff", padding: "2px 6px", borderRadius: 4, fontSize: 12 }}>
+                  {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
+                </div>
+              ) : null}
+            </div>
+            <div style={{ padding: 12 }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                {video.moto_brand && (
+                  <span className="tag active" style={{ fontSize: 11 }}>
+                    {video.moto_brand} {video.moto_model}
+                  </span>
+                )}
+                {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
+                {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
+                {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
+                {video.dorsal && <span className="tag" style={{ fontSize: 11, color: "var(--orange)" }}>#{video.dorsal}</span>}
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
+                <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
+              </div>
+            </div>
+          </div>
+        ))}
+        {videos.length === 0 && (
+          <div className="empty" style={{ gridColumn: "1 / -1" }}>
+            <EmptyIcon name="video" />
+            <div>Usá los filtros para buscar tu video</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderPendingDeliveries = () => {
+    const handleDeliverHQ = (photoId) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file || !session?.access_token) return;
+        setGlobalLoading({ active: true, message: "Subiendo foto HQ..." });
+        const formData = new FormData();
+        formData.append("photo_hq", file);
+        try {
+          const res = await fetch(`/api/photos/${photoId}/upload-hq`, {
+            method: "PUT",
+            headers: { Authorization: `Bearer ${session.access_token}` },
+            body: formData,
+          });
+          if (res.ok) {
+            showToast("Listo: foto HQ entregada. El comprador recibirá un email.");
+            setPendingDeliveries((prev) => prev.filter((p) => p.id !== photoId));
+          } else {
+            const data = await res.json();
+            showToast(data.error || "No se pudo entregar la foto.");
+          }
+        } catch (err) {
+          console.error(err);
+          showToast("Error al subir la foto HQ.");
+        } finally {
+          setGlobalLoading({ active: false, message: "" });
+        }
+      };
+      input.click();
+    };
+
+    const getTimeSince = (dateString) => {
+      const diff = Date.now() - new Date(dateString).getTime();
+      const hours = Math.floor(diff / 3600000);
+      const days = Math.floor(hours / 24);
+      if (days > 0) return `hace ${days} día${days > 1 ? "s" : ""}`;
+      if (hours > 0) return `hace ${hours} hora${hours > 1 ? "s" : ""}`;
+      return "hace menos de 1 hora";
+    };
+
+    return (
+      <div className="upload-view">
+        <SectionTitleIcon icon="package">ENTREGAS PENDIENTES</SectionTitleIcon>
+        <div className="section-sub">
+          {pendingDeliveries.length} foto{pendingDeliveries.length !== 1 ? "s" : ""} pendiente{pendingDeliveries.length !== 1 ? "s" : ""} de entrega HQ
+        </div>
+
+        {pendingDeliveries.length === 0 ? (
+          <div className="empty">
+            <EmptyIcon name="checkCircle" color="var(--success)" />
+            <div>No tenés entregas pendientes</div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {pendingDeliveries.map((item) => (
+              <div
+                key={item.id}
+                style={{
+                  background: "var(--surface)", borderRadius: 12, padding: 16,
+                  display: "flex", gap: 16, alignItems: "center",
+                  border: "1px solid rgba(255,107,0,0.35)",
+                }}
+              >
+                <img src={item.watermark_url} alt="" style={{ width: 80, height: 60, objectFit: "cover", borderRadius: 8, flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, marginBottom: 4 }}>{item.location || "Sin ubicación"}</div>
+                  <div style={{ color: "var(--muted)", fontSize: 13 }}>Comprador: {item.buyer_email || "—"}</div>
+                  <div style={{ color: "var(--orange)", fontSize: 13 }}>Vendida {getTimeSince(item.completed_at)}</div>
+                </div>
+                <AppButton className="pay-btn" style={{ flexShrink: 0, padding: "10px 16px" }} onClick={() => handleDeliverHQ(item.id)}>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <AppIcon name="upload" size={14} /> Entregar HQ
+                  </span>
+                </AppButton>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const renderDashboard = () => {
     if (!profile || profile.verification_status !== "approved") {
@@ -3426,8 +4677,43 @@ const renderPhotographerProfile = () => {
     const totalWithdrawn = withdrawals.filter(w => ["pending","paid"].includes(w.status)).reduce((sum, w) => sum + Number(w.amount || 0), 0);
     const available = totalEarned - totalWithdrawn;
     const hasPending = withdrawals.some(w => w.status === "pending");
+    const hasBankAccount = Boolean(profile?.bank_account?.trim());
+    const bankDirty = bankAccountInput.trim() !== (profile?.bank_account || "").trim();
     return (
       <>
+        <div style={{ padding: 16, borderRadius: 12, background: "var(--surface)", border: "1px solid rgba(255,107,0,0.25)", marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: "var(--orange-light)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            <AppIcon name="money" size={14} color="var(--orange)" />
+            Cuenta bancaria para depósito
+          </div>
+          <p style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.55, margin: "0 0 12px" }}>
+            Ingresá el banco, tipo de cuenta y número donde recibirás el depósito de tus retiros.
+          </p>
+          <textarea
+            className="form-input"
+            rows={3}
+            value={bankAccountInput}
+            onChange={(e) => setBankAccountInput(e.target.value)}
+            placeholder="Ej: Banco Industrial — Monetaria — 1234567890"
+            style={{ resize: "vertical", lineHeight: 1.5, marginBottom: 10 }}
+          />
+          <AppButton
+            className="pay-btn"
+            disabled={bankAccountSaving || !bankAccountInput.trim() || (!bankDirty && hasBankAccount)}
+            onClick={handleSaveBankAccount}
+            style={{ marginBottom: 12, opacity: bankAccountSaving || !bankAccountInput.trim() || (!bankDirty && hasBankAccount) ? 0.55 : 1 }}
+          >
+            {bankAccountSaving ? "GUARDANDO..." : hasBankAccount && !bankDirty ? "CUENTA GUARDADA" : "GUARDAR CUENTA"}
+          </AppButton>
+          <div style={{ padding: "10px 12px", borderRadius: 10, background: "rgba(255,107,0,0.08)", border: "1px solid rgba(255,107,0,0.22)", fontSize: 12, color: "var(--muted)", lineHeight: 1.55 }}>
+            <strong style={{ color: "var(--orange-light)" }}>Tiempo de depósito:</strong> una vez aprobado tu retiro, el depósito puede demorar <strong style={{ color: "var(--text)" }}>hasta 24 horas</strong> en reflejarse en tu cuenta bancaria.
+          </div>
+        </div>
+        {!hasBankAccount && (
+          <div style={{ fontSize: 12, color: "var(--orange)", marginBottom: 12, lineHeight: 1.5 }}>
+            Guardá tu cuenta bancaria para poder solicitar un retiro.
+          </div>
+        )}
         <div style={{ padding: 16, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <div style={{ fontSize: 12, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Balance disponible</div>
@@ -3440,14 +4726,23 @@ const renderPhotographerProfile = () => {
             <div style={{ textAlign: "right" }}>
               <div style={{ fontSize: 12, color: "var(--orange)", fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}><LoaderIcon size={14} /> Retiro pendiente</div>
               <AppButton
-                onClick={async () => {
+                onClick={() => {
                   const pending = withdrawals.find(w => w.status === "pending");
-                  if (!pending || !confirm("¿Cancelar la solicitud de retiro?")) return;
-                  const res = await fetch(`/api/auth/withdrawals/${pending.id}/cancel`, {
-                    method: "PUT",
-                    headers: { Authorization: `Bearer ${session?.access_token}` }
+                  if (!pending) return;
+                  openConfirmDialog({
+                    title: "CANCELAR RETIRO",
+                    message: "¿Cancelar la solicitud de retiro pendiente?",
+                    confirmLabel: "SÍ, CANCELAR",
+                    cancelLabel: "NO",
+                    destructive: true,
+                    onConfirm: async () => {
+                      const res = await fetch(`/api/auth/withdrawals/${pending.id}/cancel`, {
+                        method: "PUT",
+                        headers: { Authorization: `Bearer ${session?.access_token}` }
+                      });
+                      if (res.ok) { showToast("Retiro cancelado."); fetchMyWithdrawals(); }
+                    },
                   });
-                  if (res.ok) { showToast("Retiro cancelado."); fetchMyWithdrawals(); }
                 }}
                 style={{ background: "rgba(255,68,68,0.1)", border: "1px solid rgba(255,68,68,0.4)", color: "#ff4444", borderRadius: 8, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
               >
@@ -3456,18 +4751,25 @@ const renderPhotographerProfile = () => {
             </div>
           ) : (
             <AppButton
-              disabled={available < 50}
-              onClick={async () => {
-                if (!confirm(`¿Solicitar retiro de Q${available.toFixed(2)}?`)) return;
-                const res = await fetch("/api/auth/withdrawals", {
-                  method: "POST",
-                  headers: { Authorization: `Bearer ${session?.access_token}` }
+              disabled={available < 50 || !hasBankAccount}
+              onClick={() => {
+                openConfirmDialog({
+                  title: "SOLICITAR RETIRO",
+                  message: `¿Solicitar retiro de Q${available.toFixed(2)} a ${profile.bank_account}? El depósito puede demorar hasta 24 horas.`,
+                  confirmLabel: "SÍ, SOLICITAR",
+                  cancelLabel: "NO",
+                  onConfirm: async () => {
+                    const res = await fetch("/api/auth/withdrawals", {
+                      method: "POST",
+                      headers: { Authorization: `Bearer ${session?.access_token}` }
+                    });
+                    const data = await res.json();
+                    if (res.ok) { showToast("Retiro solicitado. El depósito puede demorar hasta 24 horas."); fetchMyWithdrawals(); }
+                    else showToast(data.error);
+                  },
                 });
-                const data = await res.json();
-                if (res.ok) { showToast("Listo: Retiro solicitado. Procesaremos tu pago pronto."); fetchMyWithdrawals(); }
-                else showToast(data.error);
               }}
-              style={{ background: available >= 50 ? "var(--orange)" : "var(--surface)", border: `1px solid ${available >= 50 ? "var(--orange)" : "var(--border)"}`, color: available >= 50 ? "#fff" : "var(--muted)", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: available >= 50 ? "pointer" : "not-allowed", fontFamily: "'DM Sans', sans-serif" }}
+              style={{ background: available >= 50 && hasBankAccount ? "var(--orange)" : "var(--surface)", border: `1px solid ${available >= 50 && hasBankAccount ? "var(--orange)" : "var(--border)"}`, color: available >= 50 && hasBankAccount ? "#fff" : "var(--muted)", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: available >= 50 && hasBankAccount ? "pointer" : "not-allowed", fontFamily: "'DM Sans', sans-serif" }}
             >
               <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="money" size={14} /> Solicitar retiro</span>
             </AppButton>
@@ -3482,7 +4784,7 @@ const renderPhotographerProfile = () => {
                   <div style={{ fontWeight: 600 }}>Q{Number(w.amount).toFixed(2)}</div>
                   <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{new Date(w.created_at).toLocaleDateString("es-GT")}</div>
                 </div>
-                <div style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: w.status === "paid" ? "rgba(61,220,132,0.12)" : w.status === "pending" ? "rgba(255,107,0,0.12)" : "rgba(100,100,100,0.12)", color: w.status === "paid" ? "var(--success)" : w.status === "pending" ? "var(--orange)" : "var(--muted)", border: `1px solid ${w.status === "paid" ? "var(--success)" : w.status === "pending" ? "var(--orange)" : "var(--border)"}` }}>
+                <div style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: w.status === "paid" ? "rgba(255,107,0,0.12)" : w.status === "pending" ? "rgba(255,107,0,0.12)" : "rgba(100,100,100,0.12)", color: w.status === "paid" ? "var(--success)" : w.status === "pending" ? "var(--orange)" : "var(--muted)", border: `1px solid ${w.status === "paid" ? "var(--success)" : w.status === "pending" ? "var(--orange)" : "var(--border)"}` }}>
                   {w.status === "paid" ? (<span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="check" size={12} color="var(--success)" /> Pagado</span>) : w.status === "pending" ? (<span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><LoaderIcon size={14} /> Pendiente</span>) : "Cancelado"}
                 </div>
               </div>
@@ -3517,32 +4819,48 @@ const renderPhotographerProfile = () => {
         });
       };
   
-      const handleDeleteSelected = async () => {
+      const handleDeleteSelected = () => {
         if (selectedPhotos.size === 0) return;
-        if (!confirm(`¿Eliminar ${selectedPhotos.size} foto(s) seleccionada(s)?`)) return;
-        await Promise.all([...selectedPhotos].map(id =>
-          fetch(`/api/photos/${id}`, {
-            method: "DELETE",
-            headers: { Authorization: `Bearer ${session?.access_token}` },
-          })
-        ));
-        setSelectedPhotos(new Set());
-        setSelectMode(false);
-        fetchPhotos();
+        openConfirmDialog({
+          title: "ELIMINAR FOTOS",
+          message: `¿Eliminar ${selectedPhotos.size} foto(s) seleccionada(s)?`,
+          confirmLabel: "SÍ, ELIMINAR",
+          cancelLabel: "NO",
+          destructive: true,
+          onConfirm: async () => {
+            await Promise.all([...selectedPhotos].map(id =>
+              fetch(`/api/photos/${id}`, {
+                method: "DELETE",
+                headers: { Authorization: `Bearer ${session?.access_token}` },
+              })
+            ));
+            setSelectedPhotos(new Set());
+            setSelectMode(false);
+            fetchPhotos();
+          },
+        });
       };
   
-      const handleDeleteAlbum = async (album) => {
-        if (!confirm(`¿Eliminar el álbum "${album.name}"? Las fotos no se borran, solo se desvinculan.`)) return;
-        const res = await fetch(`/api/auth/albums/${album.id}`, {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${session?.access_token}` },
+      const handleDeleteAlbum = (album) => {
+        openConfirmDialog({
+          title: "ELIMINAR ÁLBUM",
+          message: `¿Eliminar el álbum "${album.name}"? Las fotos no se borran, solo se desvinculan.`,
+          confirmLabel: "SÍ, ELIMINAR",
+          cancelLabel: "NO",
+          destructive: true,
+          onConfirm: async () => {
+            const res = await fetch(`/api/auth/albums/${album.id}`, {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${session?.access_token}` },
+            });
+            if (res.ok) {
+              setAlbums(prev => prev.filter(a => a.id !== album.id));
+              if (selectedAlbum?.id === album.id) setSelectedAlbum(null);
+            } else {
+              setMessage("No se pudo eliminar el álbum.");
+            }
+          },
         });
-        if (res.ok) {
-          setAlbums(prev => prev.filter(a => a.id !== album.id));
-          if (selectedAlbum?.id === album.id) setSelectedAlbum(null);
-        } else {
-          setMessage("No se pudo eliminar el álbum.");
-        }
       };
   
       return (
@@ -3679,11 +4997,19 @@ const renderPhotographerProfile = () => {
               {!selectMode && (
                 <AppButton
                   style={{ position: "absolute", top: 6, right: 6, zIndex: 6, background: "rgba(220,50,50,0.85)", border: "none", color: "#fff", borderRadius: 6, padding: "3px 7px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}
-                  onClick={async e => {
+                  onClick={e => {
                     e.stopPropagation();
-                    if (!confirm("¿Eliminar esta foto?")) return;
-                    const res = await fetch(`/api/photos/${photo.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${session?.access_token}` } });
-                    if (res.ok) fetchPhotos();
+                    openConfirmDialog({
+                      title: "ELIMINAR FOTO",
+                      message: "¿Eliminar esta foto? Esta acción no se puede deshacer.",
+                      confirmLabel: "SÍ, ELIMINAR",
+                      cancelLabel: "NO",
+                      destructive: true,
+                      onConfirm: async () => {
+                        const res = await fetch(`/api/photos/${photo.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${session?.access_token}` } });
+                        if (res.ok) fetchPhotos();
+                      },
+                    });
                   }}
                 ><AppIcon name="trash" size={14} /></AppButton>
               )}
@@ -3712,11 +5038,19 @@ const renderPhotographerProfile = () => {
                 {!selectMode && (
                   <AppButton
                     style={{ position: "absolute", top: 10, right: 10, zIndex: 6, background: "rgba(220,50,50,0.85)", border: "none", color: "#fff", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                    onClick={async e => {
+                    onClick={e => {
                       e.stopPropagation();
-                      if (!confirm("¿Eliminar esta foto?")) return;
-                      const res = await fetch(`/api/photos/${photo.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${session?.access_token}` } });
-                      if (res.ok) fetchPhotos();
+                      openConfirmDialog({
+                        title: "ELIMINAR FOTO",
+                        message: "¿Eliminar esta foto? Esta acción no se puede deshacer.",
+                        confirmLabel: "SÍ, ELIMINAR",
+                        cancelLabel: "NO",
+                        destructive: true,
+                        onConfirm: async () => {
+                          const res = await fetch(`/api/photos/${photo.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${session?.access_token}` } });
+                          if (res.ok) fetchPhotos();
+                        },
+                      });
                     }}
                   ><AppIcon name="trash" size={14} /></AppButton>
                 )}
@@ -3828,39 +5162,69 @@ const renderPhotographerProfile = () => {
           </div>
           <input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp"
             multiple style={{ display: "none" }}
+            disabled={uploadLoading}
             onChange={e => {
-              const files = Array.from(e.target.files);
-              setUploadFiles(files.map(f => ({ file: f, url: URL.createObjectURL(f), tags: "" })));
-              setUploadProgress({});
+              addUploadFiles(e.target.files);
+              e.target.value = "";
             }} />
 
           {uploadFiles.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 12, maxHeight: 400, overflowY: "auto" }}>
-              {uploadFiles.map(({ file, url, tags }) => {
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, marginBottom: 4 }}>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>{uploadFiles.length} seleccionada(s)</span>
+              {!uploadLoading && (
+                <AppButton
+                  type="button"
+                  className="nav-btn"
+                  style={{ fontSize: 11, padding: "4px 10px" }}
+                  onClick={clearUploadFiles}
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <AppIcon name="x" size={12} /> Quitar todas
+                  </span>
+                </AppButton>
+              )}
+            </div>
+          )}
+
+          {uploadFiles.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, maxHeight: 400, overflowY: "auto" }}>
+              {uploadFiles.map(({ id, file, url, tags }) => {
                 const status = uploadProgress[file.name];
                 return (
-                  <div key={file.name} style={{ display: "flex", gap: 10, alignItems: "center", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 8 }}>
+                  <div key={id} style={{ display: "flex", gap: 10, alignItems: "center", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 8 }}>
                     <div style={{ position: "relative", width: 64, height: 64, borderRadius: 8, overflow: "hidden", flexShrink: 0 }}>
                       <img src={url} alt={file.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                       {status === "uploading" && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center" }}><LoaderIcon size={24} /></div>}
                       {status === "done" && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.5)", display: "grid", placeItems: "center" }}><AppIcon name="success" size={24} color="var(--success)" /></div>}
                       {status === "error" && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.5)", display: "grid", placeItems: "center" }}><AppIcon name="error" size={24} color="#ff4444" /></div>}
                     </div>
-                    <div style={{ flex: 1 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</div>
                       <input
                         className="form-input"
                         placeholder="Tags / modelo: Honda CBR, ZX6R, Yamaha…"
                         value={tags}
                         style={{ fontSize: 12, padding: "6px 10px" }}
+                        disabled={uploadLoading}
                         onChange={e => {
                           const val = e.target.value;
                           setUploadFiles(prev => prev.map(item =>
-                            item.file.name === file.name ? { ...item, tags: val } : item
+                            item.id === id ? { ...item, tags: val } : item
                           ));
                         }}
                       />
                     </div>
+                    {!uploadLoading && (
+                      <AppButton
+                        type="button"
+                        className="nav-btn"
+                        aria-label={`Quitar ${file.name}`}
+                        style={{ flexShrink: 0, padding: "8px 10px" }}
+                        onClick={() => removeUploadFile(id)}
+                      >
+                        <AppIcon name="x" size={16} />
+                      </AppButton>
+                    )}
                   </div>
                 );
               })}
@@ -3992,7 +5356,7 @@ const renderPhotographerProfile = () => {
             </div>
             <AppButton
               className="card-buy"
-              style={{ background: "#3ddc84", color: "#000" }}
+              style={{ background: "linear-gradient(135deg, var(--orange-light), var(--orange))", color: "#000" }}
               onClick={async () => {
                 try {
                   const res = await fetch(`/api/downloads/${p.photo.id}`, {
@@ -4800,13 +6164,21 @@ const renderVendorRequest = () => {
                       <div style={{ fontSize: 11, color: "var(--muted)" }}>{new Date(post.created_at).toLocaleDateString("es-GT", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</div>
                     </div>
                     <AppButton
-                      onClick={async () => {
-                        if (!confirm("¿Eliminar esta publicación?")) return;
-                        const res = await fetch(`/api/auth/posts/${post.id}`, {
-                          method: "DELETE",
-                          headers: { Authorization: `Bearer ${session?.access_token}` },
+                      onClick={() => {
+                        openConfirmDialog({
+                          title: "ELIMINAR PUBLICACIÓN",
+                          message: "¿Eliminar esta publicación?",
+                          confirmLabel: "SÍ, ELIMINAR",
+                          cancelLabel: "NO",
+                          destructive: true,
+                          onConfirm: async () => {
+                            const res = await fetch(`/api/auth/posts/${post.id}`, {
+                              method: "DELETE",
+                              headers: { Authorization: `Bearer ${session?.access_token}` },
+                            });
+                            if (res.ok) setPosts(prev => prev.filter(p => p.id !== post.id));
+                          },
                         });
-                        if (res.ok) setPosts(prev => prev.filter(p => p.id !== post.id));
                       }}
                       style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 16, padding: 4 }}
                     >
@@ -5158,7 +6530,8 @@ const renderVendorRequest = () => {
     @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700&family=Fugaz+One&display=swap');
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root { --bg: #0c0c0c; --surface: #161616; --card: #1c1c1c; --border: #2a2a2a;
-      --orange: #ff6b00; --orange-glow: rgba(255,107,0,0.18); --text: #f0ece4; --muted: #6a6a6a; --success: #3ddc84; }
+      --orange: #ff6b00; --orange-light: #ffb347; --orange-glow: rgba(255,107,0,0.18);
+      --text: #f0ece4; --muted: #6a6a6a; --success: #ff9a3c; --success-glow: rgba(255,107,0,0.22); }
     body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
     button, a { -webkit-tap-highlight-color: transparent; tap-highlight-color: transparent; }
     .app { min-height: 100vh; display: flex; flex-direction: column; }
@@ -5402,7 +6775,7 @@ const renderVendorRequest = () => {
     .admin-request-card { border-color: rgba(255,107,0,0.25); }
     .admin-profile-card-suspended { opacity: 0.72; border-color: rgba(255, 107, 107, 0.35); }
     .admin-status-pill { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-    .admin-status-approved { color: var(--success); border-color: rgba(61,220,132,0.35); background: rgba(61,220,132,0.08); }
+    .admin-status-approved { color: var(--success); border-color: rgba(255,140,51,0.35); background: rgba(255,107,0,0.08); }
     .admin-status-pending { color: var(--orange); border-color: rgba(255,107,0,0.35); background: rgba(255,107,0,0.08); }
     .admin-status-rejected, .admin-status-suspended { color: #ff8a8a; border-color: rgba(255,138,138,0.35); background: rgba(255,138,138,0.08); }
     .hero { padding: 44px 20px 28px; text-align: center; background: radial-gradient(circle at top, rgba(255,107,0,0.12), transparent 70%); border-bottom: 1px solid var(--border); }
@@ -5456,10 +6829,13 @@ const renderVendorRequest = () => {
     .card-price { font-family: 'Bebas Neue', sans-serif; font-size: 22px; color: #fff; letter-spacing: 1px; }
     .card-buy { background: var(--orange); color: #fff; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 700; cursor: pointer; transition: background 0.2s; font-family: 'DM Sans', sans-serif; }
     .card-buy:hover { background: #e55e00; }
-    .card-bought-badge { position: absolute; top: 10px; right: 10px; background: var(--success); color: #000; font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 20px; z-index: 5; }
+    .card-bought-badge, .card-ceo-badge { position: absolute; top: 10px; right: 10px; background: linear-gradient(135deg, var(--orange-light), var(--orange)); color: #000; font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 20px; z-index: 5; box-shadow: 0 0 12px var(--success-glow); }
+    .card-buy-download { background: linear-gradient(135deg, var(--orange-light), var(--orange)) !important; color: #000 !important; }
     .card-photo-badge { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.65); color: var(--orange); font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; z-index: 5; border: 1px solid rgba(255,107,0,0.3); }
     .modal-backdrop { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.88); backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; padding: 16px; }
     .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; width: 100%; max-width: 460px; max-height: 90vh; overflow-y: auto; animation: slideUp 0.3s ease-out; }
+    .confirm-dialog-modal { border-color: rgba(255,107,0,0.35); box-shadow: 0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,107,0,0.08); }
+    .confirm-dialog-modal .modal-title { color: var(--orange-light); letter-spacing: 1.5px; }
     @keyframes slideUp { from { opacity: 0; transform: translateY(30px) scale(0.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
     .modal-header { padding: 20px 20px 0; display: flex; justify-content: space-between; align-items: center; }
     .modal-title { font-family: 'Bebas Neue', sans-serif; font-size: 22px; letter-spacing: 1px; color: var(--text); }
@@ -5482,9 +6858,9 @@ const renderVendorRequest = () => {
       font-family: 'Bebas Neue', sans-serif; font-size: 18px; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; }
     .pay-btn:hover:not(:disabled), .upload-btn:hover:not(:disabled) { background: #e55e00; }
     .pay-btn:disabled, .upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .download-btn { width: 100%; padding: 14px; background: var(--success); border: none; border-radius: 10px; color: #000;
-      font-family: 'Bebas Neue', sans-serif; font-size: 18px; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; }
-    .download-btn:hover { transform: translateY(-1px); }
+    .download-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, var(--orange-light), var(--orange)); border: 1px solid rgba(255,140,51,0.45); border-radius: 10px; color: #0c0c0c;
+      font-family: 'Bebas Neue', sans-serif; font-size: 18px; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 18px var(--success-glow); }
+    .download-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(255,107,0,0.35); }
     .processing { text-align: center; padding: 32px 0; }
     .processing-spinner { width: 48px; height: 48px; border: 3px solid var(--border); border-top-color: var(--orange); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 16px; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -5527,7 +6903,7 @@ const renderVendorRequest = () => {
     .dropzone:hover, .dropzone.active { border-color: var(--orange); background: var(--orange-glow); }
     .dropzone-icon { font-size: 36px; margin-bottom: 10px; }
     .dropzone-text { color: var(--muted); font-size: 14px; }
-    .upload-success-banner { background: rgba(61,220,132,0.12); border: 1px solid var(--success); border-radius: 12px; padding: 16px 20px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px; color: var(--success); font-weight: 600; font-size: 14px; }
+    .upload-success-banner { background: rgba(255,107,0,0.1); border: 1px solid rgba(255,107,0,0.35); border-radius: 12px; padding: 16px 20px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px; color: var(--orange-light); font-weight: 600; font-size: 14px; }
     .bottom-nav {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
       height: 78px; padding-bottom: env(safe-area-inset-bottom, 0);
@@ -5589,11 +6965,43 @@ const renderVendorRequest = () => {
     .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
     .empty-icon { margin-bottom: 12px; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .success-page { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; background: radial-gradient(circle at center, rgba(61,220,132,0.08), transparent 70%); }
+    .success-page { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; background: radial-gradient(circle at center, rgba(255,107,0,0.08), transparent 70%); }
+    .payment-success-page {
+      background:
+        radial-gradient(ellipse 90% 55% at 50% -5%, rgba(255,107,0,0.28), transparent 58%),
+        radial-gradient(circle at 50% 85%, rgba(255,140,51,0.06), transparent 45%),
+        var(--bg);
+    }
     .success-page-icon { font-size: 72px; margin-bottom: 16px; }
-    .success-page-title { font-family: 'Bebas Neue', sans-serif; font-size: 52px; letter-spacing: 4px; color: var(--success); }
+    .success-page-icon-ring {
+      width: 96px; height: 96px; border-radius: 50%;
+      background: linear-gradient(145deg, rgba(255,154,60,0.22), rgba(255,107,0,0.06));
+      border: 2px solid rgba(255,107,0,0.55);
+      box-shadow: 0 0 36px rgba(255,107,0,0.38), inset 0 0 24px rgba(255,140,51,0.12);
+      display: grid; place-items: center; margin-bottom: 18px;
+      animation: success-glow 2.4s ease-in-out infinite;
+    }
+    @keyframes success-glow {
+      0%, 100% { box-shadow: 0 0 36px rgba(255,107,0,0.38), inset 0 0 24px rgba(255,140,51,0.12); }
+      50% { box-shadow: 0 0 52px rgba(255,107,0,0.52), inset 0 0 28px rgba(255,140,51,0.2); }
+    }
+    .success-confirmed-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(255,107,0,0.12); border: 1px solid rgba(255,140,51,0.45);
+      color: var(--orange-light); padding: 7px 16px; border-radius: 999px;
+      font-size: 11px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase;
+      margin-bottom: 12px; box-shadow: 0 0 18px rgba(255,107,0,0.15);
+    }
+    .success-page-title { font-family: 'Bebas Neue', sans-serif; font-size: 52px; letter-spacing: 4px; color: var(--orange); }
+    .payment-success-page .success-page-title {
+      background: linear-gradient(135deg, #ffe0a8 0%, #ffb347 38%, #ff6b00 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+      filter: drop-shadow(0 3px 14px rgba(255,107,0,0.35));
+      letter-spacing: 3px;
+    }
     .success-page-sub { color: var(--muted); font-size: 16px; margin: 10px 0 32px; line-height: 1.6; }
-    .success-page-card { background: var(--surface); border: 1px solid rgba(61,220,132,0.25); border-radius: 16px; padding: 20px; width: 100%; max-width: 320px; margin-bottom: 24px; }
+    .payment-success-page .success-page-sub strong { color: var(--orange-light); font-weight: 700; }
+    .success-page-card { background: var(--surface); border: 1px solid rgba(255,107,0,0.28); border-radius: 16px; padding: 20px; width: 100%; max-width: 320px; margin-bottom: 24px; box-shadow: 0 8px 32px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,140,51,0.08); }
     .success-page-photo { width: 100%; aspect-ratio: 4/3; border-radius: 10px; overflow: hidden; margin-bottom: 12px; background: var(--card); }
     .success-page-info { text-align: left; font-size: 13px; color: var(--muted); line-height: 1.8; }
     .success-page-info strong { color: var(--text); }
@@ -5612,11 +7020,32 @@ const renderVendorRequest = () => {
   const [resendCount, setResendCount] = useState(0);
 
   const renderSuccessPage = () => {
-    if (successMode === "email") {
+    if (successMode === "email" || successMode === "oauth") {
       const displayName =
+        user?.user_metadata?.full_name ||
         user?.user_metadata?.name ||
         user?.email?.split("@")[0] ||
         "rider";
+      const title =
+        successMode === "oauth" ? "¡BIENVENIDO A MOTOSHOT GT!" : "¡CORREO CONFIRMADO!";
+      const subtitle =
+        successMode === "oauth"
+          ? (
+            <>
+              Hola <strong>{displayName}</strong>, tu cuenta con Google ya está activa.
+              <br />
+              Ya podés disfrutar de <strong>MotoShot GT</strong> y solicitar ser{" "}
+              <strong>fotógrafo verificado</strong>.
+            </>
+          )
+          : (
+            <>
+              Hola <strong>{displayName}</strong>, tu cuenta ya está activa.
+              <br />
+              Ya podés disfrutar de <strong>MotoShot GT</strong> y solicitar ser{" "}
+              <strong>fotógrafo verificado</strong>.
+            </>
+          );
       return (
         <motion.div
           className="success-page email-confirmed-page"
@@ -5627,13 +7056,8 @@ const renderVendorRequest = () => {
           <div className="success-page-icon">
             <AppIcon name="check" size={64} color="var(--orange)" />
           </div>
-          <h1 className="success-page-title">¡CORREO CONFIRMADO!</h1>
-          <p className="success-page-sub">
-            Hola <strong>{displayName}</strong>, tu cuenta ya está activa.
-            <br />
-            Ya podés disfrutar de <strong>MotoShot GT</strong> y solicitar ser{" "}
-            <strong>fotógrafo verificado</strong>.
-          </p>
+          <h1 className="success-page-title">{title}</h1>
+          <p className="success-page-sub">{subtitle}</p>
           <div className="email-confirmed-steps">
             <div className="email-confirmed-step">
               <span className="email-confirmed-step-num">1</span>
@@ -5668,19 +7092,75 @@ const renderVendorRequest = () => {
       );
     }
 
+    if (successMode === "video") {
+      const label =
+        [selectedVideo?.moto_brand, selectedVideo?.moto_model].filter(Boolean).join(" ") ||
+        selectedVideo?.sector ||
+        "tu video";
+      return (
+        <motion.div
+          className="success-page payment-success-page"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, ease: "easeOut" }}
+        >
+          <div className="success-confirmed-pill">
+            <AppIcon name="check" size={14} color="var(--orange-light)" />
+            Pago confirmado
+          </div>
+          <div className="success-page-icon-ring">
+            <AppIcon name="video" size={52} color="var(--orange)" />
+          </div>
+          <h1 className="success-page-title">¡VIDEO COMPRADO!</h1>
+          <p className="success-page-sub">
+            Tu compra de <strong>{label}</strong> fue confirmada. Cuando el fotógrafo suba la versión final, podrás descargarla acá.
+          </p>
+          {selectedVideo?.preview_url && (
+            <div className="success-page-card">
+              <div className="success-page-photo">
+                <video src={selectedVideo.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              </div>
+              <div className="success-page-info">
+                <div><strong>Video:</strong> {label}</div>
+                <div><strong>Precio:</strong> Q{selectedVideo.price}</div>
+              </div>
+            </div>
+          )}
+          <AppButton className="download-btn" style={{ width: "100%", maxWidth: 320, marginBottom: 12 }} onClick={handleVideoDownload}>
+            DESCARGAR VIDEO
+          </AppButton>
+          <AppButton
+            className="close-btn-secondary"
+            style={{ width: "100%", maxWidth: 320 }}
+            onClick={() => {
+              setSelectedVideo(null);
+              setActiveTab("videos");
+              setView(VIEWS.VIDEO_SEARCH);
+            }}
+          >
+            Volver a videos
+          </AppButton>
+        </motion.div>
+      );
+    }
+
     return (
       <motion.div
-        className="success-page"
+        className="success-page payment-success-page"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, ease: "easeOut" }}
       >
-        <div className="success-page-icon">
-          <AppIcon name="success" size={64} color="var(--success)" />
+        <div className="success-confirmed-pill">
+          <AppIcon name="check" size={14} color="var(--orange-light)" />
+          Pago confirmado
+        </div>
+        <div className="success-page-icon-ring">
+          <AppIcon name="success" size={52} color="var(--orange)" />
         </div>
         <h1 className="success-page-title">¡PAGO EXITOSO!</h1>
         <p className="success-page-sub">
-          Tu compra fue confirmada. Ya podés descargar tu foto en alta resolución.
+          Tu compra fue <strong>confirmada con éxito</strong>. Ya podés descargar tu foto en alta resolución.
         </p>
         {selected && (
           <div className="success-page-card">
@@ -5697,8 +7177,8 @@ const renderVendorRequest = () => {
             </div>
           </div>
         )}
-        <AppButton className="upload-btn" style={{ width: "100%", maxWidth: 320, marginBottom: 12 }} onClick={handleDownload}>
-          DESCARGAR FOTO
+        <AppButton className="download-btn" style={{ width: "100%", maxWidth: 320, marginBottom: 12 }} onClick={handleDownload}>
+          DESCARGAR FOTO EN HD
         </AppButton>
         <AppButton
           className="close-btn-secondary"
@@ -6256,6 +7736,35 @@ const renderVendorRequest = () => {
   }}>
   {authMode === "login" ? "¿No tenés cuenta? Registrate" : "¿Ya tenés cuenta? Iniciá sesión"}
 </AppButton>
+
+        <AppButton
+          onClick={handleGoogleAuth}
+          disabled={formBusy}
+          style={{
+            marginTop: 12,
+            width: "100%",
+            background: "#fff",
+            border: "1px solid #dadce0",
+            color: "#3c4043",
+            borderRadius: 12,
+            padding: "12px 14px",
+            fontWeight: 800,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            cursor: formBusy ? "not-allowed" : "pointer",
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+            <path fill="#EA4335" d="M24 9.5c3.54 0 6.31 1.53 7.76 2.81l5.66-5.66C34.01 3.53 29.47 1.5 24 1.5 14.61 1.5 6.56 6.88 2.61 14.72l6.72 5.22C11.3 13.02 17.15 9.5 24 9.5z"/>
+            <path fill="#4285F4" d="M46.5 24.5c0-1.57-.14-3.08-.41-4.53H24v8.58h12.67c-.55 2.93-2.18 5.41-4.64 7.09l7.11 5.51C43.56 37.06 46.5 31.27 46.5 24.5z"/>
+            <path fill="#FBBC05" d="M9.33 28.06c-.5-1.5-.78-3.09-.78-4.74s.28-3.24.78-4.74l-6.72-5.22C1.57 16.29 1 19.12 1 22.32c0 3.2.57 6.03 1.61 8.96l6.72-5.22z"/>
+            <path fill="#34A853" d="M24 46.5c5.47 0 10.06-1.81 13.41-4.91l-7.11-5.51c-1.97 1.33-4.48 2.12-6.3 2.12-6.85 0-12.7-3.52-14.67-8.44l-6.72 5.22C6.56 42.12 14.61 46.5 24 46.5z"/>
+            <path fill="none" d="M1 1.5h46v46H1z"/>
+          </svg>
+          {authMode === "login" ? "Ingresá con Google" : "Registrate con Google"}
+        </AppButton>
         <AppButton className="close-btn-secondary" style={{ marginTop: 12 }} onClick={() => {
   setView(VIEWS.PHOTOGRAPHERS);
   setAuthForm({ email: "", password: "", confirmPassword: "", name: "" });
@@ -6436,7 +7945,7 @@ const renderVendorRequest = () => {
       onClick={() => setConfirmDialog(null)}
     >
       <motion.div
-        className="modal"
+        className="modal confirm-dialog-modal"
         initial={{ opacity: 0, scale: 0.92, y: 40 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.92, y: 40 }}
@@ -6558,6 +8067,9 @@ const renderVendorRequest = () => {
           {view === VIEWS.GALLERY && renderGallery()}
           {view === VIEWS.DETAIL && renderDetail()}
           {view === VIEWS.UPLOAD && renderUpload()}
+          {view === VIEWS.UPLOAD_VIDEO && renderVideoUpload()}
+          {view === VIEWS.VIDEO_SEARCH && renderVideoSearch()}
+          {view === VIEWS.PENDING_DELIVERIES && renderPendingDeliveries()}
           {view === VIEWS.AUTH && renderAuth()}
           {view === VIEWS.VENDOR_REQUEST && renderVendorRequest()}
           {view === VIEWS.SUCCESS && renderSuccessPage()}
@@ -6577,14 +8089,14 @@ const renderVendorRequest = () => {
 </div>
 
 <AnimatePresence>
-  {payStep > 0 && (
+  {payStep > 0 && (selected || selectedVideo) && (
     <motion.div
       className="modal-backdrop"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.2 }}
-      onClick={() => payStep === 1 && setPayStep(0)}
+      onClick={() => { if (payStep === 1) { setPayStep(0); setSelectedVideo(null); } }}
     >
       <motion.div
         className="modal"
@@ -6595,12 +8107,17 @@ const renderVendorRequest = () => {
         onClick={e => e.stopPropagation()}
       >
         <div className="modal-header">
-          <div className="modal-title">PAGAR CON RECURRENTE</div>
-          <AppButton className="modal-close" onClick={() => setPayStep(0)} aria-label="Cerrar"><AppIcon name="x" size={18} /></AppButton>
+          <div className="modal-title">{selectedVideo ? "PAGAR VIDEO" : "PAGAR CON RECURRENTE"}</div>
+          <AppButton className="modal-close" onClick={() => { setPayStep(0); setSelectedVideo(null); }} aria-label="Cerrar"><AppIcon name="x" size={18} /></AppButton>
         </div>
         {selected && (
           <div className="modal-photo">
             <img src={selected.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          </div>
+        )}
+        {selectedVideo && (
+          <div className="modal-photo">
+            <video src={selectedVideo.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
           </div>
         )}
         <div className="modal-body">
@@ -6616,27 +8133,63 @@ const renderVendorRequest = () => {
               </div>
             </div>
           )}
+          {selectedVideo && (
+            <div className="modal-meta">
+              <div>
+                <div className="modal-meta-photographer">
+                  {selectedVideo.photographer?.name || "Fotógrafo"}
+                </div>
+                <div className="modal-meta-location">
+                  <IconText icon="pin" size={12}>
+                    {selectedVideo.sector || [selectedVideo.moto_brand, selectedVideo.moto_model].filter(Boolean).join(" ") || "Video"}
+                  </IconText>
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div className="modal-price">Q{selectedVideo.price}</div>
+                <div className="modal-price-unit">Video HD</div>
+              </div>
+            </div>
+          )}
           {payStep === 1 && (
             <>
               <div className="pay-label">Método de pago</div>
-              <div className="pay-methods">
-                <div className="pay-method">
-                  <div className="pay-method-dot"></div>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="creditCard" size={14} /> Recurrente</span>
-                </div>
-              </div>
-              <AppButton
-                className="pay-btn"
-                onClick={handlePayment}
-              >
-                PAGAR Q{selected?.price} CON RECURRENTE
-              </AppButton>
+              {selectedVideo ? (
+                <>
+                  <AppButton className="pay-btn" onClick={handleVideoPayment} style={{ marginBottom: 10 }}>
+                    PAGAR Q{selectedVideo.price} CON RECURRENTE
+                  </AppButton>
+                  <AppButton
+                    className="close-btn-secondary"
+                    onClick={handleVideoPayPalPayment}
+                    style={{ width: "100%" }}
+                  >
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <AppIcon name="creditCard" size={14} /> Pagar con PayPal
+                    </span>
+                  </AppButton>
+                </>
+              ) : (
+                <>
+                  <div className="pay-methods">
+                    <div className="pay-method">
+                      <div className="pay-method-dot"></div>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="creditCard" size={14} /> Recurrente</span>
+                    </div>
+                  </div>
+                  <AppButton className="pay-btn" onClick={handlePayment}>
+                    PAGAR Q{selected?.price} CON RECURRENTE
+                  </AppButton>
+                </>
+              )}
             </>
           )}
           {payStep === 2 && (
             <div className="processing">
               <div className="processing-spinner"></div>
-              <div className="processing-text">Redirigiendo a Recurrente...</div>
+              <div className="processing-text">
+                {selectedVideo ? "Redirigiendo al pago..." : "Redirigiendo a Recurrente..."}
+              </div>
             </div>
           )}
         </div>
@@ -6667,8 +8220,12 @@ const renderVendorRequest = () => {
         items={[
           { id: "feed", label: "Inicio", v: VIEWS.PHOTOGRAPHERS },
           ...(profile?.verification_status === "approved"
-            ? [{ id: "upload", label: "Subir", v: VIEWS.UPLOAD }]
-            : []),
+            ? [
+              { id: "upload", label: "Subir", v: VIEWS.UPLOAD },
+              { id: "uploadVideo", icon: "video", label: "Video", v: VIEWS.UPLOAD_VIDEO },
+              { id: "deliveries", icon: "package", label: pendingDeliveries.length > 0 ? `Entregas (${pendingDeliveries.length})` : "Entregas", v: VIEWS.PENDING_DELIVERIES },
+            ]
+            : [{ id: "videos", icon: "video", label: "Videos", v: VIEWS.VIDEO_SEARCH }]),
           ...(profile?.verification_status === "approved"
             ? [{ id: "dash", label: "Dashboard", v: VIEWS.DASHBOARD }]
             : [{ id: "purchases", label: "Compras", v: VIEWS.MY_PURCHASES }]),
@@ -6702,7 +8259,7 @@ const renderVendorRequest = () => {
         message.toLowerCase().includes("no se pudo") ||
         message.toLowerCase().includes("no se pudieron");
       const toastColor = isSuccess ? "var(--success)" : isError ? "#ff4444" : "var(--orange)";
-      const toastBg = isSuccess ? "rgba(61,220,132,0.12)" : isError ? "rgba(255,68,68,0.12)" : "rgba(255,107,0,0.12)";
+      const toastBg = isSuccess ? "rgba(255,107,0,0.12)" : isError ? "rgba(255,68,68,0.12)" : "rgba(255,107,0,0.12)";
       return {
         position: "fixed", top: 70, left: "50%",
         zIndex: 999, maxWidth: 340, width: "90%",
