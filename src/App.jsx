@@ -633,6 +633,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
     brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "",
   });
   const [videoSearchRan, setVideoSearchRan] = useState(false);
+  const [videosLoading, setVideosLoading] = useState(false);
+  const [homeVideos, setHomeVideos] = useState([]);
   const [photographerVideos, setPhotographerVideos] = useState([]);
   const [analyzingMedia, setAnalyzingMedia] = useState(false);
   const [autoTags, setAutoTags] = useState(null);
@@ -1541,16 +1543,34 @@ const fetchPhotographerProfile = async (id) => {
       fetch(`/api/auth/albums/${id}`),
       fetch(`/api/videos/photographer/${id}`),
     ]);
-    const profileData = await profileRes.json();
-    const albumsData = await albumsRes.json();
-    const videosData = videosRes.ok ? await videosRes.json() : [];
+    const [profileData, albumsData, videosData] = await Promise.all([
+      profileRes.json(),
+      albumsRes.json(),
+      videosRes.ok ? videosRes.json() : Promise.resolve([]),
+    ]);
+
+    if (!profileRes.ok) throw new Error(profileData.error || "No se pudo cargar el perfil");
+    if (!videosRes.ok) console.error("fetchPhotographerProfile videos:", videosRes.status);
 
     setSelectedPhotographer(profileData.photographer);
     setPhotographerPhotos(profileData.photos || []);
     setAlbums(albumsData.albums || []);
     setPhotographerVideos(Array.isArray(videosData) ? videosData : []);
   } catch (err) {
-    console.error(err);
+    console.error("fetchPhotographerProfile:", err);
+    setPhotographerVideos([]);
+  }
+};
+
+const fetchPublicVideos = async () => {
+  try {
+    const res = await fetch("/api/videos/search");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Error al cargar videos");
+    setHomeVideos(Array.isArray(data) ? data.slice(0, 8) : []);
+  } catch (err) {
+    console.error("fetchPublicVideos:", err);
+    setHomeVideos([]);
   }
 };
 
@@ -2235,6 +2255,7 @@ useEffect(() => {
       if (trimmed) params.append(k, trimmed);
     });
     setVideoSearchRan(params.toString().length > 0);
+    setVideosLoading(true);
     try {
       const url = params.toString() ? `/api/videos/search?${params}` : "/api/videos/search";
       const res = await fetch(url);
@@ -2245,6 +2266,8 @@ useEffect(() => {
       console.error("handleVideoSearch:", err);
       showToast(err.message || "Error al buscar videos.");
       setVideos([]);
+    } finally {
+      setVideosLoading(false);
     }
   };
 
@@ -2255,6 +2278,10 @@ useEffect(() => {
         brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "",
       });
     }
+  }, [view]);
+
+  useEffect(() => {
+    if (view === VIEWS.PHOTOGRAPHERS) fetchPublicVideos();
   }, [view]);
 
   const handleVideoHover = (videoId, isEntering) => {
@@ -2274,6 +2301,48 @@ useEffect(() => {
       videoEl.currentTime = 0;
     }
   };
+
+  const renderVideoCards = (videoList) => videoList.map((video) => (
+    <div
+      key={video.id}
+      style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }}
+      onMouseEnter={() => handleVideoHover(video.id, true)}
+      onMouseLeave={() => handleVideoHover(video.id, false)}
+    >
+      <div style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}>
+        <video
+          ref={(el) => { videoRefs.current[video.id] = el; }}
+          src={video.preview_url}
+          muted
+          loop
+          playsInline
+          preload="metadata"
+          style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover" }}
+        />
+        {video.duration_seconds ? (
+          <div style={{ position: "absolute", bottom: 8, right: 8, background: "rgba(0,0,0,0.8)", color: "#fff", padding: "2px 6px", borderRadius: 4, fontSize: 12 }}>
+            {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
+          </div>
+        ) : null}
+      </div>
+      <div style={{ padding: 12 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+          {video.moto_brand && (
+            <span className="tag active" style={{ fontSize: 11 }}>
+              {video.moto_brand} {video.moto_model}
+            </span>
+          )}
+          {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
+          {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
+          {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
+          <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
+        </div>
+      </div>
+    </div>
+  ));
 
   useEffect(() => {
     if (view !== VIEWS.VENDOR_REQUEST && editMode) {
@@ -3478,6 +3547,25 @@ const renderPhotographers = () => (
   </div>
 </div>
 
+    {homeVideos.length > 0 && (
+      <div style={{ padding: "24px 20px 0" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8, flexWrap: "wrap" }}>
+          <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 2 }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><AppIcon name="video" size={18} color="var(--orange)" /> VIDEOS RECIENTES</span>
+          </div>
+          <AppButton
+            className="nav-btn"
+            onClick={() => { setActiveTab("videos"); setView(VIEWS.VIDEO_SEARCH); }}
+          >
+            Ver todos
+          </AppButton>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
+          {renderVideoCards(homeVideos)}
+        </div>
+      </div>
+    )}
+
     {/* Anuncios */}
     {announcements.length > 0 && (
       <div style={{ padding: "16px 20px 0" }}>
@@ -4081,6 +4169,37 @@ const renderPhotographerProfile = () => {
   </div>
 )}
 
+{/* Videos del fotógrafo — visible sin login, antes de las fotos */}
+<div style={{ marginBottom: 28 }}>
+  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
+      VIDEOS · {photographerVideos.length}
+    </div>
+    <AppButton
+      className="nav-btn"
+      onClick={() => {
+        setVideoSearchFilters((f) => ({ ...f, brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "" }));
+        setActiveTab("videos");
+        setView(VIEWS.VIDEO_SEARCH);
+      }}
+    >
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <AppIcon name="search" size={14} /> Buscar videos
+      </span>
+    </AppButton>
+  </div>
+  {photographerVideos.length === 0 ? (
+    <div className="empty" style={{ padding: "32px 16px" }}>
+      <EmptyIcon name="video" />
+      <div>Este fotógrafo aún no tiene videos publicados.</div>
+    </div>
+  ) : (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
+      {renderVideoCards(photographerVideos)}
+    </div>
+  )}
+</div>
+
 {/* Fotos — filtradas por álbum si hay uno seleccionado */}
 {/* Tags filtrables — solo cuando hay álbum seleccionado */}
 {selectedAlbum && (() => {
@@ -4236,75 +4355,6 @@ const renderPhotographerProfile = () => {
   );
 })()}
 
-{/* Videos del fotógrafo */}
-<div style={{ marginTop: 32 }}>
-  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
-    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
-      VIDEOS · {photographerVideos.length}
-    </div>
-    <AppButton
-      className="nav-btn"
-      onClick={() => {
-        setVideoSearchFilters((f) => ({ ...f, brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "" }));
-        setView(VIEWS.VIDEO_SEARCH);
-        setActiveTab("videos");
-      }}
-    >
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-        <AppIcon name="search" size={14} /> Buscar videos
-      </span>
-    </AppButton>
-  </div>
-  {photographerVideos.length === 0 ? (
-    <div className="empty" style={{ padding: "32px 16px" }}>
-      <EmptyIcon name="video" />
-      <div>Este fotógrafo aún no tiene videos publicados.</div>
-    </div>
-  ) : (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
-      {photographerVideos.map((video) => (
-        <div
-          key={video.id}
-          style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}
-          onMouseEnter={() => handleVideoHover(video.id, true)}
-          onMouseLeave={() => handleVideoHover(video.id, false)}
-        >
-          <div style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}>
-            <video
-              ref={(el) => { videoRefs.current[video.id] = el; }}
-              src={video.preview_url}
-              muted
-              loop
-              playsInline
-              preload="none"
-              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover" }}
-            />
-            {video.duration_seconds ? (
-              <div style={{ position: "absolute", bottom: 8, right: 8, background: "rgba(0,0,0,0.8)", color: "#fff", padding: "2px 6px", borderRadius: 4, fontSize: 12 }}>
-                {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
-              </div>
-            ) : null}
-          </div>
-          <div style={{ padding: 12 }}>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-              {video.moto_brand && (
-                <span className="tag active" style={{ fontSize: 11 }}>
-                  {video.moto_brand} {video.moto_model}
-                </span>
-              )}
-              {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
-              {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-              <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  )}
-</div>
     </div>
   </div>
   );
@@ -4594,49 +4644,14 @@ const renderPhotographerProfile = () => {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 20 }}>
-        {videos.map((video) => (
-          <div
-            key={video.id}
-            style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }}
-            onMouseEnter={() => handleVideoHover(video.id, true)}
-            onMouseLeave={() => handleVideoHover(video.id, false)}
-          >
-            <div style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}>
-              <video
-                ref={(el) => { videoRefs.current[video.id] = el; }}
-                src={video.preview_url}
-                muted
-                loop
-                playsInline
-                preload="none"
-                style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover" }}
-              />
-              {video.duration_seconds ? (
-                <div style={{ position: "absolute", bottom: 8, right: 8, background: "rgba(0,0,0,0.8)", color: "#fff", padding: "2px 6px", borderRadius: 4, fontSize: 12 }}>
-                  {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
-                </div>
-              ) : null}
-            </div>
-            <div style={{ padding: 12 }}>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-                {video.moto_brand && (
-                  <span className="tag active" style={{ fontSize: 11 }}>
-                    {video.moto_brand} {video.moto_model}
-                  </span>
-                )}
-                {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
-                {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
-                {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
-                {video.dorsal && <span className="tag" style={{ fontSize: 11, color: "var(--orange)" }}>#{video.dorsal}</span>}
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-                <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
-              </div>
-            </div>
+        {videosLoading ? (
+          <div className="empty" style={{ gridColumn: "1 / -1" }}>
+            <LoaderIcon size={44} />
+            <div>Cargando videos...</div>
           </div>
-        ))}
-        {videos.length === 0 && (
+        ) : videos.length > 0 ? (
+          renderVideoCards(videos)
+        ) : (
           <div className="empty" style={{ gridColumn: "1 / -1" }}>
             <EmptyIcon name="video" />
             <div>{videoSearchRan ? "No hay videos con esos filtros." : "Todavía no hay videos publicados."}</div>
