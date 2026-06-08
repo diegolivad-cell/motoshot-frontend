@@ -640,6 +640,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
     price: "", sector: "", event_time_start: "", event_time_end: "", album_id: "",
   });
   const [videoUploadLoading, setVideoUploadLoading] = useState(false);
+  const [myVideos, setMyVideos] = useState([]);
+  const [myVideosLoading, setMyVideosLoading] = useState(false);
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [purchasedVideos, setPurchasedVideos] = useState([]);
   const videoRefs = useRef({});
@@ -1546,6 +1548,22 @@ const fetchPhotographerProfile = async (id) => {
     console.error(err);
   }
 };
+
+const fetchMyVideos = async (photographerId) => {
+  if (!photographerId) return;
+  try {
+    setMyVideosLoading(true);
+    const res = await fetch(`/api/videos/photographer/${photographerId}`);
+    if (res.ok) {
+      const data = await res.json();
+      setMyVideos(Array.isArray(data) ? data : []);
+    }
+  } catch (err) {
+    console.error("fetchMyVideos:", err);
+  } finally {
+    setMyVideosLoading(false);
+  }
+};
 const renderNotifications = () => (
   <div className="upload-view">
     <SectionTitleIcon icon="bell">NOTIFICACIONES</SectionTitleIcon>
@@ -2118,6 +2136,7 @@ useEffect(() => {
     if (view === VIEWS.VENDOR_REQUEST && isApproved && profile?.id) {
       fetchPhotographerProfile(profile.id);
       fetchPosts(profile.id);
+      fetchMyVideos(profile.id);
     }
 
     // Mi Galería — comprador: cargar compras
@@ -4297,6 +4316,7 @@ const renderPhotographerProfile = () => {
           setVideoFile(null);
           setAutoTags(null);
           setVideoForm({ price: "", sector: "", event_time_start: "", event_time_end: "", album_id: "" });
+          if (profile?.id) fetchMyVideos(profile.id);
         } else {
           showToast(data.error || "No se pudo subir el video.");
         }
@@ -6482,6 +6502,117 @@ const renderVendorRequest = () => {
     ))}
   </div>
 )}
+
+        {/* Videos del fotógrafo */}
+        <div style={{ marginTop: 32, paddingTop: 24, borderTop: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <AppIcon name="video" size={18} color="var(--orange)" /> VIDEOS · {myVideos.length}
+              </span>
+            </div>
+            <AppButton
+              className="nav-btn primary"
+              style={{ fontSize: 11, padding: "6px 12px" }}
+              onClick={() => { setActiveTab("uploadVideo"); setView(VIEWS.UPLOAD_VIDEO); }}
+            >
+              Subir video
+            </AppButton>
+          </div>
+
+          {myVideosLoading ? (
+            <div className="empty" style={{ padding: "24px 0" }}>
+              <LoaderIcon size={36} />
+              <div style={{ fontSize: 13, color: "var(--muted)" }}>Cargando videos...</div>
+            </div>
+          ) : myVideos.length === 0 ? (
+            <div className="empty">
+              <EmptyIcon name="video" />
+              <div>Todavía no subiste videos.</div>
+              <AppButton
+                className="nav-btn primary"
+                style={{ marginTop: 16 }}
+                onClick={() => { setActiveTab("uploadVideo"); setView(VIEWS.UPLOAD_VIDEO); }}
+              >
+                Subir primer video
+              </AppButton>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {myVideos.map((video) => {
+                const label =
+                  [video.moto_brand, video.moto_model].filter(Boolean).join(" ") ||
+                  video.sector ||
+                  "Video";
+                const hqReady = video.hq_status === "ready";
+                return (
+                  <div
+                    key={video.id}
+                    style={{
+                      borderRadius: 14,
+                      overflow: "hidden",
+                      background: "var(--surface)",
+                      border: "1px solid var(--border)",
+                    }}
+                  >
+                    <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#000" }}>
+                      <video
+                        src={video.preview_url}
+                        muted
+                        playsInline
+                        preload="metadata"
+                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                      />
+                      {video.duration_seconds ? (
+                        <div style={{
+                          position: "absolute", bottom: 8, right: 8,
+                          background: "rgba(0,0,0,0.8)", color: "#fff",
+                          padding: "2px 6px", borderRadius: 4, fontSize: 11,
+                        }}>
+                          {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
+                        </div>
+                      ) : null}
+                      <div style={{
+                        position: "absolute", top: 8, left: 8,
+                        background: hqReady ? "rgba(0,200,100,0.85)" : "rgba(255,107,0,0.85)",
+                        color: "#fff", padding: "3px 8px", borderRadius: 6, fontSize: 10, fontWeight: 700,
+                      }}>
+                        {hqReady ? "HQ listo" : "Preview"}
+                      </div>
+                    </div>
+                    <div style={{ padding: "12px 14px" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                        {video.moto_brand && (
+                          <span className="tag active" style={{ fontSize: 11 }}>{video.moto_brand} {video.moto_model}</span>
+                        )}
+                        {video.sector && (
+                          <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>
+                        )}
+                        {video.dorsal && (
+                          <span className="tag" style={{ fontSize: 11, color: "var(--orange)" }}>#{video.dorsal}</span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                        <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                          {video.event_time_start ? `${video.event_time_start}${video.event_time_end ? `–${video.event_time_end}` : ""}` : ""}
+                          {video.purchases_count > 0 && (
+                            <span style={{ marginLeft: video.event_time_start ? 8 : 0 }}>
+                              · {video.purchases_count} venta{video.purchases_count !== 1 ? "s" : ""}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 24, color: "var(--orange)" }}>
+                          Q{video.price}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 13, fontWeight: 600, marginTop: 6 }}>{label}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
             )}
           </>
