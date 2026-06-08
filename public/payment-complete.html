@@ -31,6 +31,41 @@
   </head>
   <body>
     <img class="logo" src="/favicon.png" alt="" width="72" height="72" />
-    <p>Confirmando tu pago...</p>
+    <p id="status">Confirmando tu pago...</p>
+    <script>
+      (function () {
+        var q = location.search;
+        var params = new URLSearchParams(q || "");
+        var isCancel = params.get("payment_cancel") === "true";
+        var status = document.getElementById("status");
+        if (status) {
+          status.textContent = isCancel ? "Pago cancelado..." : "Confirmando tu pago...";
+        }
+        if (!q) q = "?payment_return=true";
+        var ua = navigator.userAgent || "";
+        var isAndroid = /Android/i.test(ua);
+
+        if (isAndroid) {
+          var deep = "com.motoshotgt.app://payment-complete" + q;
+          var intent =
+            "intent://motoshot.pro/payment-complete" +
+            q +
+            "#Intent;scheme=https;package=com.motoshotgt.app;S.browser_fallback_url=" +
+            encodeURIComponent("https://motoshot.pro/" + q) +
+            ";end";
+          try {
+            location.replace(deep);
+          } catch (e) {
+            /* ignore */
+          }
+          setTimeout(function () {
+            location.replace(intent);
+          }, 300);
+          return;
+        }
+
+        location.replace("/" + q);
+      })();
+    </script>
   </body>
 </html>

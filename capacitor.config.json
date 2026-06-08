@@ -1,0 +1,10 @@
+{
+  "appId": "com.motoshotgt.app",
+  "appName": "MotoShot GT",
+  "webDir": "dist",
+  "server": {
+    "url": "https://motoshot.pro",
+    "cleartext": true,
+    "androidScheme": "https"
+  }
+}
