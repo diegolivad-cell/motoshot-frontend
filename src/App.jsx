@@ -630,8 +630,10 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [uploadProgress, setUploadProgress] = useState({});
   const [videos, setVideos] = useState([]);
   const [videoSearchFilters, setVideoSearchFilters] = useState({
-    brand: "", model: "", moto_color: "", helmet_color: "", dorsal: "", sector: "", time_start: "", time_end: "",
+    brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "",
   });
+  const [videoSearchRan, setVideoSearchRan] = useState(false);
+  const [photographerVideos, setPhotographerVideos] = useState([]);
   const [analyzingMedia, setAnalyzingMedia] = useState(false);
   const [autoTags, setAutoTags] = useState(null);
   const [pendingDeliveries, setPendingDeliveries] = useState([]);
@@ -1534,16 +1536,19 @@ const fetchAlbums = async (photographerId) => {
 
 const fetchPhotographerProfile = async (id) => {
   try {
-    const [profileRes, albumsRes] = await Promise.all([
+    const [profileRes, albumsRes, videosRes] = await Promise.all([
       fetch(`/api/auth/photographers/${id}`),
-      fetch(`/api/auth/albums/${id}`)
+      fetch(`/api/auth/albums/${id}`),
+      fetch(`/api/videos/photographer/${id}`),
     ]);
     const profileData = await profileRes.json();
     const albumsData = await albumsRes.json();
-    
+    const videosData = videosRes.ok ? await videosRes.json() : [];
+
     setSelectedPhotographer(profileData.photographer);
     setPhotographerPhotos(profileData.photos || []);
     setAlbums(albumsData.albums || []);
+    setPhotographerVideos(Array.isArray(videosData) ? videosData : []);
   } catch (err) {
     console.error(err);
   }
@@ -2223,21 +2228,34 @@ useEffect(() => {
     }
   };
 
-  const handleVideoSearch = async () => {
+  const handleVideoSearch = async (filters = videoSearchFilters) => {
     const params = new URLSearchParams();
-    Object.entries(videoSearchFilters).forEach(([k, v]) => {
+    Object.entries(filters).forEach(([k, v]) => {
       const trimmed = String(v ?? "").trim();
       if (trimmed) params.append(k, trimmed);
     });
+    setVideoSearchRan(params.toString().length > 0);
     try {
-      const res = await fetch(`/api/videos/search?${params}`);
+      const url = params.toString() ? `/api/videos/search?${params}` : "/api/videos/search";
+      const res = await fetch(url);
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al buscar videos");
       setVideos(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("handleVideoSearch:", err);
-      showToast("Error al buscar videos.");
+      showToast(err.message || "Error al buscar videos.");
+      setVideos([]);
     }
   };
+
+  useEffect(() => {
+    if (view === VIEWS.VIDEO_SEARCH) {
+      setVideoSearchRan(false);
+      handleVideoSearch({
+        brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "",
+      });
+    }
+  }, [view]);
 
   const handleVideoHover = (videoId, isEntering) => {
     const videoEl = videoRefs.current[videoId];
@@ -4217,6 +4235,76 @@ const renderPhotographerProfile = () => {
     </>
   );
 })()}
+
+{/* Videos del fotógrafo */}
+<div style={{ marginTop: 32 }}>
+  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
+      VIDEOS · {photographerVideos.length}
+    </div>
+    <AppButton
+      className="nav-btn"
+      onClick={() => {
+        setVideoSearchFilters((f) => ({ ...f, brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "" }));
+        setView(VIEWS.VIDEO_SEARCH);
+        setActiveTab("videos");
+      }}
+    >
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <AppIcon name="search" size={14} /> Buscar videos
+      </span>
+    </AppButton>
+  </div>
+  {photographerVideos.length === 0 ? (
+    <div className="empty" style={{ padding: "32px 16px" }}>
+      <EmptyIcon name="video" />
+      <div>Este fotógrafo aún no tiene videos publicados.</div>
+    </div>
+  ) : (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
+      {photographerVideos.map((video) => (
+        <div
+          key={video.id}
+          style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}
+          onMouseEnter={() => handleVideoHover(video.id, true)}
+          onMouseLeave={() => handleVideoHover(video.id, false)}
+        >
+          <div style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}>
+            <video
+              ref={(el) => { videoRefs.current[video.id] = el; }}
+              src={video.preview_url}
+              muted
+              loop
+              playsInline
+              preload="none"
+              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover" }}
+            />
+            {video.duration_seconds ? (
+              <div style={{ position: "absolute", bottom: 8, right: 8, background: "rgba(0,0,0,0.8)", color: "#fff", padding: "2px 6px", borderRadius: 4, fontSize: 12 }}>
+                {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
+              </div>
+            ) : null}
+          </div>
+          <div style={{ padding: 12 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+              {video.moto_brand && (
+                <span className="tag active" style={{ fontSize: 11 }}>
+                  {video.moto_brand} {video.moto_model}
+                </span>
+              )}
+              {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
+              {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
+              <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )}
+</div>
     </div>
   </div>
   );
@@ -4461,7 +4549,7 @@ const renderPhotographerProfile = () => {
           </select>
           <input
             className="form-input"
-            placeholder="Modelo (ej: V4S, R1)"
+            placeholder="Marca o modelo (ej: Ducati, R1)"
             value={videoSearchFilters.model}
             onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, model: e.target.value })}
           />
@@ -4476,12 +4564,6 @@ const renderPhotographerProfile = () => {
             placeholder="Color de casco"
             value={videoSearchFilters.helmet_color}
             onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, helmet_color: e.target.value })}
-          />
-          <input
-            className="form-input"
-            placeholder="Dorsal (ej: 42)"
-            value={videoSearchFilters.dorsal}
-            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, dorsal: e.target.value })}
           />
           <input
             className="form-input"
@@ -4504,7 +4586,7 @@ const renderPhotographerProfile = () => {
             onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, time_end: e.target.value })}
           />
         </div>
-        <AppButton className="pay-btn" style={{ marginTop: 16 }} onClick={handleVideoSearch}>
+        <AppButton className="pay-btn" style={{ marginTop: 16 }} onClick={() => handleVideoSearch()}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
             <AppIcon name="search" size={16} /> BUSCAR VIDEOS
           </span>
@@ -4557,7 +4639,7 @@ const renderPhotographerProfile = () => {
         {videos.length === 0 && (
           <div className="empty" style={{ gridColumn: "1 / -1" }}>
             <EmptyIcon name="video" />
-            <div>Usá los filtros para buscar tu video</div>
+            <div>{videoSearchRan ? "No hay videos con esos filtros." : "Todavía no hay videos publicados."}</div>
           </div>
         )}
       </div>
@@ -8514,15 +8596,14 @@ const renderVendorRequest = () => {
       <BottomNav
         items={[
           { id: "feed", label: "Inicio", v: VIEWS.PHOTOGRAPHERS },
+          { id: "videos", icon: "video", label: "Videos", v: VIEWS.VIDEO_SEARCH },
           ...(profile?.verification_status === "approved"
             ? [
               { id: "upload", label: "Subir", v: VIEWS.UPLOAD },
               { id: "uploadVideo", icon: "video", label: "Video", v: VIEWS.UPLOAD_VIDEO },
               { id: "deliveries", icon: "package", label: pendingDeliveries.length > 0 ? `Entregas (${pendingDeliveries.length})` : "Entregas", v: VIEWS.PENDING_DELIVERIES },
+              { id: "dash", label: "Dashboard", v: VIEWS.DASHBOARD },
             ]
-            : [{ id: "videos", icon: "video", label: "Videos", v: VIEWS.VIDEO_SEARCH }]),
-          ...(profile?.verification_status === "approved"
-            ? [{ id: "dash", label: "Dashboard", v: VIEWS.DASHBOARD }]
             : [{ id: "purchases", label: "Compras", v: VIEWS.MY_PURCHASES }]),
           { id: "gallery", label: "Galería", v: VIEWS.MY_GALLERY },
           { id: "profile", label: "Perfil", v: VIEWS.VENDOR_REQUEST },
