@@ -655,9 +655,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [uploadFiles, setUploadFiles] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({});
   const [videos, setVideos] = useState([]);
-  const [videoSearchFilters, setVideoSearchFilters] = useState({
-    brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "",
-  });
+  const [videoSearchQuery, setVideoSearchQuery] = useState("");
   const [videoSearchRan, setVideoSearchRan] = useState(false);
   const [videosLoading, setVideosLoading] = useState(false);
   const [photographerVideos, setPhotographerVideos] = useState([]);
@@ -2267,15 +2265,13 @@ useEffect(() => {
     }
   };
 
-  const handleVideoSearch = async (filters = videoSearchFilters) => {
-    const params = new URLSearchParams();
-    Object.entries(filters).forEach(([k, v]) => {
-      const trimmed = String(v ?? "").trim();
-      if (trimmed) params.append(k, trimmed);
-    });
-    setVideoSearchRan(params.toString().length > 0);
+  const handleVideoSearch = async (query = videoSearchQuery) => {
+    const q = String(query ?? "").trim();
+    setVideoSearchRan(q.length > 0);
     setVideosLoading(true);
     try {
+      const params = new URLSearchParams();
+      if (q) params.set("q", q);
       const url = params.toString() ? `/api/videos/search?${params}` : "/api/videos/search";
       const res = await fetch(url);
       const data = await res.json();
@@ -2293,9 +2289,8 @@ useEffect(() => {
   useEffect(() => {
     if (view === VIEWS.VIDEO_SEARCH) {
       setVideoSearchRan(false);
-      handleVideoSearch({
-        brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "",
-      });
+      setVideoSearchQuery("");
+      handleVideoSearch("");
     }
   }, [view]);
 
@@ -4162,7 +4157,7 @@ const renderPhotographerProfile = () => {
     <AppButton
       className="nav-btn"
       onClick={() => {
-        setVideoSearchFilters((f) => ({ ...f, brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "" }));
+        setVideoSearchQuery("");
         setActiveTab("videos");
         setView(VIEWS.VIDEO_SEARCH);
       }}
@@ -4708,60 +4703,20 @@ const renderPhotographerProfile = () => {
   const renderVideoSearch = () => (
     <div style={{ padding: "20px", paddingBottom: 100 }}>
       <SectionTitleIcon icon="video">BUSCAR VIDEOS</SectionTitleIcon>
-      <div className="section-sub" style={{ marginBottom: 20 }}>Completá solo los filtros que necesités — todos son opcionales.</div>
+      <div className="section-sub" style={{ marginBottom: 20 }}>
+        Escribí lo que buscás — marca, color, casco, sector, dorsal… Los tags los detecta la IA al subir el video.
+      </div>
 
       <div style={{ background: "var(--surface)", borderRadius: 12, padding: 20, marginBottom: 24, border: "1px solid var(--border)" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
-          <select
-            className="form-input"
-            value={videoSearchFilters.brand}
-            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, brand: e.target.value })}
-          >
-            <option value="">Todas las marcas</option>
-            {["Ducati", "Honda", "Yamaha", "Kawasaki", "BMW", "Suzuki", "KTM", "Aprilia", "Triumph"].map((b) => (
-              <option key={b} value={b}>{b}</option>
-            ))}
-          </select>
-          <input
-            className="form-input"
-            placeholder="Marca o modelo (ej: Ducati, R1)"
-            value={videoSearchFilters.model}
-            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, model: e.target.value })}
-          />
-          <input
-            className="form-input"
-            placeholder="Color de moto"
-            value={videoSearchFilters.moto_color}
-            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, moto_color: e.target.value })}
-          />
-          <input
-            className="form-input"
-            placeholder="Color de casco"
-            value={videoSearchFilters.helmet_color}
-            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, helmet_color: e.target.value })}
-          />
-          <input
-            className="form-input"
-            placeholder="Sector / Curva"
-            value={videoSearchFilters.sector}
-            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, sector: e.target.value })}
-          />
-          <input
-            className="form-input"
-            type="time"
-            title="Hora inicio"
-            value={videoSearchFilters.time_start}
-            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, time_start: e.target.value })}
-          />
-          <input
-            className="form-input"
-            type="time"
-            title="Hora fin"
-            value={videoSearchFilters.time_end}
-            onChange={(e) => setVideoSearchFilters({ ...videoSearchFilters, time_end: e.target.value })}
-          />
-        </div>
-        <AppButton className="pay-btn" style={{ marginTop: 16 }} onClick={() => handleVideoSearch()}>
+        <input
+          className="search-input"
+          placeholder="Ej: Ducati roja casco negro curva 3"
+          value={videoSearchQuery}
+          onChange={(e) => setVideoSearchQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") handleVideoSearch(); }}
+          style={{ marginBottom: 12 }}
+        />
+        <AppButton className="pay-btn" onClick={() => handleVideoSearch()}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
             <AppIcon name="search" size={16} /> BUSCAR VIDEOS
           </span>
@@ -4779,7 +4734,7 @@ const renderPhotographerProfile = () => {
         ) : (
           <div className="empty" style={{ gridColumn: "1 / -1" }}>
             <EmptyIcon name="video" />
-            <div>{videoSearchRan ? "No hay videos con esos filtros." : "Todavía no hay videos publicados."}</div>
+            <div>{videoSearchRan ? "No hay videos que coincidan con tu búsqueda." : "Todavía no hay videos publicados."}</div>
           </div>
         )}
       </div>
