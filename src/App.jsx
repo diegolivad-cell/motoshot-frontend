@@ -439,6 +439,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [authForm, setAuthForm] = useState({ email: "", password: "", name: "" });
   const [vendorForm, setVendorForm] = useState({ name: "", handle: "", verification_id: "", bio: "", doc_type: "dpi", doc_front: null, doc_back: null });
   const [purchases, setPurchases] = useState([]);
+  const [videoPurchases, setVideoPurchases] = useState([]);
   const [purchasesLoading, setPurchasesLoading] = useState(false);
   const [vendorStats, setVendorStats] = useState(null);
   const [vendorStatsLoading, setVendorStatsLoading] = useState(false);
@@ -1452,6 +1453,7 @@ const fetchPurchases = async () => {
     if (!res.ok) throw new Error("Error cargando compras");
     const data = await res.json();
     setPurchases(data.purchases || []);
+    setVideoPurchases(data.video_purchases || []);
   } catch (err) {
     console.error(err);
     showToast("No se pudieron cargar tus compras.");
@@ -2127,13 +2129,18 @@ useEffect(() => {
   const fetchPendingDeliveries = useCallback(async () => {
     if (!profile?.id || profile.verification_status !== "approved" || !session?.access_token) return;
     try {
-      const res = await fetch(`/api/photos/pending-delivery/${profile.id}`, {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setPendingDeliveries(Array.isArray(data) ? data : []);
-      }
+      const headers = { Authorization: `Bearer ${session.access_token}` };
+      const [photosRes, videosRes] = await Promise.all([
+        fetch(`/api/photos/pending-delivery/${profile.id}`, { headers }),
+        fetch(`/api/videos/pending-delivery/${profile.id}`, { headers }),
+      ]);
+      const photoItems = photosRes.ok ? await photosRes.json() : [];
+      const videoItems = videosRes.ok ? await videosRes.json() : [];
+      const merged = [
+        ...(Array.isArray(photoItems) ? photoItems.map((p) => ({ ...p, media_type: p.media_type || "photo" })) : []),
+        ...(Array.isArray(videoItems) ? videoItems.map((v) => ({ ...v, media_type: v.media_type || "video" })) : []),
+      ].sort((a, b) => new Date(a.completed_at) - new Date(b.completed_at));
+      setPendingDeliveries(merged);
     } catch (err) {
       console.error("fetchPendingDeliveries:", err);
     }
@@ -4513,7 +4520,7 @@ const renderPhotographerProfile = () => {
   );
 
   const renderPendingDeliveries = () => {
-    const handleDeliverHQ = (photoId) => {
+    const handleDeliverPhotoHQ = (photoId) => {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = "image/*";
@@ -4531,7 +4538,7 @@ const renderPhotographerProfile = () => {
           });
           if (res.ok) {
             showToast("Listo: foto HQ entregada. El comprador recibirá un email.");
-            setPendingDeliveries((prev) => prev.filter((p) => p.id !== photoId));
+            setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === "photo" && p.id === photoId)));
           } else {
             const data = await res.json();
             showToast(data.error || "No se pudo entregar la foto.");
@@ -4539,6 +4546,39 @@ const renderPhotographerProfile = () => {
         } catch (err) {
           console.error(err);
           showToast("Error al subir la foto HQ.");
+        } finally {
+          setGlobalLoading({ active: false, message: "" });
+        }
+      };
+      input.click();
+    };
+
+    const handleDeliverVideoHQ = (videoId) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "video/mp4,video/quicktime,video/avi";
+      input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file || !session?.access_token) return;
+        setGlobalLoading({ active: true, message: "Subiendo video HQ..." });
+        const formData = new FormData();
+        formData.append("video_hq", file);
+        try {
+          const res = await fetch(`/api/videos/${videoId}/upload-hq`, {
+            method: "PUT",
+            headers: { Authorization: `Bearer ${session.access_token}` },
+            body: formData,
+          });
+          if (res.ok) {
+            showToast("Listo: video HQ entregado. El comprador recibirá un email.");
+            setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === "video" && p.id === videoId)));
+          } else {
+            const data = await res.json();
+            showToast(data.error || "No se pudo entregar el video.");
+          }
+        } catch (err) {
+          console.error(err);
+          showToast("Error al subir el video HQ.");
         } finally {
           setGlobalLoading({ active: false, message: "" });
         }
@@ -4555,11 +4595,19 @@ const renderPhotographerProfile = () => {
       return "hace menos de 1 hora";
     };
 
+    const photoCount = pendingDeliveries.filter((i) => i.media_type === "photo").length;
+    const videoCount = pendingDeliveries.filter((i) => i.media_type === "video").length;
+
     return (
       <div className="upload-view">
         <SectionTitleIcon icon="package">ENTREGAS PENDIENTES</SectionTitleIcon>
         <div className="section-sub">
-          {pendingDeliveries.length} foto{pendingDeliveries.length !== 1 ? "s" : ""} pendiente{pendingDeliveries.length !== 1 ? "s" : ""} de entrega HQ
+          {pendingDeliveries.length === 0
+            ? "Sin entregas pendientes"
+            : [
+              photoCount > 0 ? `${photoCount} foto${photoCount !== 1 ? "s" : ""}` : null,
+              videoCount > 0 ? `${videoCount} video${videoCount !== 1 ? "s" : ""}` : null,
+            ].filter(Boolean).join(" · ") + " pendiente(s) de entrega HQ"}
         </div>
 
         {pendingDeliveries.length === 0 ? (
@@ -4569,28 +4617,49 @@ const renderPhotographerProfile = () => {
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {pendingDeliveries.map((item) => (
-              <div
-                key={item.id}
-                style={{
-                  background: "var(--surface)", borderRadius: 12, padding: 16,
-                  display: "flex", gap: 16, alignItems: "center",
-                  border: "1px solid rgba(255,107,0,0.35)",
-                }}
-              >
-                <img src={item.watermark_url} alt="" style={{ width: 80, height: 60, objectFit: "cover", borderRadius: 8, flexShrink: 0 }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, marginBottom: 4 }}>{item.location || "Sin ubicación"}</div>
-                  <div style={{ color: "var(--muted)", fontSize: 13 }}>Comprador: {item.buyer_email || "—"}</div>
-                  <div style={{ color: "var(--orange)", fontSize: 13 }}>Vendida {getTimeSince(item.completed_at)}</div>
+            {pendingDeliveries.map((item) => {
+              const isVideo = item.media_type === "video";
+              const title = isVideo
+                ? (item.label || [item.moto_brand, item.moto_model].filter(Boolean).join(" ") || item.sector || "Video")
+                : (item.location || "Sin ubicación");
+              return (
+                <div
+                  key={`${item.media_type}-${item.id}`}
+                  style={{
+                    background: "var(--surface)", borderRadius: 12, padding: 16,
+                    display: "flex", gap: 16, alignItems: "center",
+                    border: "1px solid rgba(255,107,0,0.35)",
+                  }}
+                >
+                  {isVideo ? (
+                    <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", flexShrink: 0, background: "#000" }}>
+                      <video src={item.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    </div>
+                  ) : (
+                    <img src={item.watermark_url} alt="" style={{ width: 80, height: 60, objectFit: "cover", borderRadius: 8, flexShrink: 0 }} />
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <span className="tag" style={{ fontSize: 10, padding: "2px 8px" }}>
+                        {isVideo ? "Video" : "Foto"}
+                      </span>
+                      <span style={{ fontWeight: 700 }}>{title}</span>
+                    </div>
+                    <div style={{ color: "var(--muted)", fontSize: 13 }}>Comprador: {item.buyer_email || "—"}</div>
+                    <div style={{ color: "var(--orange)", fontSize: 13 }}>Vendido {getTimeSince(item.completed_at)}</div>
+                  </div>
+                  <AppButton
+                    className="pay-btn"
+                    style={{ flexShrink: 0, padding: "10px 16px" }}
+                    onClick={() => (isVideo ? handleDeliverVideoHQ(item.id) : handleDeliverPhotoHQ(item.id))}
+                  >
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <AppIcon name="upload" size={14} /> Entregar HQ
+                    </span>
+                  </AppButton>
                 </div>
-                <AppButton className="pay-btn" style={{ flexShrink: 0, padding: "10px 16px" }} onClick={() => handleDeliverHQ(item.id)}>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <AppIcon name="upload" size={14} /> Entregar HQ
-                  </span>
-                </AppButton>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -5289,10 +5358,16 @@ const renderPhotographerProfile = () => {
   </div>
 );
 
-  const renderMyPurchases = () => (
+  const renderMyPurchases = () => {
+    const purchaseItems = [
+      ...purchases.map((p) => ({ type: "photo", data: p, completed_at: p.completed_at })),
+      ...videoPurchases.map((v) => ({ type: "video", data: v, completed_at: v.completed_at })),
+    ].sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
+
+    return (
   <div className="upload-view">
-    <div className="section-title">MIS COMPRAS</div>
-    <div className="section-sub">Volvé a descargar tus fotos compradas.</div>
+    <SectionTitleIcon icon="purchases">MIS COMPRAS</SectionTitleIcon>
+    <div className="section-sub">Volvé a descargar tus fotos y videos comprados.</div>
 
     {!user ? (
       <div className="empty">
@@ -5304,83 +5379,147 @@ const renderPhotographerProfile = () => {
         <LoaderIcon size={44} />
         <div>Cargando compras...</div>
       </div>
-    ) : purchases.length === 0 ? (
+    ) : purchaseItems.length === 0 ? (
       <div className="empty">
         <EmptyIcon name="receipt" />
-        <div>Todavía no has comprado fotos.</div>
+        <div>Todavía no compraste fotos ni videos.</div>
       </div>
     ) : (
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {purchases.map((p) => (
-          <div
-            key={p.id}
-            style={{
-              display: "flex",
-              gap: 12,
-              padding: 12,
-              borderRadius: 10,
-              background: "var(--surface)",
-              border: "1px solid var(--border)",
-              alignItems: "center",
-            }}
-          >
+        {purchaseItems.map((item) => {
+          if (item.type === "photo") {
+            const p = item.data;
+            return (
+              <div
+                key={`photo-${p.id}`}
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  padding: 12,
+                  borderRadius: 10,
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  alignItems: "center",
+                }}
+              >
+                <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", background: "var(--card)", flexShrink: 0 }}>
+                  <img src={p.photo?.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                </div>
+                <div style={{ flex: 1, fontSize: 13 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                    <span className="tag" style={{ fontSize: 10, padding: "2px 8px" }}>Foto</span>
+                    <span style={{ fontWeight: 600 }}>{p.photo?.photographer?.name || "Fotógrafo"}</span>
+                  </div>
+                  <div style={{ color: "var(--muted)", marginTop: 2 }}>
+                    <IconText icon="pin" size={12}>{p.photo?.location}</IconText>
+                  </div>
+                  <div style={{ color: "var(--muted)", marginTop: 2 }}>
+                    <IconText icon="money" size={12}>Q{p.amount}</IconText> ·{" "}
+                    {p.completed_at ? new Date(p.completed_at).toLocaleString() : "Completado"}
+                  </div>
+                </div>
+                <AppButton
+                  className="card-buy"
+                  style={{ background: "linear-gradient(135deg, var(--orange-light), var(--orange))", color: "#000" }}
+                  onClick={async () => {
+                    try {
+                      const res = await fetch(`/api/downloads/${p.photo.id}`, {
+                        headers: { Authorization: `Bearer ${session.access_token}` },
+                      });
+                      if (!res.ok) throw new Error("Error al descargar");
+                      const data = await res.json();
+                      window.open(data.download_url, "_blank");
+                    } catch (err) {
+                      console.error(err);
+                      showToast("Error al descargar.");
+                    }
+                  }}
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} /> Descargar</span>
+                </AppButton>
+              </div>
+            );
+          }
+
+          const v = item.data;
+          const label =
+            [v.video?.moto_brand, v.video?.moto_model].filter(Boolean).join(" ") ||
+            v.video?.sector ||
+            "Video";
+          const hqPending = v.video?.hq_status === "pending";
+
+          return (
             <div
+              key={`video-${v.id}`}
               style={{
-                width: 80,
-                height: 60,
-                borderRadius: 8,
-                overflow: "hidden",
-                background: "var(--card)",
-                flexShrink: 0,
+                display: "flex",
+                gap: 12,
+                padding: 12,
+                borderRadius: 10,
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                alignItems: "center",
               }}
             >
-              <img
-                src={p.photo?.watermark_url}
-                alt=""
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-              />
+              <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", background: "#000", flexShrink: 0 }}>
+                <video src={v.video?.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              </div>
+              <div style={{ flex: 1, fontSize: 13 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                  <span className="tag" style={{ fontSize: 10, padding: "2px 8px" }}>Video</span>
+                  <span style={{ fontWeight: 600 }}>{v.video?.photographer?.name || "Fotógrafo"}</span>
+                </div>
+                <div style={{ color: "var(--muted)", marginTop: 2 }}>
+                  <IconText icon="pin" size={12}>{label}</IconText>
+                </div>
+                <div style={{ color: "var(--muted)", marginTop: 2 }}>
+                  <IconText icon="money" size={12}>Q{v.amount}</IconText> ·{" "}
+                  {v.completed_at ? new Date(v.completed_at).toLocaleString() : "Completado"}
+                  {hqPending && (
+                    <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Preparando HQ</span>
+                  )}
+                </div>
+              </div>
+              <AppButton
+                className="card-buy"
+                style={{
+                  background: hqPending
+                    ? "var(--surface)"
+                    : "linear-gradient(135deg, var(--orange-light), var(--orange))",
+                  color: hqPending ? "var(--muted)" : "#000",
+                  border: hqPending ? "1px solid var(--border)" : undefined,
+                }}
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/videos/${v.video.id}/download`, {
+                      headers: { Authorization: `Bearer ${session.access_token}` },
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || "Error al descargar");
+                    if (data.status === "pending") {
+                      showToast(data.message || "El fotógrafo está preparando tu video.");
+                      return;
+                    }
+                    window.open(data.download_url, "_blank");
+                  } catch (err) {
+                    console.error(err);
+                    showToast("Error al descargar el video.");
+                  }
+                }}
+              >
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} />
+                  {hqPending ? "Esperando HQ" : "Descargar"}
+                </span>
+              </AppButton>
             </div>
-            <div style={{ flex: 1, fontSize: 13 }}>
-              <div style={{ fontWeight: 600 }}>
-                {p.photo?.photographer?.name || "Fotógrafo"}
-              </div>
-              <div style={{ color: "var(--muted)", marginTop: 2 }}>
-<IconText icon="pin" size={12}>{p.photo?.location}</IconText>
-              </div>
-              <div style={{ color: "var(--muted)", marginTop: 2 }}>
-<IconText icon="money" size={12}>Q{p.amount}</IconText> ·{" "}
-                {p.completed_at
-                  ? new Date(p.completed_at).toLocaleString()
-                  : "Completado"}
-              </div>
-            </div>
-            <AppButton
-              className="card-buy"
-              style={{ background: "linear-gradient(135deg, var(--orange-light), var(--orange))", color: "#000" }}
-              onClick={async () => {
-                try {
-                  const res = await fetch(`/api/downloads/${p.photo.id}`, {
-                    headers: {
-                      Authorization: `Bearer ${session.access_token}`,
-                    },
-                  });
-                  if (!res.ok) throw new Error("Error al descargar");
-                  const data = await res.json();
-                  window.open(data.download_url, "_blank");
-                } catch (err) {
-                  console.error(err);
-                  setMessage("Error al descargar.");
-                }
-              }}
-            >
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} /> Descargar</span>
-            </AppButton>
-          </div>
-        ))}
+          );
+        })}
       </div>
     )}
   </div>
-);
+    );
+  };
 
 const renderCeoAccount = () => {
   const pendingWithdrawals = adminWithdrawals.filter((w) => w.status === "pending");
