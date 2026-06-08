@@ -2144,11 +2144,10 @@ useEffect(() => {
       [VIEWS.MY_GALLERY]: "gallery",
       [VIEWS.VENDOR_REQUEST]: "profile",
       [VIEWS.CEO_PAYROLL]: "payroll",
-      [VIEWS.ADMIN]: isCEO ? "control" : "admin",
     };
     const nextTab = tabByView[view];
     if (nextTab) setActiveTab((prev) => (prev === nextTab ? prev : nextTab));
-  }, [view, isCEO]);
+  }, [view]);
   
   useEffect(() => {
   if (view === VIEWS.MY_PURCHASES && user && session) {
@@ -4572,7 +4571,7 @@ const renderPhotographerProfile = () => {
         <div className="form-group" style={{ marginBottom: 20 }}>
           <label className="form-label">Miniatura (opcional)</label>
           <div className="section-sub" style={{ marginBottom: 10 }}>
-            Subí una foto del rider — se muestra antes de reproducir el preview, como en YouTube.
+            Subí una foto del rider — se muestra antes de reproducir el preview.
           </div>
           <div
             className={`dropzone${videoThumbnailFile ? " active" : ""}`}
@@ -5833,7 +5832,7 @@ const renderCeoAccount = () => {
         <AppButton
           type="button"
           className="ceo-account-action-btn"
-          onClick={() => { setActiveTab("control"); setView(VIEWS.ADMIN); }}
+          onClick={() => { setView(VIEWS.ADMIN); }}
         >
           <AppIcon name="control" size={22} color="#ffc266" />
           Control
@@ -8482,14 +8481,14 @@ const renderVendorRequest = () => {
         {isCEO ? (
           <AppButton
             className="nav-btn nav-btn-sm nav-role-btn nav-role-ceo"
-            onClick={() => { setActiveTab("control"); setView(VIEWS.ADMIN); }}
+            onClick={() => { setView(VIEWS.ADMIN); }}
           >
             CEO
           </AppButton>
         ) : isStaff ? (
           <AppButton
             className="nav-btn nav-btn-sm nav-role-btn nav-role-admin"
-            onClick={() => { setActiveTab("admin"); setView(VIEWS.ADMIN); }}
+            onClick={() => { setView(VIEWS.ADMIN); }}
           >
             Admin
           </AppButton>
@@ -8678,7 +8677,6 @@ const renderVendorRequest = () => {
         items={[
           { id: "feed", label: "Inicio", v: VIEWS.PHOTOGRAPHERS },
           { id: "payroll", icon: "payroll", label: "Planilla", v: VIEWS.CEO_PAYROLL },
-          { id: "control", icon: "control", label: "Control", v: VIEWS.ADMIN },
           { id: "profile", label: "Cuenta", v: VIEWS.VENDOR_REQUEST },
         ]}
         activeTab={activeTab}
@@ -8702,7 +8700,6 @@ const renderVendorRequest = () => {
             : [{ id: "purchases", label: "Compras", v: VIEWS.MY_PURCHASES }]),
           { id: "gallery", label: "Galería", v: VIEWS.MY_GALLERY },
           { id: "profile", label: "Perfil", v: VIEWS.VENDOR_REQUEST },
-          ...(isStaff ? [{ id: "admin", label: "Admin", v: VIEWS.ADMIN }] : []),
         ]}
         activeTab={activeTab}
         onSelect={(item) => {
