@@ -2281,7 +2281,7 @@ useEffect(() => {
   }, [view]);
 
   useEffect(() => {
-    if (view === VIEWS.PHOTOGRAPHERS) fetchPublicVideos();
+    if (view === VIEWS.PHOTOGRAPHERS || view === VIEWS.PHOTOGRAPHER_PROFILE) fetchPublicVideos();
   }, [view]);
 
   const handleVideoHover = (videoId, isEntering) => {
@@ -3547,24 +3547,32 @@ const renderPhotographers = () => (
   </div>
 </div>
 
-    {homeVideos.length > 0 && (
-      <div style={{ padding: "24px 20px 0" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8, flexWrap: "wrap" }}>
-          <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 2 }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><AppIcon name="video" size={18} color="var(--orange)" /> VIDEOS RECIENTES</span>
-          </div>
-          <AppButton
-            className="nav-btn"
-            onClick={() => { setActiveTab("videos"); setView(VIEWS.VIDEO_SEARCH); }}
-          >
-            Ver todos
-          </AppButton>
+    <div style={{ padding: "24px 20px 0" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 2 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><AppIcon name="video" size={18} color="var(--orange)" /> VIDEOS</span>
         </div>
+        <AppButton
+          className="nav-btn primary"
+          onClick={() => { setActiveTab("videos"); setView(VIEWS.VIDEO_SEARCH); }}
+        >
+          Buscar videos
+        </AppButton>
+      </div>
+      {homeVideos.length > 0 ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
           {renderVideoCards(homeVideos)}
         </div>
-      </div>
-    )}
+      ) : (
+        <div className="empty" style={{ padding: "24px 16px", marginBottom: 8 }}>
+          <EmptyIcon name="video" />
+          <div>Explorá videos de rodadas — no necesitás cuenta para verlos.</div>
+          <AppButton className="nav-btn" style={{ marginTop: 12 }} onClick={() => { setActiveTab("videos"); setView(VIEWS.VIDEO_SEARCH); }}>
+            Ir a videos
+          </AppButton>
+        </div>
+      )}
+    </div>
 
     {/* Anuncios */}
     {announcements.length > 0 && (
@@ -4083,6 +4091,37 @@ const renderPhotographerProfile = () => {
         </div>
       )}
 
+{/* Videos del fotógrafo — visible sin login */}
+<div style={{ marginBottom: 28 }}>
+  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
+      VIDEOS · {photographerVideos.length}
+    </div>
+    <AppButton
+      className="nav-btn"
+      onClick={() => {
+        setVideoSearchFilters((f) => ({ ...f, brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "" }));
+        setActiveTab("videos");
+        setView(VIEWS.VIDEO_SEARCH);
+      }}
+    >
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <AppIcon name="search" size={14} /> Buscar videos
+      </span>
+    </AppButton>
+  </div>
+  {photographerVideos.length === 0 ? (
+    <div className="empty" style={{ padding: "32px 16px" }}>
+      <EmptyIcon name="video" />
+      <div>Este fotógrafo aún no tiene videos publicados.</div>
+    </div>
+  ) : (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
+      {renderVideoCards(photographerVideos)}
+    </div>
+  )}
+</div>
+
       {/* Búsqueda dentro del perfil */}
       <input className="search-input" style={{ marginBottom: 16 }}
         placeholder="Buscar fotos por ubicación o marca..."
@@ -4168,37 +4207,6 @@ const renderPhotographerProfile = () => {
     </div>
   </div>
 )}
-
-{/* Videos del fotógrafo — visible sin login, antes de las fotos */}
-<div style={{ marginBottom: 28 }}>
-  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
-    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
-      VIDEOS · {photographerVideos.length}
-    </div>
-    <AppButton
-      className="nav-btn"
-      onClick={() => {
-        setVideoSearchFilters((f) => ({ ...f, brand: "", model: "", moto_color: "", helmet_color: "", sector: "", time_start: "", time_end: "" }));
-        setActiveTab("videos");
-        setView(VIEWS.VIDEO_SEARCH);
-      }}
-    >
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-        <AppIcon name="search" size={14} /> Buscar videos
-      </span>
-    </AppButton>
-  </div>
-  {photographerVideos.length === 0 ? (
-    <div className="empty" style={{ padding: "32px 16px" }}>
-      <EmptyIcon name="video" />
-      <div>Este fotógrafo aún no tiene videos publicados.</div>
-    </div>
-  ) : (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
-      {renderVideoCards(photographerVideos)}
-    </div>
-  )}
-</div>
 
 {/* Fotos — filtradas por álbum si hay uno seleccionado */}
 {/* Tags filtrables — solo cuando hay álbum seleccionado */}
