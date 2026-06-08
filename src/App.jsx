@@ -55,6 +55,32 @@ const VIEWS = {
   PENDING_DELIVERIES: "pending_deliveries",
 };
 
+const VIDEO_PREVIEW_MAX_SEC = 7;
+
+const formatVideoDuration = (seconds) => {
+  const total = Math.floor(Number(seconds));
+  if (!Number.isFinite(total) || total <= 0) return null;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+};
+
+const readVideoDuration = (file) => new Promise((resolve) => {
+  const el = document.createElement("video");
+  el.preload = "metadata";
+  const url = URL.createObjectURL(file);
+  el.onloadedmetadata = () => {
+    const dur = Math.round(el.duration);
+    URL.revokeObjectURL(url);
+    resolve(Number.isFinite(dur) && dur > 0 ? dur : null);
+  };
+  el.onerror = () => {
+    URL.revokeObjectURL(url);
+    resolve(null);
+  };
+  el.src = url;
+});
+
 const PENDING_EMAIL_CONFIRM_KEY = "motoshot_pending_email_confirm";
 
 const getEmailConfirmRedirectUrl = () => {
@@ -634,12 +660,16 @@ function WatermarkedImage({ src, photographer, purchased }) {
   });
   const [videoSearchRan, setVideoSearchRan] = useState(false);
   const [videosLoading, setVideosLoading] = useState(false);
-  const [homeVideos, setHomeVideos] = useState([]);
   const [photographerVideos, setPhotographerVideos] = useState([]);
+  const [videoPreviewActive, setVideoPreviewActive] = useState({});
+  const [videoPreviewProgress, setVideoPreviewProgress] = useState({});
+  const [videoDurationCache, setVideoDurationCache] = useState({});
   const [analyzingMedia, setAnalyzingMedia] = useState(false);
   const [autoTags, setAutoTags] = useState(null);
   const [pendingDeliveries, setPendingDeliveries] = useState([]);
   const [videoFile, setVideoFile] = useState(null);
+  const [videoThumbnailFile, setVideoThumbnailFile] = useState(null);
+  const [videoDurationSeconds, setVideoDurationSeconds] = useState(null);
   const [videoForm, setVideoForm] = useState({
     price: "", sector: "", event_time_start: "", event_time_end: "", album_id: "",
   });
@@ -650,6 +680,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [purchasedVideos, setPurchasedVideos] = useState([]);
   const videoRefs = useRef({});
   const playingVideos = useRef([]);
+  const videoPreviewHandlers = useRef({});
 
   const showEmailConfirmedPage = useCallback((s) => {
     if (!s?.user?.email_confirmed_at) return;
@@ -1562,18 +1593,6 @@ const fetchPhotographerProfile = async (id) => {
   }
 };
 
-const fetchPublicVideos = async () => {
-  try {
-    const res = await fetch("/api/videos/search");
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Error al cargar videos");
-    setHomeVideos(Array.isArray(data) ? data.slice(0, 8) : []);
-  } catch (err) {
-    console.error("fetchPublicVideos:", err);
-    setHomeVideos([]);
-  }
-};
-
 const fetchMyVideos = async (photographerId) => {
   if (!photographerId) return;
   try {
@@ -2280,69 +2299,139 @@ useEffect(() => {
     }
   }, [view]);
 
-  useEffect(() => {
-    if (view === VIEWS.PHOTOGRAPHERS || view === VIEWS.PHOTOGRAPHER_PROFILE) fetchPublicVideos();
-  }, [view]);
-
-  const handleVideoHover = (videoId, isEntering) => {
+  const stopVideoPreview = (videoId) => {
     const videoEl = videoRefs.current[videoId];
-    if (!videoEl) return;
-    if (isEntering) {
-      if (playingVideos.current.length >= 3) {
-        const oldest = playingVideos.current.shift();
-        const oldEl = videoRefs.current[oldest];
-        if (oldEl) { oldEl.pause(); oldEl.currentTime = 0; }
-      }
-      playingVideos.current.push(videoId);
-      videoEl.play().catch(() => {});
-    } else {
-      playingVideos.current = playingVideos.current.filter((id) => id !== videoId);
+    const handler = videoPreviewHandlers.current[videoId];
+    if (videoEl && handler) {
+      videoEl.removeEventListener("timeupdate", handler);
+      delete videoPreviewHandlers.current[videoId];
+    }
+    if (videoEl) {
       videoEl.pause();
       videoEl.currentTime = 0;
     }
+    playingVideos.current = playingVideos.current.filter((id) => id !== videoId);
+    setVideoPreviewActive((prev) => ({ ...prev, [videoId]: false }));
+    setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: 0 }));
   };
 
-  const renderVideoCards = (videoList) => videoList.map((video) => (
-    <div
-      key={video.id}
-      style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }}
-      onMouseEnter={() => handleVideoHover(video.id, true)}
-      onMouseLeave={() => handleVideoHover(video.id, false)}
-    >
-      <div style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}>
-        <video
-          ref={(el) => { videoRefs.current[video.id] = el; }}
-          src={video.preview_url}
-          muted
-          loop
-          playsInline
-          preload="metadata"
-          style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover" }}
-        />
-        {video.duration_seconds ? (
-          <div style={{ position: "absolute", bottom: 8, right: 8, background: "rgba(0,0,0,0.8)", color: "#fff", padding: "2px 6px", borderRadius: 4, fontSize: 12 }}>
-            {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
-          </div>
-        ) : null}
-      </div>
-      <div style={{ padding: 12 }}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-          {video.moto_brand && (
-            <span className="tag active" style={{ fontSize: 11 }}>
-              {video.moto_brand} {video.moto_model}
-            </span>
+  const startVideoPreview = (videoId) => {
+    const videoEl = videoRefs.current[videoId];
+    if (!videoEl) return;
+    if (playingVideos.current.length >= 3 && !playingVideos.current.includes(videoId)) {
+      stopVideoPreview(playingVideos.current[0]);
+    }
+    if (!playingVideos.current.includes(videoId)) {
+      playingVideos.current.push(videoId);
+    }
+    videoEl.currentTime = 0;
+    const onTimeUpdate = () => {
+      const progress = Math.min(videoEl.currentTime / VIDEO_PREVIEW_MAX_SEC, 1);
+      setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: progress }));
+      if (videoEl.currentTime >= VIDEO_PREVIEW_MAX_SEC) {
+        videoEl.pause();
+        videoEl.currentTime = 0;
+        setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: 0 }));
+      }
+    };
+    if (videoPreviewHandlers.current[videoId]) {
+      videoEl.removeEventListener("timeupdate", videoPreviewHandlers.current[videoId]);
+    }
+    videoPreviewHandlers.current[videoId] = onTimeUpdate;
+    videoEl.addEventListener("timeupdate", onTimeUpdate);
+    setVideoPreviewActive((prev) => ({ ...prev, [videoId]: true }));
+    videoEl.play().catch(() => {});
+  };
+
+  const renderVideoCards = (videoList) => videoList.map((video) => {
+    const durationLabel = formatVideoDuration(video.duration_seconds || videoDurationCache[video.id]);
+    const isPreviewing = Boolean(videoPreviewActive[video.id]);
+    const previewProgress = videoPreviewProgress[video.id] || 0;
+
+    return (
+      <div
+        key={video.id}
+        style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }}
+        onMouseEnter={() => startVideoPreview(video.id)}
+        onMouseLeave={() => stopVideoPreview(video.id)}
+        onTouchStart={() => startVideoPreview(video.id)}
+        onTouchEnd={() => stopVideoPreview(video.id)}
+      >
+        <div style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}>
+          {video.thumbnail_url && !isPreviewing && (
+            <img
+              src={video.thumbnail_url}
+              alt=""
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 1 }}
+            />
           )}
-          {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
-          {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
-          {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
+          <video
+            ref={(el) => { videoRefs.current[video.id] = el; }}
+            src={video.preview_url}
+            poster={video.thumbnail_url || undefined}
+            muted
+            playsInline
+            preload="metadata"
+            onLoadedMetadata={(e) => {
+              const dur = Math.round(e.currentTarget.duration);
+              if (dur > 0) {
+                setVideoDurationCache((prev) => (prev[video.id] === dur ? prev : { ...prev, [video.id]: dur }));
+              }
+            }}
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              zIndex: 2,
+              opacity: video.thumbnail_url && !isPreviewing ? 0 : 1,
+              transition: "opacity 0.2s ease",
+            }}
+          />
+          {durationLabel && (
+            <div style={{
+              position: "absolute",
+              bottom: 8,
+              right: 8,
+              zIndex: 4,
+              background: "rgba(0,0,0,0.82)",
+              color: "#fff",
+              padding: "2px 6px",
+              borderRadius: 4,
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+            >
+              {durationLabel}
+            </div>
+          )}
+          {isPreviewing && (
+            <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 3, zIndex: 5, background: "rgba(255,255,255,0.2)" }}>
+              <div style={{ width: `${previewProgress * 100}%`, height: "100%", background: "var(--orange)", transition: "width 0.08s linear" }} />
+            </div>
+          )}
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-          <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
+        <div style={{ padding: 12 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+            {video.moto_brand && (
+              <span className="tag active" style={{ fontSize: 11 }}>
+                {video.moto_brand} {video.moto_model}
+              </span>
+            )}
+            {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
+            {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
+            {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
+            <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
+          </div>
         </div>
       </div>
-    </div>
-  ));
+    );
+  });
 
   useEffect(() => {
     if (view !== VIEWS.VENDOR_REQUEST && editMode) {
@@ -3521,7 +3610,7 @@ const renderPhotographers = () => (
       transition={{ duration: 0.6, delay: 0.2, ease: "easeOut" }}
       style={{ color: "rgba(255,255,255,0.8)", fontSize: 15, marginTop: 10, fontWeight: 300 }}
     >
-      Encontrá al fotógrafo de tu rodada · Comprá tus fotos en alta resolución
+      Encontrá al fotógrafo de tu rodada · Comprá tus fotos y videos acá
     </motion.div>
 
     <motion.div
@@ -3539,40 +3628,13 @@ const renderPhotographers = () => (
           style={{ marginTop: 16 }}
           onClick={() => setView(VIEWS.AUTH)}
         >
-          Iniciá sesión para comprar fotos
+          Iniciá sesión para comprar fotos y videos
         </AppButton>
       )}
     </motion.div>
 
   </div>
 </div>
-
-    <div style={{ padding: "24px 20px 0" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8, flexWrap: "wrap" }}>
-        <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 2 }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><AppIcon name="video" size={18} color="var(--orange)" /> VIDEOS</span>
-        </div>
-        <AppButton
-          className="nav-btn primary"
-          onClick={() => { setActiveTab("videos"); setView(VIEWS.VIDEO_SEARCH); }}
-        >
-          Buscar videos
-        </AppButton>
-      </div>
-      {homeVideos.length > 0 ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
-          {renderVideoCards(homeVideos)}
-        </div>
-      ) : (
-        <div className="empty" style={{ padding: "24px 16px", marginBottom: 8 }}>
-          <EmptyIcon name="video" />
-          <div>Explorá videos de rodadas — no necesitás cuenta para verlos.</div>
-          <AppButton className="nav-btn" style={{ marginTop: 12 }} onClick={() => { setActiveTab("videos"); setView(VIEWS.VIDEO_SEARCH); }}>
-            Ir a videos
-          </AppButton>
-        </div>
-      )}
-    </div>
 
     {/* Anuncios */}
     {announcements.length > 0 && (
@@ -4431,6 +4493,8 @@ const renderPhotographerProfile = () => {
       const file = e.target.files[0];
       if (!file) return;
       setVideoFile(file);
+      setVideoDurationSeconds(null);
+      readVideoDuration(file).then((dur) => setVideoDurationSeconds(dur));
       await analyzeMediaWithAI(file);
     };
 
@@ -4439,6 +4503,8 @@ const renderPhotographerProfile = () => {
       setVideoUploadLoading(true);
       const formData = new FormData();
       formData.append("video", videoFile);
+      if (videoThumbnailFile) formData.append("thumbnail", videoThumbnailFile);
+      if (videoDurationSeconds) formData.append("duration_seconds", String(videoDurationSeconds));
       formData.append("photographer_id", profile.id);
       formData.append("price", videoForm.price);
       formData.append("sector", videoForm.sector);
@@ -4463,6 +4529,8 @@ const renderPhotographerProfile = () => {
         if (res.ok) {
           showToast("Listo: video subido exitosamente.");
           setVideoFile(null);
+          setVideoThumbnailFile(null);
+          setVideoDurationSeconds(null);
           setAutoTags(null);
           setVideoForm({ price: "", sector: "", event_time_start: "", event_time_end: "", album_id: "" });
           if (profile?.id) fetchMyVideos(profile.id);
@@ -4505,6 +4573,55 @@ const renderPhotographerProfile = () => {
             )}
           </div>
         </div>
+
+        <div className="form-group" style={{ marginBottom: 20 }}>
+          <label className="form-label">Miniatura (opcional)</label>
+          <div className="section-sub" style={{ marginBottom: 10 }}>
+            Subí una foto del rider — se muestra antes de reproducir el preview, como en YouTube.
+          </div>
+          <div
+            className={`dropzone${videoThumbnailFile ? " active" : ""}`}
+            style={{ padding: "20px 16px" }}
+            onClick={() => document.getElementById("videoThumbInput").click()}
+          >
+            <input
+              id="videoThumbInput"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              style={{ display: "none" }}
+              onChange={(e) => setVideoThumbnailFile(e.target.files?.[0] || null)}
+            />
+            {videoThumbnailFile ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <img
+                  src={URL.createObjectURL(videoThumbnailFile)}
+                  alt=""
+                  style={{ width: 96, height: 54, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)" }}
+                />
+                <div>
+                  <div style={{ color: "var(--orange)", fontWeight: 700, fontSize: 13 }}>{videoThumbnailFile.name}</div>
+                  <AppButton
+                    className="nav-btn"
+                    style={{ marginTop: 8, fontSize: 11 }}
+                    onClick={(ev) => { ev.stopPropagation(); setVideoThumbnailFile(null); }}
+                  >
+                    Quitar miniatura
+                  </AppButton>
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                <IconText icon="image" size={14}>Tocá para elegir imagen de portada</IconText>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {videoDurationSeconds ? (
+          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16 }}>
+            Duración detectada: <strong style={{ color: "var(--text)" }}>{formatVideoDuration(videoDurationSeconds)}</strong>
+          </div>
+        ) : null}
 
         {analyzingMedia && (
           <div className="empty" style={{ padding: "24px 0" }}>
