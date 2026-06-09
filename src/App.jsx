@@ -514,6 +514,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [subPayLoading, setSubPayLoading] = useState(false);
   const [albums, setAlbums] = useState([]);
   const [selectedAlbum, setSelectedAlbum] = useState(null);
+  const [profileMediaTab, setProfileMediaTab] = useState("photos");
   const [albumForm, setAlbumForm] = useState({ name: "", event_date: "" });
   const [showAlbumModal, setShowAlbumModal] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -1585,6 +1586,9 @@ const fetchPhotographerProfile = async (id) => {
     setPhotographerPhotos(profileData.photos || []);
     setAlbums(albumsData.albums || []);
     setPhotographerVideos(Array.isArray(videosData) ? videosData : []);
+    setProfileMediaTab("photos");
+    setSelectedAlbum(null);
+    setSelectedTag(null);
   } catch (err) {
     console.error("fetchPhotographerProfile:", err);
     setPhotographerVideos([]);
@@ -4036,6 +4040,29 @@ const renderPhotographerSocialLinks = (person) => {
 
 const renderPhotographerProfile = () => {
   const subscribed = isSubscribedToPhotographer(selectedPhotographer?.id);
+  const profilePhotoCount = photographerPhotos.length;
+
+  const profileTabBtn = (tab, label, count) => (
+    <button
+      type="button"
+      onClick={() => setProfileMediaTab(tab)}
+      style={{
+        fontFamily: "'Bebas Neue', sans-serif",
+        fontSize: 18,
+        letterSpacing: 1,
+        padding: "14px 8px",
+        background: "none",
+        border: "none",
+        borderBottom: profileMediaTab === tab ? "2px solid var(--orange)" : "2px solid transparent",
+        color: profileMediaTab === tab ? "var(--orange)" : "var(--muted)",
+        cursor: "pointer",
+        transition: "color 0.2s, border-color 0.2s",
+        width: "100%",
+      }}
+    >
+      {label} · {count}
+    </button>
+  );
 
   return (
   <div style={{ paddingBottom: 100 }}>
@@ -4147,37 +4174,52 @@ const renderPhotographerProfile = () => {
         </div>
       )}
 
-{/* Videos del fotógrafo — visible sin login */}
-<div style={{ marginBottom: 28 }}>
-  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
-    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
-      VIDEOS · {photographerVideos.length}
+{/* Videos | Fotos — pestañas divididas */}
+<div style={{ marginBottom: 20 }}>
+  <div style={{
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    borderBottom: "1px solid var(--border)",
+    marginBottom: 4,
+  }}>
+    {profileTabBtn("videos", "VIDEOS", photographerVideos.length)}
+    <div style={{ borderLeft: "1px solid var(--border)" }}>
+      {profileTabBtn("photos", "FOTOS", profilePhotoCount)}
     </div>
-    <AppButton
-      className="nav-btn"
-      onClick={() => {
-        setVideoSearchQuery("");
-        setActiveTab("videos");
-        setView(VIEWS.VIDEO_SEARCH);
-      }}
-    >
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-        <AppIcon name="search" size={14} /> Buscar videos
-      </span>
-    </AppButton>
   </div>
-  {photographerVideos.length === 0 ? (
-    <div className="empty" style={{ padding: "32px 16px" }}>
-      <EmptyIcon name="video" />
-      <div>Este fotógrafo aún no tiene videos publicados.</div>
-    </div>
-  ) : (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
-      {renderVideoCards(photographerVideos)}
-    </div>
-  )}
 </div>
 
+{profileMediaTab === "videos" && (
+  <div style={{ marginBottom: 28 }}>
+    {photographerVideos.length === 0 ? (
+      <div className="empty" style={{ padding: "32px 16px" }}>
+        <EmptyIcon name="video" />
+        <div>Este fotógrafo aún no tiene videos publicados.</div>
+      </div>
+    ) : (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
+        {renderVideoCards(photographerVideos)}
+      </div>
+    )}
+    <div style={{ textAlign: "center", marginTop: 16 }}>
+      <AppButton
+        className="nav-btn"
+        onClick={() => {
+          setVideoSearchQuery("");
+          setActiveTab("videos");
+          setView(VIEWS.VIDEO_SEARCH);
+        }}
+      >
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <AppIcon name="search" size={14} /> Buscar más videos
+        </span>
+      </AppButton>
+    </div>
+  </div>
+)}
+
+{profileMediaTab === "photos" && (
+  <>
       {/* Búsqueda dentro del perfil */}
       <input className="search-input" style={{ marginBottom: 16 }}
         placeholder="Buscar fotos por ubicación o marca..."
@@ -4309,7 +4351,7 @@ const renderPhotographerProfile = () => {
   <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
     {selectedAlbum
       ? `${selectedAlbum.name.toUpperCase()}${selectedTag ? ` · ${selectedTag}` : ""}`
-      : "TODAS LAS FOTOS"} · {displayPhotos.length}
+      : `${displayPhotos.length} foto${displayPhotos.length !== 1 ? "s" : ""}`}
   </div>
   <div style={{ display: "flex", gap: 4 }}>
     {[
@@ -4418,6 +4460,9 @@ const renderPhotographerProfile = () => {
     </>
   );
 })()}
+
+  </>
+)}
 
     </div>
   </div>
