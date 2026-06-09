@@ -2573,34 +2573,15 @@ useEffect(() => {
       const list = Array.isArray(data) ? data : [];
       setVideos(list);
       if (list.some((v) => !v.thumbnail_url)) {
-        window.setTimeout(async () => {
+        const refreshSearchThumbnails = async () => {
           try {
             const retryRes = await fetch(url);
             const retryData = await retryRes.json();
             if (retryRes.ok && Array.isArray(retryData)) setVideos(retryData);
           } catch (_) {}
-        }, 10000);
-      }
-      if (session?.access_token && profile?.id) {
-        list
-          .filter((v) => !v.thumbnail_url && v.photographer_id === profile.id)
-          .forEach((v) => {
-            fetch(`/api/videos/${v.id}/generate-thumbnail`, {
-              method: "POST",
-              headers: { Authorization: `Bearer ${session.access_token}` },
-            })
-              .then((thumbRes) => (thumbRes.ok ? thumbRes.json() : null))
-              .then((thumb) => {
-                if (thumb?.thumbnail_url) {
-                  setVideos((prev) =>
-                    prev.map((item) =>
-                      item.id === v.id ? { ...item, thumbnail_url: thumb.thumbnail_url } : item
-                    )
-                  );
-                }
-              })
-              .catch(() => {});
-          });
+        };
+        window.setTimeout(refreshSearchThumbnails, 8000);
+        window.setTimeout(refreshSearchThumbnails, 20000);
       }
     } catch (err) {
       console.error("handleVideoSearch:", err);
