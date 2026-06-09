@@ -651,6 +651,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [albums, setAlbums] = useState([]);
   const [selectedAlbum, setSelectedAlbum] = useState(null);
   const [profileMediaTab, setProfileMediaTab] = useState("photos");
+  const [myProfileMediaTab, setMyProfileMediaTab] = useState("photos");
   const [profileSearchInput, setProfileSearchInput] = useState("");
   const [profileSearchQuery, setProfileSearchQuery] = useState("");
   const [profileSearchRan, setProfileSearchRan] = useState(false);
@@ -6840,6 +6841,47 @@ const renderVendorRequest = () => {
     {/* ── TAB: MEDIOS ── */}
     {profileTab === "medios" && (
       <div>
+        {(() => {
+          const myPhotoCount = photos.filter((p) => p.photographer?.user_id === user?.id).length;
+          const myMediaTabBtn = (tab, label, count) => (
+            <button
+              type="button"
+              onClick={() => setMyProfileMediaTab(tab)}
+              style={{
+                fontFamily: "'Bebas Neue', sans-serif",
+                fontSize: 16,
+                letterSpacing: 1,
+                padding: "12px 8px",
+                background: "none",
+                border: "none",
+                borderBottom: myProfileMediaTab === tab ? "2px solid var(--orange)" : "2px solid transparent",
+                color: myProfileMediaTab === tab ? "var(--orange)" : "var(--muted)",
+                cursor: "pointer",
+                width: "100%",
+              }}
+            >
+              {label} · {count}
+            </button>
+          );
+
+          return (
+            <>
+              <div style={{ marginBottom: 16 }}>
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  borderBottom: "1px solid var(--border)",
+                }}
+                >
+                  {myMediaTabBtn("videos", "VIDEOS", myVideos.length)}
+                  <div style={{ borderLeft: "1px solid var(--border)" }}>
+                    {myMediaTabBtn("photos", "FOTOS", myPhotoCount)}
+                  </div>
+                </div>
+              </div>
+
+              {myProfileMediaTab === "photos" && (
+                <>
         {/* Álbumes */}
         {albums.filter(a => photos.filter(p => p.photographer?.user_id === user?.id && p.album_id === a.id).length > 0).length > 0 && (
           <div style={{ marginBottom: 24 }}>
@@ -6910,10 +6952,7 @@ const renderVendorRequest = () => {
         )}
 
         {/* Fotos sueltas */}
-<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-  <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><AppIcon name="camera" size={18} color="var(--orange)" /> FOTOS · {photos.filter(p => p.photographer?.user_id === user?.id).length}</span>
-  </div>
+<div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginBottom: 12 }}>
   <div style={{ display: "flex", gap: 4 }}>
     {[{ mode: "grid", iconName: "gallery" }, { mode: "feed", iconName: "feed" }].map(({ mode, iconName }) => (
       <AppButton
@@ -6979,14 +7018,12 @@ const renderVendorRequest = () => {
   </div>
 )}
 
-        {/* Videos del fotógrafo */}
-        <div style={{ marginTop: 32, paddingTop: 24, borderTop: "1px solid var(--border)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1 }}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                <AppIcon name="video" size={18} color="var(--orange)" /> VIDEOS · {myVideos.length}
-              </span>
-            </div>
+                </>
+              )}
+
+              {myProfileMediaTab === "videos" && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginBottom: 12 }}>
             <AppButton
               className="nav-btn primary"
               style={{ fontSize: 11, padding: "6px 12px" }}
@@ -7089,8 +7126,13 @@ const renderVendorRequest = () => {
             </div>
           )}
         </div>
+              )}
+            </>
+          );
+        })()}
       </div>
-            )}
+    )}
+
           </>
           )}
         </div>
@@ -7622,7 +7664,7 @@ const renderVendorRequest = () => {
     .close-btn-secondary { width: 100%; padding: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; color: var(--muted); font-family: 'DM Sans', sans-serif; font-size: 14px; cursor: pointer; transition: all 0.2s; }
     .close-btn-secondary:hover { color: var(--text); border-color: var(--orange); }
     .upload-view { padding: 24px 20px 80px; max-width: 540px; margin: 0 auto; }
-    .upload-split-view { max-width: 1120px; padding: 20px 12px 88px; }
+    .upload-view.upload-split-view { max-width: none; width: 100%; margin: 0; padding: 12px 6px 88px; box-sizing: border-box; }
     .upload-split-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -7630,19 +7672,23 @@ const renderVendorRequest = () => {
       border-radius: 14px;
       overflow: hidden;
       background: var(--surface);
+      width: 100%;
     }
     .upload-split-pane {
-      padding: 20px 16px 24px;
+      padding: 16px 12px 20px;
       min-width: 0;
+      overflow-x: hidden;
       overflow-y: auto;
       max-height: calc(100dvh - 168px);
     }
     .upload-split-pane-video { border-right: 1px solid var(--border); }
-    @media (max-width: 820px) {
-      .upload-split-grid { grid-template-columns: 1fr; }
-      .upload-split-pane-video { border-right: none; border-bottom: 1px solid var(--border); }
-      .upload-split-pane { max-height: none; }
-    }
+    .upload-split-pane .section-title { font-size: clamp(22px, 3.5vw, 32px); }
+    .upload-split-pane .section-sub { font-size: 12px; margin-bottom: 16px; }
+    .upload-split-pane .form-label { font-size: 10px; }
+    .upload-split-pane .form-input { padding: 10px 10px; font-size: 13px; }
+    .upload-split-pane .dropzone { padding: 24px 10px; }
+    .upload-split-pane .dropzone-icon svg { width: 28px; height: 28px; }
+    .upload-split-pane .pay-btn, .upload-split-pane .upload-btn { font-size: 15px; padding: 12px 8px; letter-spacing: 0.5px; }
     .section-title { font-family: 'Bebas Neue', sans-serif; font-size: 32px; letter-spacing: 2px; color: var(--text); margin-bottom: 6px; }
     .section-sub { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
     .form-group { margin-bottom: 18px; }
