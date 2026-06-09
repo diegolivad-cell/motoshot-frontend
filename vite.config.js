@@ -39,6 +39,10 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   return {
     plugins: [react(), injectOAuthCompleteHtml(env)],
+    test: {
+      environment: 'node',
+      include: ['src/**/*.test.js'],
+    },
     server: {
       proxy: {
         '/api': {

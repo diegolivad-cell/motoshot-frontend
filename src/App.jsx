@@ -31,28 +31,8 @@ import {
   clearOAuthRedirectUrl,
   isOAuthBrowserOpen,
 } from "./authFlow.js";
+import { apiFetch, apiJson, apiUrl, parseApiJson, wakeApiServer } from "./apiClient.js";
 
-const API = import.meta.env.VITE_API_URL || "";
-const API_BASE = API || "https://motoshot-backend.onrender.com";
-
-async function parseApiJson(res) {
-  const text = await res.text();
-  if (!text.trim()) {
-    if (res.status === 502) {
-      return { error: "El servidor no respondió a tiempo. Probá de nuevo o usá un video más liviano." };
-    }
-    return { error: `Error del servidor (${res.status})` };
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    return {
-      error: res.status === 502
-        ? "El servidor tardó demasiado. Probá de nuevo en unos minutos."
-        : "Respuesta inválida del servidor.",
-    };
-  }
-}
 const VIEWS = {
   PHOTOGRAPHERS: "photographers",
   PHOTOGRAPHER_PROFILE: "photographer_profile",
@@ -1092,13 +1072,10 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const refreshMySubscriptions = useCallback(async () => {
     if (!session?.access_token) return;
     try {
-      const res = await fetch("/api/auth/my-subscriptions", {
+      const { res, data } = await apiJson("/api/auth/my-subscriptions", {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setMySubscriptions(data.subscriptions || []);
-      }
+      if (res.ok) setMySubscriptions(data.subscriptions || []);
     } catch (err) {
       console.error(err);
     }
@@ -1588,9 +1565,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
 const fetchPhotos = async () => {
   try {
     setLoading(true);
-    const res = await fetch("/api/photos");
-    if (!res.ok) throw new Error("Error cargando fotos");
-    const data = await res.json();
+    const { res, data } = await apiJson("/api/photos");
+    if (!res.ok) throw new Error(data.error || "Error cargando fotos");
     setPhotos(data.photos || []);
   } catch (err) {
     console.error(err);
@@ -1603,11 +1579,10 @@ const fetchAllSubscriptions = async () => {
   if (!session) return;
   try {
     setSubsLoading(true);
-    const res = await fetch("/api/auth/my-subscriptions/all", {
-      headers: { Authorization: `Bearer ${session.access_token}` }
+    const { res, data } = await apiJson("/api/auth/my-subscriptions/all", {
+      headers: { Authorization: `Bearer ${session.access_token}` },
     });
-    const data = await res.json();
-    setAllSubscriptions(data.subscriptions || []);
+    if (res.ok) setAllSubscriptions(data.subscriptions || []);
   } catch (err) {
     console.error(err);
   } finally {
@@ -1711,11 +1686,13 @@ const handleReactivateSubscription = (sub) => {
 };
 
 const fetchAnnouncements = async () => {
-  const res = await fetch("/api/auth/announcements");
-  const data = await res.json();
-  setAnnouncements(data.announcements || []);
+  try {
+    const { res, data } = await apiJson("/api/auth/announcements");
+    if (res.ok) setAnnouncements(data.announcements || []);
+  } catch (err) {
+    console.error(err);
+  }
 };
-useEffect(() => { fetchAnnouncements(); }, []);
 
 // ── Fetch purchases ────────────────────────────────────────
 const fetchPurchases = async () => {
@@ -1794,9 +1771,8 @@ const fetchVendorDashboard = async ({ reconcile = false, silent = false } = {}) 
 const fetchPhotographers = async () => {
   try {
     setPhotographersLoading(true);
-    const res = await fetch("/api/auth/photographers");
-    const data = await res.json();
-    setPhotographers(data.photographers || []);
+    const { res, data } = await apiJson("/api/auth/photographers");
+    if (res.ok) setPhotographers(data.photographers || []);
   } catch (err) {
     console.error(err);
   } finally {
@@ -2266,8 +2242,16 @@ const exportPayrollCsv = () => {
   a.click();
   URL.revokeObjectURL(url);
 };
-  useEffect(() => { fetchPhotos(); }, []);
-  useEffect(() => { fetchPhotographers(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await wakeApiServer();
+      if (cancelled) return;
+      await Promise.all([fetchPhotos(), fetchPhotographers(), fetchAnnouncements()]);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     if (!authReady || !isLoggedIn) return;
     refreshMySubscriptions();
@@ -2352,16 +2336,15 @@ useEffect(() => {
       setUserRole(null);
       return;
     }
-    fetch("/api/auth/me", { headers: { Authorization: `Bearer ${session.access_token}` } })
-      .then(async (r) => {
-        if (r.status === 401) {
+    apiJson("/api/auth/me", {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    })
+      .then(async ({ res, data: d }) => {
+        if (res.status === 401) {
           await clearAuthState();
-          return null;
+          return;
         }
-        return r.ok ? r.json() : null;
-      })
-      .then(d => {
-        if (!d) return;
+        if (!res.ok) return;
         setProfile(d.photographer || null);
         if (d.user?.role) setUserRole(d.user.role);
       })
@@ -5006,7 +4989,7 @@ const renderPhotographerProfile = () => {
         formData.append("dorsal", autoTags.dorsal || "");
       }
       try {
-        const res = await fetch(`${API_BASE}/api/videos/upload`, {
+        const res = await fetch(apiUrl("/api/videos/upload"), {
           method: "POST",
           headers: { Authorization: `Bearer ${session.access_token}` },
           body: formData,
@@ -5832,7 +5815,7 @@ const renderPhotographerProfile = () => {
     if (!session?.access_token) return;
     setVideoEditSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/api/videos/${videoId}`, {
+      const res = await fetch(apiUrl(`/api/videos/${videoId}`), {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -5870,7 +5853,7 @@ const renderPhotographerProfile = () => {
       cancelLabel: "NO",
       destructive: true,
       onConfirm: async () => {
-        const res = await fetch(`${API_BASE}/api/videos/${video.id}`, {
+        const res = await fetch(apiUrl(`/api/videos/${video.id}`), {
           method: "DELETE",
           headers: { Authorization: `Bearer ${session?.access_token}` },
         });
