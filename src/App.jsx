@@ -637,6 +637,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [purchasesLoading, setPurchasesLoading] = useState(false);
   const [vendorStats, setVendorStats] = useState(null);
   const [vendorStatsLoading, setVendorStatsLoading] = useState(false);
+  const [vendorStatsError, setVendorStatsError] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [notifLoading, setNotifLoading] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -1082,6 +1083,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
   }, [session]);
 
   const paymentSyncInFlight = useRef(false);
+  const vendorDashboardInFlight = useRef(false);
+  const reconcileAtRef = useRef(0);
+  const RECONCILE_COOLDOWN_MS = 5 * 60 * 1000;
 
   const finalizePhotoPurchase = useCallback(async (photoId) => {
     let photo = photos.find((p) => p.id === photoId);
@@ -1731,28 +1735,55 @@ const fetchNotifications = async () => {
   }
 };
 const fetchVendorDashboard = async ({ reconcile = false, silent = false } = {}) => {
-  if (!session || !user) return;
+  if (!session?.access_token || !user) return;
+  if (vendorDashboardInFlight.current) return;
+  vendorDashboardInFlight.current = true;
   try {
-    if (!silent) setVendorStatsLoading(true);
-    if (reconcile && profile?.verification_status === "approved") {
-      const reconcileRes = await fetch("/api/payments/reconcile-photographer-sales", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      await parseApiJson(reconcileRes).catch(() => ({}));
+    if (!silent) {
+      setVendorStatsLoading(true);
+      setVendorStatsError(false);
     }
-    const res = await fetch("/api/auth/vendor-dashboard", {
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-      },
+    await wakeApiServer();
+    const { res, data } = await apiJson("/api/auth/vendor-dashboard", {
+      headers: { Authorization: `Bearer ${session.access_token}` },
     });
-    const data = await parseApiJson(res);
     if (!res.ok) throw new Error(data.error || "Error cargando dashboard");
     setVendorStats(data);
+    setVendorStatsError(false);
+
+    const shouldReconcile =
+      reconcile
+      && profile?.verification_status === "approved"
+      && Date.now() - reconcileAtRef.current > RECONCILE_COOLDOWN_MS;
+    if (shouldReconcile) {
+      reconcileAtRef.current = Date.now();
+      apiJson(
+        "/api/payments/reconcile-photographer-sales",
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        },
+        { retries: 2 }
+      )
+        .then(async ({ res: reconcileRes, data: reconcileData }) => {
+          if (!reconcileRes.ok || !reconcileData?.reconciled) return null;
+          return apiJson("/api/auth/vendor-dashboard", {
+            headers: { Authorization: `Bearer ${session.access_token}` },
+          });
+        })
+        .then((refresh) => {
+          if (refresh?.res.ok) setVendorStats(refresh.data);
+        })
+        .catch(() => {});
+    }
   } catch (err) {
     console.error(err);
-    if (!silent) showToast("No se pudo cargar el dashboard de vendedor.");
+    if (!silent) {
+      setVendorStatsError(true);
+      showToast("No se pudo cargar el dashboard. Tocá reintentar.");
+    }
   } finally {
+    vendorDashboardInFlight.current = false;
     if (!silent) setVendorStatsLoading(false);
   }
 };
@@ -1928,12 +1959,10 @@ const fetchMyWithdrawals = async () => {
   if (!session?.access_token) return;
   try {
     setWithdrawalsLoading(true);
-    const res = await fetch("/api/auth/withdrawals/my", {
-      headers: { Authorization: `Bearer ${session.access_token}` }
+    const { res, data } = await apiJson("/api/auth/withdrawals/my", {
+      headers: { Authorization: `Bearer ${session.access_token}` },
     });
-    if (!res.ok) return;
-    const data = await res.json();
-    setWithdrawals(data.withdrawals || []);
+    if (res.ok) setWithdrawals(data.withdrawals || []);
   } catch (err) {
     console.error(err);
   } finally {
@@ -2406,12 +2435,9 @@ useEffect(() => {
 
   useEffect(() => {
     const isApproved = profile?.verification_status === "approved";
-    const needsStats = (view === VIEWS.DASHBOARD || view === VIEWS.VENDOR_REQUEST) && isApproved && session?.access_token && user;
-    if (needsStats) {
-      fetchVendorDashboard({
-        reconcile: view === VIEWS.DASHBOARD,
-        silent: view !== VIEWS.DASHBOARD,
-      });
+    const needsVendorPanel = view === VIEWS.VENDOR_REQUEST && isApproved && session?.access_token && user;
+    if (needsVendorPanel) {
+      fetchVendorDashboard({ reconcile: false, silent: true });
       fetchMyWithdrawals();
     }
     // Perfil propio del fotógrafo — cargar sus fotos y álbumes
@@ -2433,13 +2459,10 @@ useEffect(() => {
   const fetchPendingDeliveryCount = useCallback(async () => {
     if (!profile?.id || profile.verification_status !== "approved" || !session?.access_token) return;
     try {
-      const res = await fetch(`/api/videos/pending-delivery-count/${profile.id}`, {
+      const { res, data } = await apiJson(`/api/videos/pending-delivery-count/${profile.id}`, {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      const data = await parseApiJson(res);
-      if (res.ok) {
-        setPendingDeliveryCount(Number(data.count) || 0);
-      }
+      if (res.ok) setPendingDeliveryCount(Number(data.count) || 0);
     } catch (err) {
       console.error("fetchPendingDeliveryCount:", err);
     }
@@ -2449,12 +2472,12 @@ useEffect(() => {
     if (!profile?.id || profile.verification_status !== "approved" || !session?.access_token) return;
     try {
       const headers = { Authorization: `Bearer ${session.access_token}` };
-      const [photosRes, videosRes] = await Promise.all([
-        fetch(`/api/photos/pending-delivery/${profile.id}`, { headers }),
-        fetch(`/api/videos/pending-delivery/${profile.id}`, { headers }),
+      const [photosResult, videosResult] = await Promise.all([
+        apiJson(`/api/photos/pending-delivery/${profile.id}`, { headers }),
+        apiJson(`/api/videos/pending-delivery/${profile.id}`, { headers }),
       ]);
-      const photoItems = photosRes.ok ? await photosRes.json() : [];
-      const videoItems = videosRes.ok ? await videosRes.json() : [];
+      const photoItems = photosResult.res.ok && Array.isArray(photosResult.data) ? photosResult.data : [];
+      const videoItems = videosResult.res.ok && Array.isArray(videosResult.data) ? videosResult.data : [];
       const merged = [
         ...(Array.isArray(photoItems) ? photoItems.map((p) => ({ ...p, media_type: p.media_type || "photo" })) : []),
         ...(Array.isArray(videoItems) ? videoItems.map((v) => ({ ...v, media_type: v.media_type || "video" })) : []),
@@ -5603,7 +5626,20 @@ const renderPhotographerProfile = () => {
         <SectionTitleIcon icon="dash">DASHBOARD</SectionTitleIcon>
         <div className="section-sub">Resumen de tu actividad y ventas.</div>
   
-        {vendorStatsLoading || !vendorStats ? (
+        {vendorStatsLoading ? (
+          <div className="empty"><LoaderIcon size={44} /><div>Cargando estadísticas...</div></div>
+        ) : vendorStatsError && !vendorStats ? (
+          <div className="empty">
+            <EmptyIcon name="alert" />
+            <div>No se pudieron cargar las estadísticas.</div>
+            <AppButton
+              onClick={() => fetchVendorDashboard({ reconcile: true })}
+              style={{ marginTop: 12 }}
+            >
+              REINTENTAR
+            </AppButton>
+          </div>
+        ) : !vendorStats ? (
           <div className="empty"><LoaderIcon size={44} /><div>Cargando estadísticas...</div></div>
         ) : (
           <>

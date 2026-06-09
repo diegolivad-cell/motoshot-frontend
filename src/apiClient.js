@@ -26,7 +26,7 @@ export function sleep(ms) {
 export async function parseApiJson(res) {
   const text = await res.text();
   if (!text.trim()) {
-    if (res.status === 503 || res.status === 502) {
+    if (res.status === 503 || res.status === 502 || res.status === 504) {
       return {
         error: "El servidor está iniciando. Esperá unos segundos y recargá la página.",
       };

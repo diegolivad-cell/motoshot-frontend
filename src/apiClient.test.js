@@ -30,6 +30,12 @@ describe("isRetryableStatus", () => {
 });
 
 describe("parseApiJson", () => {
+  it("handles empty 504 without throwing", async () => {
+    const res = new Response("", { status: 504 });
+    const data = await parseApiJson(res);
+    expect(data.error).toMatch(/iniciando/i);
+  });
+
   it("handles empty 503 without throwing", async () => {
     const res = new Response("", { status: 503 });
     const data = await parseApiJson(res);
