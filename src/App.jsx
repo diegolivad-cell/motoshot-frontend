@@ -415,6 +415,45 @@ function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
   );
 }
 
+function WatermarkedVideoOverlay({ photographer }) {
+  const label = photographer || "MOTOSHOT";
+  return (
+    <>
+      <div style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 6,
+        pointerEvents: "none",
+        background: "linear-gradient(180deg, rgba(0,0,0,0) 40%, rgba(0,0,0,0.55) 100%)",
+      }}
+      />
+      <div style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 6,
+        display: "grid",
+        placeItems: "center",
+        pointerEvents: "none",
+        userSelect: "none",
+      }}
+      >
+        <div style={{
+          color: "rgba(255,255,255,0.16)",
+          fontSize: "clamp(12px, 3.5vw, 28px)",
+          fontWeight: 900,
+          textAlign: "center",
+          textTransform: "uppercase",
+          letterSpacing: 2,
+          padding: "0 8px",
+        }}
+        >
+          {`© ${label} • MOTOSHOT GT`}
+        </div>
+      </div>
+    </>
+  );
+}
+
 function WatermarkedImage({ src, photographer, purchased }) {
   const [loaded, setLoaded] = useState(false);
   const [imageUrl, setImageUrl] = useState(null);
@@ -2355,7 +2394,10 @@ useEffect(() => {
         onTouchStart={() => startVideoPreview(video.id)}
         onTouchEnd={() => stopVideoPreview(video.id)}
       >
-        <div style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}>
+        <div
+          style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
           {video.thumbnail_url && !isPreviewing && (
             <img
               src={video.thumbnail_url}
@@ -2370,6 +2412,8 @@ useEffect(() => {
             muted
             playsInline
             preload="metadata"
+            controlsList="nodownload noplaybackrate"
+            disablePictureInPicture
             onLoadedMetadata={(e) => {
               const dur = Math.round(e.currentTarget.duration);
               if (dur > 0) {
@@ -2388,6 +2432,7 @@ useEffect(() => {
               transition: "opacity 0.2s ease",
             }}
           />
+          <WatermarkedVideoOverlay photographer={video.photographer?.name} />
           {durationLabel && (
             <div style={{
               position: "absolute",
@@ -6291,7 +6336,9 @@ const renderVendorRequest = () => {
                     <AppButton className="nav-btn" onClick={() => document.getElementById("wm-logo-input").click()}>
                       {profile.watermark_logo_url ? "Cambiar logo" : "Subir logo"}
                     </AppButton>
-                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>PNG transparente recomendado</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                      PNG transparente recomendado. Se aplica en fotos y videos de preview.
+                    </div>
                   </div>
                 </div>
               </div>
@@ -7633,8 +7680,9 @@ const renderVendorRequest = () => {
           </p>
           {selectedVideo?.preview_url && (
             <div className="success-page-card">
-              <div className="success-page-photo">
+              <div className="success-page-photo" style={{ position: "relative" }}>
                 <video src={selectedVideo.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                <WatermarkedVideoOverlay photographer={selectedVideo.photographer?.name} />
               </div>
               <div className="success-page-info">
                 <div><strong>Video:</strong> {label}</div>
@@ -8632,8 +8680,9 @@ const renderVendorRequest = () => {
           </div>
         )}
         {selectedVideo && (
-          <div className="modal-photo">
+          <div className="modal-photo" style={{ position: "relative" }}>
             <video src={selectedVideo.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            <WatermarkedVideoOverlay photographer={selectedVideo.photographer?.name} />
           </div>
         )}
         <div className="modal-body">
