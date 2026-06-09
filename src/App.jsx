@@ -392,12 +392,22 @@ function buildNavCurvePath(activeIndex, total, w = 400) {
   ].join(" ");
 }
 
+const formatNavBadge = (count) => {
+  if (!count || count <= 0) return null;
+  return count > 9 ? "9+" : String(count);
+};
+
+const CAN_HOVER_VIDEO_PREVIEW =
+  typeof window !== "undefined" &&
+  window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
 function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
   const activeIndex = Math.max(0, items.findIndex(i => i.id === activeTab));
   const activeItem = items[activeIndex] || items[0];
   const tabPercent = items.length > 0 ? 100 / items.length : 100;
   const isCeoNav = variant === "ceo";
   const iconName = (item) => item.icon || item.id;
+  const activeBadge = formatNavBadge(activeItem?.badge);
 
   return (
     <nav className={`bottom-nav${isCeoNav ? " bottom-nav-ceo" : ""}`} aria-label="Navegación principal">
@@ -420,6 +430,11 @@ function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
       >
         <div className="bnav-bubble-inner">
           <AppIcon name={iconName(activeItem)} size={18} />
+          {activeBadge && (
+            <span className="bnav-badge bnav-badge-bubble" aria-label={`${activeBadge} pendientes`}>
+              {activeBadge}
+            </span>
+          )}
         </div>
       </motion.div>
 
@@ -436,8 +451,10 @@ function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
             >
               <span className={`bnav-icon-slot${isActive ? " active" : ""}`}>
                 {!isActive && <AppIcon name={iconName(item)} size={18} />}
-                {!isActive && item.badge > 0 && (
-                  <span className="bnav-badge" aria-label={`${item.badge} pendientes`}>{item.badge}</span>
+                {!isActive && formatNavBadge(item.badge) && (
+                  <span className="bnav-badge" aria-label={`${formatNavBadge(item.badge)} pendientes`}>
+                    {formatNavBadge(item.badge)}
+                  </span>
                 )}
               </span>
               <span className="bnav-label">{item.label}</span>
@@ -843,6 +860,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [analyzingMedia, setAnalyzingMedia] = useState(false);
   const [autoTags, setAutoTags] = useState(null);
   const [pendingDeliveries, setPendingDeliveries] = useState([]);
+  const [pendingDeliveryCount, setPendingDeliveryCount] = useState(0);
+  const [videoPosterCache, setVideoPosterCache] = useState({});
   const [videoFile, setVideoFile] = useState(null);
   const [videoThumbnailFile, setVideoThumbnailFile] = useState(null);
   const [videoDurationSeconds, setVideoDurationSeconds] = useState(null);
@@ -1737,6 +1756,12 @@ const fetchVendorDashboard = async () => {
   if (!session || !user) return;
   try {
     setVendorStatsLoading(true);
+    if (profile?.verification_status === "approved") {
+      await fetch("/api/payments/reconcile-photographer-sales", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      }).catch(() => {});
+    }
     const res = await fetch("/api/auth/vendor-dashboard", {
       headers: {
         Authorization: `Bearer ${session.access_token}`,
@@ -2417,6 +2442,21 @@ useEffect(() => {
     }
   }, [view, profile, session, user]);
 
+  const fetchPendingDeliveryCount = useCallback(async () => {
+    if (!profile?.id || profile.verification_status !== "approved" || !session?.access_token) return;
+    try {
+      const res = await fetch(`/api/videos/pending-delivery-count/${profile.id}`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPendingDeliveryCount(Number(data.count) || 0);
+      }
+    } catch (err) {
+      console.error("fetchPendingDeliveryCount:", err);
+    }
+  }, [profile?.id, profile?.verification_status, session?.access_token]);
+
   const fetchPendingDeliveries = useCallback(async () => {
     if (!profile?.id || profile.verification_status !== "approved" || !session?.access_token) return;
     try {
@@ -2432,21 +2472,29 @@ useEffect(() => {
         ...(Array.isArray(videoItems) ? videoItems.map((v) => ({ ...v, media_type: v.media_type || "video" })) : []),
       ].sort((a, b) => new Date(a.completed_at) - new Date(b.completed_at));
       setPendingDeliveries(merged);
+      setPendingDeliveryCount(merged.length);
     } catch (err) {
       console.error("fetchPendingDeliveries:", err);
     }
   }, [profile?.id, profile?.verification_status, session?.access_token]);
 
   useEffect(() => {
-    fetchPendingDeliveries();
+    if (view === VIEWS.PENDING_DELIVERIES) {
+      fetchPendingDeliveries();
+    }
   }, [fetchPendingDeliveries, view]);
 
   useEffect(() => {
     if (profile?.verification_status !== "approved" || !session?.access_token) return undefined;
-    fetchPendingDeliveries();
-    const timer = window.setInterval(fetchPendingDeliveries, 45000);
-    return () => window.clearInterval(timer);
-  }, [profile?.verification_status, session?.access_token, fetchPendingDeliveries]);
+    fetchPendingDeliveryCount();
+    fetchVendorDashboard();
+    const countTimer = window.setInterval(fetchPendingDeliveryCount, 10000);
+    const dashTimer = window.setInterval(fetchVendorDashboard, 20000);
+    return () => {
+      window.clearInterval(countTimer);
+      window.clearInterval(dashTimer);
+    };
+  }, [profile?.verification_status, profile?.id, session?.access_token, fetchPendingDeliveryCount]);
 
   const analyzeMediaWithAI = async (file) => {
     if (!session?.access_token) return;
@@ -2513,7 +2561,29 @@ useEffect(() => {
       const res = await fetch(url);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Error al buscar videos");
-      setVideos(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : [];
+      setVideos(list);
+      if (session?.access_token && profile?.id) {
+        list
+          .filter((v) => !v.thumbnail_url && v.photographer_id === profile.id)
+          .forEach((v) => {
+            fetch(`/api/videos/${v.id}/generate-thumbnail`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${session.access_token}` },
+            })
+              .then((thumbRes) => (thumbRes.ok ? thumbRes.json() : null))
+              .then((thumb) => {
+                if (thumb?.thumbnail_url) {
+                  setVideos((prev) =>
+                    prev.map((item) =>
+                      item.id === v.id ? { ...item, thumbnail_url: thumb.thumbnail_url } : item
+                    )
+                  );
+                }
+              })
+              .catch(() => {});
+          });
+      }
     } catch (err) {
       console.error("handleVideoSearch:", err);
       showToast(err.message || "Error al buscar videos.");
@@ -2599,49 +2669,81 @@ useEffect(() => {
     setVideoPreviewMuted((prev) => !prev);
   };
 
+  const captureVideoPoster = useCallback((videoEl, videoId) => {
+    if (!videoEl || videoPosterCache[videoId] || videoEl.dataset.posterCaptured === "1") return;
+    const w = videoEl.videoWidth;
+    const h = videoEl.videoHeight;
+    if (!w || !h) return;
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(videoEl, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+      videoEl.dataset.posterCaptured = "1";
+      setVideoPosterCache((prev) => (prev[videoId] ? prev : { ...prev, [videoId]: dataUrl }));
+    } catch (err) {
+      console.warn("captureVideoPoster:", err);
+    }
+  }, [videoPosterCache]);
+
   const renderVideoCards = (videoList) => videoList.map((video) => {
     const durationLabel = formatVideoDuration(video.duration_seconds || videoDurationCache[video.id]);
     const isPreviewing = Boolean(videoPreviewActive[video.id]);
     const previewProgress = videoPreviewProgress[video.id] || 0;
-    const hasThumbnail = Boolean(video.thumbnail_url);
-    const showThumbnail = hasThumbnail && !isPreviewing;
+    const posterSrc = video.thumbnail_url || videoPosterCache[video.id] || null;
+    const hasPoster = Boolean(posterSrc);
+    const showPoster = hasPoster && !isPreviewing;
+    const previewLimit = video.duration_seconds || videoDurationCache[video.id];
 
     return (
       <div
         key={video.id}
         style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }}
-        onMouseEnter={() => startVideoPreview(video.id, video.duration_seconds || videoDurationCache[video.id])}
-        onMouseLeave={() => stopVideoPreview(video.id)}
-        onTouchStart={() => startVideoPreview(video.id, video.duration_seconds || videoDurationCache[video.id])}
-        onTouchEnd={() => stopVideoPreview(video.id)}
+        {...(CAN_HOVER_VIDEO_PREVIEW ? {
+          onMouseEnter: () => startVideoPreview(video.id, previewLimit),
+          onMouseLeave: () => stopVideoPreview(video.id),
+        } : {})}
       >
         <div
-          style={{ position: "relative", paddingBottom: "56.25%", background: showThumbnail ? "transparent" : "#111" }}
+          style={{ position: "relative", paddingBottom: "56.25%", background: showPoster ? "#000" : "#111" }}
           onContextMenu={(e) => e.preventDefault()}
         >
-          {showThumbnail && (
+          {showPoster && (
             <img
-              src={video.thumbnail_url}
+              src={posterSrc}
               alt=""
               decoding="async"
-              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 4 }}
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 5 }}
             />
           )}
           <video
             ref={(el) => { videoRefs.current[video.id] = el; }}
             className="video-card-preview"
             src={video.preview_url}
-            poster={hasThumbnail ? undefined : (video.thumbnail_url || undefined)}
             muted={videoPreviewMuted}
             playsInline
-            preload={showThumbnail ? "none" : "metadata"}
+            preload={showPoster ? "none" : "metadata"}
             controls={false}
-            controlsList="nodownload noplaybackrate nofullscreen"
+            controlsList="nodownload noplaybackrate nofullscreen noremoteplayback"
             disablePictureInPicture
+            disableRemotePlayback
             onLoadedMetadata={(e) => {
-              const dur = Math.round(e.currentTarget.duration);
+              const el = e.currentTarget;
+              const dur = Math.round(el.duration);
               if (dur > 0) {
                 setVideoDurationCache((prev) => (prev[video.id] === dur ? prev : { ...prev, [video.id]: dur }));
+              }
+              if (!video.thumbnail_url && !videoPosterCache[video.id]) {
+                const seekTo = Math.min(0.5, (el.duration || 1) * 0.08);
+                const saved = el.currentTime;
+                const onSeeked = () => {
+                  el.removeEventListener("seeked", onSeeked);
+                  captureVideoPoster(el, video.id);
+                  el.currentTime = saved;
+                };
+                el.addEventListener("seeked", onSeeked);
+                el.currentTime = seekTo;
               }
             }}
             style={{
@@ -2651,14 +2753,12 @@ useEffect(() => {
               width: "100%",
               height: "100%",
               objectFit: "cover",
-              zIndex: showThumbnail ? 0 : 2,
-              visibility: showThumbnail ? "hidden" : "visible",
-              opacity: showThumbnail ? 0 : 1,
-              pointerEvents: showThumbnail ? "none" : "auto",
-              transition: "opacity 0.2s ease, visibility 0.2s ease",
+              zIndex: showPoster ? 1 : 2,
+              display: showPoster ? "none" : "block",
+              transition: "opacity 0.2s ease",
             }}
           />
-          {!showThumbnail && <WatermarkedVideoOverlay photographer={video.photographer?.name} />}
+          {!showPoster && !isPreviewing && <WatermarkedVideoOverlay photographer={video.photographer?.name} />}
           <button
             type="button"
             aria-label={videoPreviewMuted ? "Activar sonido del preview" : "Silenciar preview"}
@@ -8230,6 +8330,7 @@ const renderVendorRequest = () => {
       display: grid; place-items: center;
       color: var(--orange);
       box-shadow: 0 0 0 4px rgba(255,107,0,0.12), 0 8px 28px rgba(255,107,0,0.35);
+      position: relative;
     }
     .bnav-items {
       position: absolute; left: 0; right: 0; bottom: 0;
@@ -8261,10 +8362,17 @@ const renderVendorRequest = () => {
     }
     .bnav-badge {
       position: absolute; top: -5px; right: -9px;
-      min-width: 16px; height: 16px; padding: 0 4px;
-      border-radius: 999px; background: var(--orange); color: #000;
-      font-size: 10px; font-weight: 800; line-height: 16px; text-align: center;
-      box-shadow: 0 0 8px rgba(255,107,0,0.5);
+      min-width: 17px; height: 17px; padding: 0 4px;
+      border-radius: 999px; background: #ff3b30; color: #fff;
+      font-size: 10px; font-weight: 800; line-height: 17px; text-align: center;
+      box-shadow: 0 0 0 2px #0e0e0e, 0 2px 8px rgba(255,59,48,0.55);
+      z-index: 12;
+      pointer-events: none;
+    }
+    .bnav-badge-bubble {
+      top: -2px; right: -4px;
+      min-width: 18px; height: 18px; line-height: 18px;
+      font-size: 11px;
     }
     .bnav-item:not(.active):hover .bnav-icon-slot { color: #999; }
     .bnav-icon-slot.active {
@@ -9545,7 +9653,7 @@ const renderVendorRequest = () => {
           ...(profile?.verification_status === "approved"
             ? [
               { id: "upload", label: "Subir", v: VIEWS.UPLOAD },
-              { id: "deliveries", icon: "package", label: "Entregas", badge: pendingDeliveries.length, v: VIEWS.PENDING_DELIVERIES },
+              { id: "deliveries", icon: "package", label: "Entregas", badge: pendingDeliveryCount, v: VIEWS.PENDING_DELIVERIES },
               { id: "dash", label: "Dashboard", v: VIEWS.DASHBOARD },
             ]
             : [{ id: "purchases", label: "Compras", v: VIEWS.MY_PURCHASES }]),
