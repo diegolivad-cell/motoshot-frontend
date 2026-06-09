@@ -2515,7 +2515,6 @@ useEffect(() => {
     if (!playingVideos.current.includes(videoId)) {
       playingVideos.current.push(videoId);
     }
-    videoEl.currentTime = 0;
     const onTimeUpdate = () => {
       const previewLimit = getVideoPreviewLimitSec(durationSeconds, videoEl);
       const progress = Math.min(videoEl.currentTime / previewLimit, 1);
@@ -2533,7 +2532,14 @@ useEffect(() => {
     videoEl.addEventListener("timeupdate", onTimeUpdate);
     videoEl.muted = videoPreviewMuted;
     setVideoPreviewActive((prev) => ({ ...prev, [videoId]: true }));
-    videoEl.play().catch(() => {});
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = videoRefs.current[videoId];
+        if (!el) return;
+        el.currentTime = 0;
+        el.play().catch(() => {});
+      });
+    });
   };
 
   const toggleVideoPreviewMute = (e) => {
@@ -2546,6 +2552,8 @@ useEffect(() => {
     const durationLabel = formatVideoDuration(video.duration_seconds || videoDurationCache[video.id]);
     const isPreviewing = Boolean(videoPreviewActive[video.id]);
     const previewProgress = videoPreviewProgress[video.id] || 0;
+    const hasThumbnail = Boolean(video.thumbnail_url);
+    const showThumbnail = hasThumbnail && !isPreviewing;
 
     return (
       <div
@@ -2557,24 +2565,27 @@ useEffect(() => {
         onTouchEnd={() => stopVideoPreview(video.id)}
       >
         <div
-          style={{ position: "relative", paddingBottom: "56.25%", background: "#000" }}
+          style={{ position: "relative", paddingBottom: "56.25%", background: showThumbnail ? "transparent" : "#111" }}
           onContextMenu={(e) => e.preventDefault()}
         >
-          {video.thumbnail_url && !isPreviewing && (
+          {showThumbnail && (
             <img
               src={video.thumbnail_url}
               alt=""
-              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 1 }}
+              decoding="async"
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 4 }}
             />
           )}
           <video
             ref={(el) => { videoRefs.current[video.id] = el; }}
+            className="video-card-preview"
             src={video.preview_url}
-            poster={video.thumbnail_url || undefined}
+            poster={hasThumbnail ? undefined : (video.thumbnail_url || undefined)}
             muted={videoPreviewMuted}
             playsInline
-            preload="metadata"
-            controlsList="nodownload noplaybackrate"
+            preload={showThumbnail ? "none" : "metadata"}
+            controls={false}
+            controlsList="nodownload noplaybackrate nofullscreen"
             disablePictureInPicture
             onLoadedMetadata={(e) => {
               const dur = Math.round(e.currentTarget.duration);
@@ -2589,12 +2600,14 @@ useEffect(() => {
               width: "100%",
               height: "100%",
               objectFit: "cover",
-              zIndex: 2,
-              opacity: video.thumbnail_url && !isPreviewing ? 0 : 1,
-              transition: "opacity 0.2s ease",
+              zIndex: showThumbnail ? 0 : 2,
+              visibility: showThumbnail ? "hidden" : "visible",
+              opacity: showThumbnail ? 0 : 1,
+              pointerEvents: showThumbnail ? "none" : "auto",
+              transition: "opacity 0.2s ease, visibility 0.2s ease",
             }}
           />
-          <WatermarkedVideoOverlay photographer={video.photographer?.name} />
+          {!showThumbnail && <WatermarkedVideoOverlay photographer={video.photographer?.name} />}
           <button
             type="button"
             aria-label={videoPreviewMuted ? "Activar sonido del preview" : "Silenciar preview"}
@@ -8022,6 +8035,10 @@ const renderVendorRequest = () => {
     .hero-video-bg::-webkit-media-controls { display: none !important; }
     .hero-video-bg::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
     .hero-video-bg::-webkit-media-controls-overlay-play-button { display: none !important; }
+    .video-card-preview { background: #111; }
+    .video-card-preview::-webkit-media-controls { display: none !important; }
+    .video-card-preview::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
+    .video-card-preview::-webkit-media-controls-overlay-play-button { display: none !important; }
     .search-bar { display: flex; gap: 10px; margin: 20px; }
     .search-input { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 12px 16px;
       border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color 0.2s; }
