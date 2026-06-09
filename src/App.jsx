@@ -801,6 +801,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [photographerVideos, setPhotographerVideos] = useState([]);
   const [videoPreviewActive, setVideoPreviewActive] = useState({});
   const [videoPreviewProgress, setVideoPreviewProgress] = useState({});
+  const [videoPreviewMuted, setVideoPreviewMuted] = useState(true);
   const [videoDurationCache, setVideoDurationCache] = useState({});
   const [analyzingMedia, setAnalyzingMedia] = useState(false);
   const [autoTags, setAutoTags] = useState(null);
@@ -2439,6 +2440,12 @@ useEffect(() => {
     }
   }, [view]);
 
+  useEffect(() => {
+    Object.values(videoRefs.current).forEach((el) => {
+      if (el) el.muted = videoPreviewMuted;
+    });
+  }, [videoPreviewMuted]);
+
   const stopVideoPreview = (videoId) => {
     const videoEl = videoRefs.current[videoId];
     const handler = videoPreviewHandlers.current[videoId];
@@ -2479,8 +2486,15 @@ useEffect(() => {
     }
     videoPreviewHandlers.current[videoId] = onTimeUpdate;
     videoEl.addEventListener("timeupdate", onTimeUpdate);
+    videoEl.muted = videoPreviewMuted;
     setVideoPreviewActive((prev) => ({ ...prev, [videoId]: true }));
     videoEl.play().catch(() => {});
+  };
+
+  const toggleVideoPreviewMute = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setVideoPreviewMuted((prev) => !prev);
   };
 
   const renderVideoCards = (videoList) => videoList.map((video) => {
@@ -2512,7 +2526,7 @@ useEffect(() => {
             ref={(el) => { videoRefs.current[video.id] = el; }}
             src={video.preview_url}
             poster={video.thumbnail_url || undefined}
-            muted
+            muted={videoPreviewMuted}
             playsInline
             preload="metadata"
             controlsList="nodownload noplaybackrate"
@@ -2536,6 +2550,36 @@ useEffect(() => {
             }}
           />
           <WatermarkedVideoOverlay photographer={video.photographer?.name} />
+          <button
+            type="button"
+            aria-label={videoPreviewMuted ? "Activar sonido del preview" : "Silenciar preview"}
+            aria-pressed={!videoPreviewMuted}
+            onClick={toggleVideoPreviewMute}
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchEnd={(e) => e.stopPropagation()}
+            style={{
+              position: "absolute",
+              bottom: 8,
+              left: 8,
+              zIndex: 7,
+              width: 30,
+              height: 30,
+              borderRadius: "50%",
+              border: videoPreviewMuted ? "none" : "1px solid rgba(255,107,0,0.55)",
+              background: videoPreviewMuted ? "rgba(0,0,0,0.78)" : "rgba(255,107,0,0.92)",
+              color: videoPreviewMuted ? "rgba(255,255,255,0.9)" : "#1a1008",
+              display: "grid",
+              placeItems: "center",
+              cursor: "pointer",
+              backdropFilter: "blur(6px)",
+              WebkitBackdropFilter: "blur(6px)",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+              padding: 0,
+            }}
+          >
+            <AppIcon name={videoPreviewMuted ? "volumeOff" : "volume"} size={15} />
+          </button>
           {durationLabel && (
             <div style={{
               position: "absolute",

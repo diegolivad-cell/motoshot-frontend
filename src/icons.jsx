@@ -259,6 +259,18 @@ const ICONS = {
       <path d="M7 10h4" strokeWidth="1.8" strokeLinecap="round" />
     </>
   ),
+  volume: (
+    <>
+      <path d="M6 10v4h3l5 4V6l-5 4H6z" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M17 9.5a3.5 3.5 0 0 1 0 5" strokeWidth="1.8" strokeLinecap="round" />
+    </>
+  ),
+  volumeOff: (
+    <>
+      <path d="M6 10v4h3l5 4V6l-5 4H6z" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M4 4l16 16" strokeWidth="1.8" strokeLinecap="round" />
+    </>
+  ),
   error: (
     <>
       <circle cx="12" cy="12" r="9" strokeWidth="1.8" />
