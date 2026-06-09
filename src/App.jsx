@@ -3413,12 +3413,12 @@ useEffect(() => {
         formData.append("time_end", uploadForm.time_end || "");
         formData.append("album_id", uploadForm.album_id || "");
   
-        const res = await fetch("/api/photos/upload", {
+        const res = await fetch(apiUrl("/api/photos/upload"), {
           method: "POST",
           headers: { Authorization: `Bearer ${session?.access_token}` },
           body: formData,
         });
-        const data = await res.json();
+        const data = await parseApiJson(res);
         if (!res.ok) throw new Error(data.error || "Error");
         setUploadProgress(prev => ({ ...prev, [file.name]: "done" }));
       })
@@ -5669,7 +5669,7 @@ const renderPhotographerProfile = () => {
         const formData = new FormData();
         formData.append("photo_hq", file);
         try {
-          const res = await fetch(`/api/photos/${photoId}/upload-hq`, {
+          const res = await fetch(apiUrl(`/api/photos/${photoId}/upload-hq`), {
             method: "PUT",
             headers: { Authorization: `Bearer ${session.access_token}` },
             body: formData,
@@ -5677,8 +5677,9 @@ const renderPhotographerProfile = () => {
           if (res.ok) {
             showToast("Listo: foto HQ entregada. El comprador recibirá un email.");
             setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === "photo" && p.id === photoId)));
+            fetchPendingDeliveryCount();
           } else {
-            const data = await res.json();
+            const data = await parseApiJson(res);
             showToast(data.error || "No se pudo entregar la foto.");
           }
         } catch (err) {
@@ -5702,7 +5703,7 @@ const renderPhotographerProfile = () => {
         const formData = new FormData();
         formData.append("video_hq", file);
         try {
-          const res = await fetch(`/api/videos/${videoId}/upload-hq`, {
+          const res = await fetch(apiUrl(`/api/videos/${videoId}/upload-hq`), {
             method: "PUT",
             headers: { Authorization: `Bearer ${session.access_token}` },
             body: formData,
@@ -5710,8 +5711,9 @@ const renderPhotographerProfile = () => {
           if (res.ok) {
             showToast("Listo: video HQ entregado. El comprador recibirá un email.");
             setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === "video" && p.id === videoId)));
+            fetchPendingDeliveryCount();
           } else {
-            const data = await res.json();
+            const data = await parseApiJson(res);
             showToast(data.error || "No se pudo entregar el video.");
           }
         } catch (err) {
