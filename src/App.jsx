@@ -5558,41 +5558,33 @@ const renderPhotographerProfile = () => {
             <div>No tenés entregas pendientes</div>
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div className="pending-delivery-list">
             {pendingDeliveries.map((item) => {
               const isVideo = item.media_type === "video";
               const title = isVideo
                 ? (item.label || [item.moto_brand, item.moto_model].filter(Boolean).join(" ") || item.sector || "Video")
                 : (item.location || "Sin ubicación");
               return (
-                <div
-                  key={`${item.media_type}-${item.id}`}
-                  style={{
-                    background: "var(--surface)", borderRadius: 12, padding: 16,
-                    display: "flex", gap: 16, alignItems: "center",
-                    border: "1px solid rgba(255,107,0,0.35)",
-                  }}
-                >
-                  {isVideo ? (
-                    <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", flexShrink: 0, background: "#000" }}>
-                      <video src={item.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                <div key={`${item.media_type}-${item.id}`} className="pending-delivery-card">
+                  <div className="pending-delivery-card-main">
+                    {isVideo ? (
+                      <div className="pending-delivery-thumb">
+                        <video src={item.preview_url} muted playsInline />
+                      </div>
+                    ) : (
+                      <img src={item.watermark_url} alt="" className="pending-delivery-thumb" />
+                    )}
+                    <div className="pending-delivery-info">
+                      <div className="pending-delivery-title-row">
+                        <span className="tag pending-delivery-type">{isVideo ? "Video" : "Foto"}</span>
+                        <span className="pending-delivery-title">{title}</span>
+                      </div>
+                      <div className="pending-delivery-meta">Comprador: {item.buyer_email || "—"}</div>
+                      <div className="pending-delivery-time">Vendido {getTimeSince(item.completed_at)}</div>
                     </div>
-                  ) : (
-                    <img src={item.watermark_url} alt="" style={{ width: 80, height: 60, objectFit: "cover", borderRadius: 8, flexShrink: 0 }} />
-                  )}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                      <span className="tag" style={{ fontSize: 10, padding: "2px 8px" }}>
-                        {isVideo ? "Video" : "Foto"}
-                      </span>
-                      <span style={{ fontWeight: 700 }}>{title}</span>
-                    </div>
-                    <div style={{ color: "var(--muted)", fontSize: 13 }}>Comprador: {item.buyer_email || "—"}</div>
-                    <div style={{ color: "var(--orange)", fontSize: 13 }}>Vendido {getTimeSince(item.completed_at)}</div>
                   </div>
                   <AppButton
-                    className="pay-btn"
-                    style={{ flexShrink: 0, padding: "10px 16px" }}
+                    className="pay-btn pending-delivery-action"
                     onClick={() => (isVideo ? handleDeliverVideoHQ(item.id) : handleDeliverPhotoHQ(item.id))}
                   >
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
@@ -8092,6 +8084,95 @@ const renderVendorRequest = () => {
     }
     @media (max-width: 520px) {
       .ceo-payroll-totals { grid-template-columns: 1fr; }
+    }
+    .pending-delivery-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .pending-delivery-card {
+      background: var(--surface);
+      border-radius: 12px;
+      padding: 16px;
+      border: 1px solid rgba(255, 107, 0, 0.35);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .pending-delivery-card-main {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+      min-width: 0;
+    }
+    .pending-delivery-thumb {
+      width: 88px;
+      height: 66px;
+      border-radius: 8px;
+      overflow: hidden;
+      flex-shrink: 0;
+      background: #000;
+      object-fit: cover;
+    }
+    .pending-delivery-thumb video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .pending-delivery-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .pending-delivery-title-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+    .pending-delivery-type {
+      font-size: 10px;
+      padding: 2px 8px;
+      flex-shrink: 0;
+    }
+    .pending-delivery-title {
+      font-weight: 700;
+      font-size: 15px;
+      line-height: 1.3;
+      word-break: break-word;
+    }
+    .pending-delivery-meta {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+    .pending-delivery-time {
+      color: var(--orange);
+      font-size: 13px;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+    .pending-delivery-action {
+      width: 100%;
+      justify-content: center;
+      padding: 12px 16px !important;
+    }
+    @media (min-width: 640px) {
+      .pending-delivery-card {
+        flex-direction: row;
+        align-items: center;
+        gap: 16px;
+      }
+      .pending-delivery-card-main {
+        flex: 1;
+      }
+      .pending-delivery-action {
+        width: auto;
+        flex-shrink: 0;
+        white-space: nowrap;
+      }
     }
     .ceo-payroll-stat {
       background: var(--surface);
