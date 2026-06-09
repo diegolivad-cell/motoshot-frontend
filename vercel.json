@@ -3,6 +3,10 @@
     {
       "source": "/api/:path*",
       "destination": "https://motoshot-backend.onrender.com/api/:path*"
+    },
+    {
+      "source": "/abrir",
+      "destination": "/index.html"
     }
   ],
   "headers": [

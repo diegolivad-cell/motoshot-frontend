@@ -1739,10 +1739,10 @@ const fetchAnnouncements = async () => {
 };
 
 // ── Fetch purchases ────────────────────────────────────────
-const fetchPurchases = async () => {
+const fetchPurchases = async ({ silent = false } = {}) => {
   if (!session) return;
   try {
-    setPurchasesLoading(true);
+    if (!silent) setPurchasesLoading(true);
     const res = await fetch("/api/payments/my-purchases", {
       headers: {
         Authorization: `Bearer ${session.access_token}`,
@@ -1754,11 +1754,16 @@ const fetchPurchases = async () => {
     setVideoPurchases(data.video_purchases || []);
   } catch (err) {
     console.error(err);
-    showToast("No se pudieron cargar tus compras.");
+    if (!silent) showToast("No se pudieron cargar tus compras.");
   } finally {
-    setPurchasesLoading(false);
+    if (!silent) setPurchasesLoading(false);
   }
 };
+
+// Compras listas para descargar y aún no reclamadas (badge estilo Facebook)
+const unclaimedPurchasesCount =
+  purchases.filter((p) => p.photo?.hq_status === "ready" && !p.hq_downloaded_at).length +
+  videoPurchases.filter((v) => v.video?.hq_status === "ready" && !v.hq_downloaded_at).length;
 const fetchNotifications = async () => {
   if (!session) return;
   try {
@@ -2350,6 +2355,39 @@ const exportPayrollCsv = () => {
     fetchAllSubscriptions();
   }, [view, isLoggedIn, session]);
 
+  // Deep link desde emails: motoshot.pro/abrir?goto=compras → sección Compras
+  useEffect(() => {
+    if (!authReady) return;
+    const params = new URLSearchParams(window.location.search);
+    const isAbrirPath = window.location.pathname === "/abrir";
+    if (params.get("goto") === "compras" || isAbrirPath) {
+      if (isLoggedIn) {
+        setActiveTab("purchases");
+        setView(VIEWS.MY_PURCHASES);
+      }
+      window.history.replaceState({}, document.title, "/");
+    }
+  }, [authReady, isLoggedIn]);
+
+  // APK: si el link del email abre la app nativa, navegar a Compras
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let removeListener = null;
+    (async () => {
+      try {
+        const { App } = await import("@capacitor/app");
+        const listener = await App.addListener("appUrlOpen", ({ url }) => {
+          if (String(url || "").includes("goto=compras")) {
+            setActiveTab("purchases");
+            setView(VIEWS.MY_PURCHASES);
+          }
+        });
+        removeListener = () => listener.remove();
+      } catch { /* plugin no disponible */ }
+    })();
+    return () => { if (removeListener) removeListener(); };
+  }, []);
+
 useEffect(() => {
   const onScroll = () => setHeroScrollY(window.scrollY);
   window.addEventListener("scroll", onScroll, { passive: true });
@@ -2461,6 +2499,11 @@ useEffect(() => {
     fetchPurchases();
   }
   }, [view, user, session]);
+
+  // Cargar compras al iniciar para el badge de "compras sin reclamar"
+  useEffect(() => {
+    if (user && session?.access_token) fetchPurchases({ silent: true });
+  }, [user, session?.access_token]);
 
   useEffect(() => {
     if (view !== VIEWS.ADMIN || !isStaff || !session) return;
@@ -6924,6 +6967,13 @@ const renderPhotographerProfile = () => {
                       if (!res.ok) throw new Error("Error al descargar");
                       const data = await res.json();
                       window.open(data.download_url, "_blank");
+                      setPurchases((prev) =>
+                        prev.map((it) =>
+                          it.id === p.id && !it.hq_downloaded_at
+                            ? { ...it, hq_downloaded_at: new Date().toISOString() }
+                            : it
+                        )
+                      );
                     } catch (err) {
                       console.error(err);
                       showToast("Error al descargar.");
@@ -6942,6 +6992,8 @@ const renderPhotographerProfile = () => {
             v.video?.sector ||
             "Video";
           const hqPending = v.video?.hq_status === "pending";
+          const hqDownloaded = v.video?.hq_status === "downloaded";
+          const hqClaimable = v.video?.hq_status === "ready" && !v.hq_downloaded_at;
 
           return (
             <div
@@ -6963,6 +7015,11 @@ const renderPhotographerProfile = () => {
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
                   <span className="tag" style={{ fontSize: 10, padding: "2px 8px" }}>Video</span>
                   <span style={{ fontWeight: 600 }}>{v.video?.photographer?.name || "Fotógrafo"}</span>
+                  {hqClaimable && (
+                    <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 6, background: "var(--orange)", color: "#000", fontWeight: 700 }}>
+                      NUEVO
+                    </span>
+                  )}
                 </div>
                 <div style={{ color: "var(--muted)", marginTop: 2 }}>
                   <IconText icon="pin" size={12}>{label}</IconText>
@@ -6973,40 +7030,68 @@ const renderPhotographerProfile = () => {
                   {hqPending && (
                     <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Disponible en ~24 h</span>
                   )}
+                  {hqDownloaded && (
+                    <span style={{ color: "var(--success)", marginLeft: 6 }}>· Descargado</span>
+                  )}
                 </div>
               </div>
-              <AppButton
-                className="card-buy"
-                style={{
-                  background: hqPending
-                    ? "var(--surface)"
-                    : "linear-gradient(135deg, var(--orange-light), var(--orange))",
-                  color: hqPending ? "var(--muted)" : "#000",
-                  border: hqPending ? "1px solid var(--border)" : undefined,
-                }}
-                onClick={async () => {
-                  try {
-                    const res = await fetch(`/api/videos/${v.video.id}/download`, {
-                      headers: { Authorization: `Bearer ${session.access_token}` },
-                    });
-                    const data = await res.json();
-                    if (!res.ok) throw new Error(data.error || "Error al descargar");
-                    if (data.status === "pending") {
-                      showToast(data.message || "El fotógrafo está preparando tu video.");
-                      return;
-                    }
-                    window.open(data.download_url, "_blank");
-                  } catch (err) {
-                    console.error(err);
-                    showToast("Error al descargar el video.");
-                  }
-                }}
-              >
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                  <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} />
-                  {hqPending ? "Esperando HQ" : "Descargar"}
+              {hqDownloaded ? (
+                <span style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  fontSize: 12, color: "var(--success)", fontWeight: 700,
+                  padding: "8px 12px", borderRadius: 8,
+                  border: "1px solid var(--border)", background: "var(--card)",
+                  flexShrink: 0,
+                }}>
+                  <AppIcon name="check" size={12} color="var(--success)" /> Historial
                 </span>
-              </AppButton>
+              ) : (
+                <AppButton
+                  className="card-buy"
+                  style={{
+                    background: hqPending
+                      ? "var(--surface)"
+                      : "linear-gradient(135deg, var(--orange-light), var(--orange))",
+                    color: hqPending ? "var(--muted)" : "#000",
+                    border: hqPending ? "1px solid var(--border)" : undefined,
+                  }}
+                  onClick={async () => {
+                    try {
+                      const res = await fetch(`/api/videos/${v.video.id}/download`, {
+                        headers: { Authorization: `Bearer ${session.access_token}` },
+                      });
+                      const data = await res.json();
+                      if (!res.ok) throw new Error(data.error || "Error al descargar");
+                      if (data.status === "pending") {
+                        showToast(data.message || "El fotógrafo está preparando tu video.");
+                        return;
+                      }
+                      if (data.status === "downloaded") {
+                        showToast(data.message || "Ya descargaste este video.");
+                        fetchPurchases({ silent: true });
+                        return;
+                      }
+                      window.open(data.download_url, "_blank");
+                      // Marcar como reclamado localmente (badge + estado)
+                      setVideoPurchases((prev) =>
+                        prev.map((p) =>
+                          p.id === v.id && !p.hq_downloaded_at
+                            ? { ...p, hq_downloaded_at: new Date().toISOString() }
+                            : p
+                        )
+                      );
+                    } catch (err) {
+                      console.error(err);
+                      showToast("Error al descargar el video.");
+                    }
+                  }}
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} />
+                    {hqPending ? "Esperando HQ" : v.hq_downloaded_at ? "Descargar de nuevo" : "Descargar"}
+                  </span>
+                </AppButton>
+              )}
             </div>
           );
         })}
@@ -10280,7 +10365,7 @@ const renderVendorRequest = () => {
               { id: "deliveries", icon: "package", label: "Entregas", badge: pendingDeliveryCount, v: VIEWS.PENDING_DELIVERIES },
               { id: "dash", label: "Dashboard", v: VIEWS.DASHBOARD },
             ]
-            : [{ id: "purchases", label: "Compras", v: VIEWS.MY_PURCHASES }]),
+            : [{ id: "purchases", label: "Compras", badge: unclaimedPurchasesCount, v: VIEWS.MY_PURCHASES }]),
           { id: "gallery", label: "Galería", v: VIEWS.MY_GALLERY },
           { id: "profile", label: "Perfil", v: VIEWS.VENDOR_REQUEST },
         ]}
