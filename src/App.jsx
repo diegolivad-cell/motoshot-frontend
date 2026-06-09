@@ -879,6 +879,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [analyzingMedia, setAnalyzingMedia] = useState(false);
   const [autoTags, setAutoTags] = useState(null);
   const [pendingDeliveries, setPendingDeliveries] = useState([]);
+  const [pendingDeliveriesLoading, setPendingDeliveriesLoading] = useState(false);
   const [pendingDeliveryCount, setPendingDeliveryCount] = useState(0);
   const [videoMediaReady, setVideoMediaReady] = useState({});
   const [videoQueue, setVideoQueue] = useState([]);
@@ -2507,6 +2508,7 @@ useEffect(() => {
 
   const fetchPendingDeliveries = useCallback(async () => {
     if (!profile?.id || profile.verification_status !== "approved" || !session?.access_token) return;
+    setPendingDeliveriesLoading(true);
     try {
       const headers = { Authorization: `Bearer ${session.access_token}` };
       const [photosResult, videosResult] = await Promise.all([
@@ -2523,6 +2525,8 @@ useEffect(() => {
       setPendingDeliveryCount(merged.length);
     } catch (err) {
       console.error("fetchPendingDeliveries:", err);
+    } finally {
+      setPendingDeliveriesLoading(false);
     }
   }, [profile?.id, profile?.verification_status, session?.access_token]);
 
@@ -5742,15 +5746,22 @@ const renderPhotographerProfile = () => {
       <div className="upload-view">
         <SectionTitleIcon icon="package">ENTREGAS PENDIENTES</SectionTitleIcon>
         <div className="section-sub">
-          {pendingDeliveries.length === 0
-            ? "Sin entregas pendientes"
-            : [
-              photoCount > 0 ? `${photoCount} foto${photoCount !== 1 ? "s" : ""}` : null,
-              videoCount > 0 ? `${videoCount} video${videoCount !== 1 ? "s" : ""}` : null,
-            ].filter(Boolean).join(" · ") + " pendiente(s) de entrega HQ"}
+          {pendingDeliveriesLoading
+            ? "Revisando tus ventas..."
+            : pendingDeliveries.length === 0
+              ? "Sin entregas pendientes"
+              : [
+                photoCount > 0 ? `${photoCount} foto${photoCount !== 1 ? "s" : ""}` : null,
+                videoCount > 0 ? `${videoCount} video${videoCount !== 1 ? "s" : ""}` : null,
+              ].filter(Boolean).join(" · ") + " pendiente(s) de entrega HQ"}
         </div>
 
-        {pendingDeliveries.length === 0 ? (
+        {pendingDeliveriesLoading ? (
+          <div className="empty">
+            <LoaderIcon size={44} />
+            <div>Cargando entregas...</div>
+          </div>
+        ) : pendingDeliveries.length === 0 ? (
           <div className="empty">
             <EmptyIcon name="checkCircle" color="var(--success)" />
             <div>No tenés entregas pendientes</div>
