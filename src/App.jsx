@@ -436,6 +436,9 @@ function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
             >
               <span className={`bnav-icon-slot${isActive ? " active" : ""}`}>
                 {!isActive && <AppIcon name={iconName(item)} size={18} />}
+                {!isActive && item.badge > 0 && (
+                  <span className="bnav-badge" aria-label={`${item.badge} pendientes`}>{item.badge}</span>
+                )}
               </span>
               <span className="bnav-label">{item.label}</span>
             </AppButton>
@@ -1107,6 +1110,12 @@ function WatermarkedImage({ src, photographer, purchased }) {
     setSuccessMode("video");
     setView(VIEWS.SUCCESS);
     setPayStep(0);
+    try {
+      await fetchPurchases();
+    } catch (err) {
+      console.error("fetchPurchases after video buy:", err);
+    }
+    showToast("Compra registrada. Tu video estará disponible en Compras en las próximas 24 horas.");
   }, [videos]);
 
   const handlePaymentCancelled = useCallback(() => {
@@ -1136,72 +1145,61 @@ function WatermarkedImage({ src, photographer, purchased }) {
     if (!silent) {
       setGlobalLoading({ active: true, message: "Confirmando tu pago..." });
     }
+    const hintVideoId = pending?.videoId || videoIdFromUrl || undefined;
+    const hintPhotoId = pending?.photoId || params.get("photo_id") || undefined;
+    const shouldRetry = paymentReturn || Boolean(paypalToken && hintVideoId);
+    const maxAttempts = shouldRetry ? 12 : 1;
+
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
     try {
-      const syncRes = await fetch("/api/payments/sync-pending", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-      });
-      const syncData = await syncRes.json().catch(() => ({}));
-      if (!syncRes.ok) throw new Error(syncData.error || "No se pudo confirmar el pago");
-
-      if (syncData.subscriptions?.length) {
-        stopPaymentPolling();
-        await closePaymentBrowser();
-        clearPendingPayment();
-        await refreshMySubscriptions();
-        await fetchAllSubscriptions();
-        showToast("¡Suscripción activa!");
-        setShowSubscribeModal(false);
-        window.history.replaceState({}, document.title, window.location.pathname);
-        return true;
-      }
-
-      const purchase = syncData.purchases?.[0];
-      if (purchase?.photo_id) {
-        stopPaymentPolling();
-        await closePaymentBrowser();
-        await finalizePhotoPurchase(purchase.photo_id);
-        window.history.replaceState({}, document.title, window.location.pathname);
-        return true;
-      }
-
-      const videoPurchase = syncData.video_purchases?.[0];
-      if (videoPurchase?.video_id) {
-        stopPaymentPolling();
-        await closePaymentBrowser();
-        await finalizeVideoPurchase(videoPurchase.video_id);
-        window.history.replaceState({}, document.title, window.location.pathname);
-        return true;
-      }
-
-      const resolvedVideoId = pending?.videoId || videoIdFromUrl;
-      if (paypalToken && resolvedVideoId) {
-        const res = await fetch("/api/payments/capture-video-paypal-order", {
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const syncRes = await fetch("/api/payments/sync-pending", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${session.access_token}`,
           },
           body: JSON.stringify({
-            order_id: paypalToken,
-            paypal_order_id: paypalToken,
-            video_id: resolvedVideoId,
+            video_id: hintVideoId || undefined,
+            photo_id: hintPhotoId || undefined,
           }),
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago PayPal");
-        stopPaymentPolling();
-        await closePaymentBrowser();
-        await finalizeVideoPurchase(resolvedVideoId);
-        window.history.replaceState({}, document.title, window.location.pathname);
-        return true;
-      }
+        const syncData = await syncRes.json().catch(() => ({}));
+        if (!syncRes.ok) throw new Error(syncData.error || "No se pudo confirmar el pago");
 
-      if (pending?.kind === "video" && pending.videoId) {
-        if (pending.provider === "paypal" && (pending.orderId || paypalToken)) {
+        if (syncData.subscriptions?.length) {
+          stopPaymentPolling();
+          await closePaymentBrowser();
+          clearPendingPayment();
+          await refreshMySubscriptions();
+          await fetchAllSubscriptions();
+          showToast("¡Suscripción activa!");
+          setShowSubscribeModal(false);
+          window.history.replaceState({}, document.title, window.location.pathname);
+          return true;
+        }
+
+        const purchase = syncData.purchases?.[0];
+        if (purchase?.photo_id) {
+          stopPaymentPolling();
+          await closePaymentBrowser();
+          await finalizePhotoPurchase(purchase.photo_id);
+          window.history.replaceState({}, document.title, window.location.pathname);
+          return true;
+        }
+
+        const videoPurchase = syncData.video_purchases?.[0];
+        if (videoPurchase?.video_id) {
+          stopPaymentPolling();
+          await closePaymentBrowser();
+          await finalizeVideoPurchase(videoPurchase.video_id);
+          window.history.replaceState({}, document.title, window.location.pathname);
+          return true;
+        }
+
+        const resolvedVideoId = hintVideoId;
+        if (paypalToken && resolvedVideoId) {
           const res = await fetch("/api/payments/capture-video-paypal-order", {
             method: "POST",
             headers: {
@@ -1209,89 +1207,135 @@ function WatermarkedImage({ src, photographer, purchased }) {
               Authorization: `Bearer ${session.access_token}`,
             },
             body: JSON.stringify({
-              order_id: pending.orderId || paypalToken,
-              paypal_order_id: pending.orderId || paypalToken,
-              video_id: pending.videoId,
+              order_id: paypalToken,
+              paypal_order_id: paypalToken,
+              video_id: resolvedVideoId,
             }),
           });
           const data = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago PayPal");
-          stopPaymentPolling();
-          await closePaymentBrowser();
-          await finalizeVideoPurchase(pending.videoId);
-          window.history.replaceState({}, document.title, window.location.pathname);
-          return true;
+          if (res.ok) {
+            stopPaymentPolling();
+            await closePaymentBrowser();
+            await finalizeVideoPurchase(resolvedVideoId);
+            window.history.replaceState({}, document.title, window.location.pathname);
+            return true;
+          }
         }
 
-        const res = await fetch("/api/payments/capture-video-order", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${session.access_token}`,
-          },
-          body: JSON.stringify({
-            checkout_id: pending.checkoutId || undefined,
-            order_id: pending.checkoutId || undefined,
-            video_id: pending.videoId,
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago");
-        stopPaymentPolling();
-        await closePaymentBrowser();
-        await finalizeVideoPurchase(pending.videoId);
-        window.history.replaceState({}, document.title, window.location.pathname);
-        return true;
+        if (pending?.kind === "video" && pending.videoId) {
+          if (pending.provider === "paypal" && (pending.orderId || paypalToken)) {
+            const res = await fetch("/api/payments/capture-video-paypal-order", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${session.access_token}`,
+              },
+              body: JSON.stringify({
+                order_id: pending.orderId || paypalToken,
+                paypal_order_id: pending.orderId || paypalToken,
+                video_id: pending.videoId,
+              }),
+            });
+            if (res.ok) {
+              stopPaymentPolling();
+              await closePaymentBrowser();
+              await finalizeVideoPurchase(pending.videoId);
+              window.history.replaceState({}, document.title, window.location.pathname);
+              return true;
+            }
+          } else {
+            const res = await fetch("/api/payments/capture-video-order", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${session.access_token}`,
+              },
+              body: JSON.stringify({
+                checkout_id: pending.checkoutId || undefined,
+                order_id: pending.checkoutId || undefined,
+                video_id: pending.videoId,
+              }),
+            });
+            if (res.ok) {
+              stopPaymentPolling();
+              await closePaymentBrowser();
+              await finalizeVideoPurchase(pending.videoId);
+              window.history.replaceState({}, document.title, window.location.pathname);
+              return true;
+            }
+          }
+        } else if (hintVideoId && (paymentReturn || paypalToken)) {
+          const res = await fetch("/api/payments/capture-video-order", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({ video_id: hintVideoId }),
+          });
+          if (res.ok) {
+            stopPaymentPolling();
+            await closePaymentBrowser();
+            await finalizeVideoPurchase(hintVideoId);
+            window.history.replaceState({}, document.title, window.location.pathname);
+            return true;
+          }
+        }
+
+        if (pending?.kind === "photo" && pending.photoId) {
+          const res = await fetch("/api/payments/capture-order", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({
+              checkout_id: pending.checkoutId || undefined,
+              order_id: pending.checkoutId || undefined,
+              photo_id: pending.photoId,
+            }),
+          });
+          if (res.ok) {
+            stopPaymentPolling();
+            await closePaymentBrowser();
+            await finalizePhotoPurchase(pending.photoId);
+            window.history.replaceState({}, document.title, window.location.pathname);
+            return true;
+          }
+        }
+
+        if (pending?.kind === "subscription" && pending.photographerId) {
+          const res = await fetch("/api/payments/capture-subscription-order", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({
+              checkout_id: pending.checkoutId || undefined,
+              order_id: pending.checkoutId || undefined,
+              photographer_id: pending.photographerId,
+            }),
+          });
+          if (res.ok) {
+            stopPaymentPolling();
+            await closePaymentBrowser();
+            clearPendingPayment();
+            await refreshMySubscriptions();
+            await fetchAllSubscriptions();
+            showToast("¡Suscripción activa!");
+            setShowSubscribeModal(false);
+            window.history.replaceState({}, document.title, window.location.pathname);
+            return true;
+          }
+        }
+
+        if (attempt < maxAttempts - 1) await sleep(2000);
       }
 
-      if (pending?.kind === "photo" && pending.photoId) {
-        const res = await fetch("/api/payments/capture-order", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${session.access_token}`,
-          },
-          body: JSON.stringify({
-            checkout_id: pending.checkoutId || undefined,
-            order_id: pending.checkoutId || undefined,
-            photo_id: pending.photoId,
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago");
-        stopPaymentPolling();
-        await closePaymentBrowser();
-        await finalizePhotoPurchase(pending.photoId);
-        window.history.replaceState({}, document.title, window.location.pathname);
-        return true;
+      if (shouldRetry && !silent) {
+        showToast("Estamos confirmando tu pago. Reabrí la app en unos segundos si no ves la compra.");
       }
-
-      if (pending?.kind === "subscription" && pending.photographerId) {
-        const res = await fetch("/api/payments/capture-subscription-order", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${session.access_token}`,
-          },
-          body: JSON.stringify({
-            checkout_id: pending.checkoutId || undefined,
-            order_id: pending.checkoutId || undefined,
-            photographer_id: pending.photographerId,
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago");
-        stopPaymentPolling();
-        await closePaymentBrowser();
-        clearPendingPayment();
-        await refreshMySubscriptions();
-        await fetchAllSubscriptions();
-        showToast("¡Suscripción activa!");
-        setShowSubscribeModal(false);
-        window.history.replaceState({}, document.title, window.location.pathname);
-        return true;
-      }
-
       return false;
     } catch (err) {
       if (!silent) {
@@ -2396,6 +2440,13 @@ useEffect(() => {
   useEffect(() => {
     fetchPendingDeliveries();
   }, [fetchPendingDeliveries, view]);
+
+  useEffect(() => {
+    if (profile?.verification_status !== "approved" || !session?.access_token) return undefined;
+    fetchPendingDeliveries();
+    const timer = window.setInterval(fetchPendingDeliveries, 45000);
+    return () => window.clearInterval(timer);
+  }, [profile?.verification_status, session?.access_token, fetchPendingDeliveries]);
 
   const analyzeMediaWithAI = async (file) => {
     if (!session?.access_token) return;
@@ -6434,7 +6485,7 @@ const renderPhotographerProfile = () => {
                   <IconText icon="money" size={12}>Q{v.amount}</IconText> ·{" "}
                   {v.completed_at ? new Date(v.completed_at).toLocaleString() : "Completado"}
                   {hqPending && (
-                    <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Preparando HQ</span>
+                    <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Disponible en ~24 h</span>
                   )}
                 </div>
               </div>
@@ -8206,6 +8257,14 @@ const renderVendorRequest = () => {
     .bnav-icon-slot {
       width: 24px; height: 24px; display: grid; place-items: center;
       color: #5a5a5a; transition: color 0.25s, opacity 0.25s;
+      position: relative;
+    }
+    .bnav-badge {
+      position: absolute; top: -5px; right: -9px;
+      min-width: 16px; height: 16px; padding: 0 4px;
+      border-radius: 999px; background: var(--orange); color: #000;
+      font-size: 10px; font-weight: 800; line-height: 16px; text-align: center;
+      box-shadow: 0 0 8px rgba(255,107,0,0.5);
     }
     .bnav-item:not(.active):hover .bnav-icon-slot { color: #999; }
     .bnav-icon-slot.active {
@@ -8368,7 +8427,7 @@ const renderVendorRequest = () => {
           </div>
           <h1 className="success-page-title">¡VIDEO COMPRADO!</h1>
           <p className="success-page-sub">
-            Tu compra de <strong>{label}</strong> fue confirmada. Cuando el fotógrafo suba la versión final, podrás descargarla acá.
+            Tu compra de <strong>{label}</strong> fue confirmada. El fotógrafo tiene hasta <strong>24 horas</strong> para subir la versión final editada. Aparecerá en <strong>Mis Compras</strong> cuando esté lista para descargar.
           </p>
           {selectedVideo?.preview_url && (
             <div className="success-page-card">
@@ -8382,8 +8441,16 @@ const renderVendorRequest = () => {
               </div>
             </div>
           )}
-          <AppButton className="download-btn" style={{ width: "100%", maxWidth: 320, marginBottom: 12 }} onClick={handleVideoDownload}>
-            DESCARGAR VIDEO
+          <AppButton
+            className="upload-btn"
+            style={{ width: "100%", maxWidth: 320, marginBottom: 12 }}
+            onClick={() => {
+              setSelectedVideo(null);
+              setActiveTab("purchases");
+              setView(VIEWS.MY_PURCHASES);
+            }}
+          >
+            IR A MIS COMPRAS
           </AppButton>
           <AppButton
             className="close-btn-secondary"
@@ -9478,7 +9545,7 @@ const renderVendorRequest = () => {
           ...(profile?.verification_status === "approved"
             ? [
               { id: "upload", label: "Subir", v: VIEWS.UPLOAD },
-              { id: "deliveries", icon: "package", label: pendingDeliveries.length > 0 ? `Entregas (${pendingDeliveries.length})` : "Entregas", v: VIEWS.PENDING_DELIVERIES },
+              { id: "deliveries", icon: "package", label: "Entregas", badge: pendingDeliveries.length, v: VIEWS.PENDING_DELIVERIES },
               { id: "dash", label: "Dashboard", v: VIEWS.DASHBOARD },
             ]
             : [{ id: "purchases", label: "Compras", v: VIEWS.MY_PURCHASES }]),
