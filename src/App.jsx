@@ -76,6 +76,17 @@ const VIEWS = {
 };
 
 const VIDEO_PREVIEW_MAX_SEC = 7;
+const VIDEO_PREVIEW_SHORT_SEC = 3;
+
+const getVideoPreviewLimitSec = (knownDuration, videoEl) => {
+  const fromMeta = videoEl?.duration;
+  const metaDur = Number.isFinite(fromMeta) && fromMeta > 0 ? Math.round(fromMeta) : null;
+  const dur = knownDuration ?? metaDur;
+  if (dur != null && dur < VIDEO_PREVIEW_MAX_SEC) {
+    return Math.min(VIDEO_PREVIEW_SHORT_SEC, dur);
+  }
+  return VIDEO_PREVIEW_MAX_SEC;
+};
 
 const formatVideoDuration = (seconds) => {
   const total = Math.floor(Number(seconds));
@@ -2492,7 +2503,7 @@ useEffect(() => {
     setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: 0 }));
   };
 
-  const startVideoPreview = (videoId) => {
+  const startVideoPreview = (videoId, durationSeconds) => {
     const videoEl = videoRefs.current[videoId];
     if (!videoEl) return;
     if (playingVideos.current.length >= 3 && !playingVideos.current.includes(videoId)) {
@@ -2503,9 +2514,10 @@ useEffect(() => {
     }
     videoEl.currentTime = 0;
     const onTimeUpdate = () => {
-      const progress = Math.min(videoEl.currentTime / VIDEO_PREVIEW_MAX_SEC, 1);
+      const previewLimit = getVideoPreviewLimitSec(durationSeconds, videoEl);
+      const progress = Math.min(videoEl.currentTime / previewLimit, 1);
       setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: progress }));
-      if (videoEl.currentTime >= VIDEO_PREVIEW_MAX_SEC) {
+      if (videoEl.currentTime >= previewLimit || videoEl.ended) {
         videoEl.pause();
         videoEl.currentTime = 0;
         setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: 0 }));
@@ -2536,9 +2548,9 @@ useEffect(() => {
       <div
         key={video.id}
         style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }}
-        onMouseEnter={() => startVideoPreview(video.id)}
+        onMouseEnter={() => startVideoPreview(video.id, video.duration_seconds || videoDurationCache[video.id])}
         onMouseLeave={() => stopVideoPreview(video.id)}
-        onTouchStart={() => startVideoPreview(video.id)}
+        onTouchStart={() => startVideoPreview(video.id, video.duration_seconds || videoDurationCache[video.id])}
         onTouchEnd={() => stopVideoPreview(video.id)}
       >
         <div
