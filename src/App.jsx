@@ -2619,6 +2619,7 @@ useEffect(() => {
       delete videoPreviewHandlers.current[videoId];
     }
     if (videoEl) {
+      videoEl.classList.remove("is-playing");
       videoEl.pause();
       videoEl.currentTime = 0;
     }
@@ -2636,6 +2637,7 @@ useEffect(() => {
     if (!playingVideos.current.includes(videoId)) {
       playingVideos.current.push(videoId);
     }
+
     const onTimeUpdate = () => {
       const previewLimit = getVideoPreviewLimitSec(durationSeconds, videoEl);
       const progress = Math.min(videoEl.currentTime / previewLimit, 1);
@@ -2646,21 +2648,40 @@ useEffect(() => {
         setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: 0 }));
       }
     };
+
     if (videoPreviewHandlers.current[videoId]) {
       videoEl.removeEventListener("timeupdate", videoPreviewHandlers.current[videoId]);
     }
     videoPreviewHandlers.current[videoId] = onTimeUpdate;
     videoEl.addEventListener("timeupdate", onTimeUpdate);
     videoEl.muted = videoPreviewMuted;
+    videoEl.classList.add("is-playing");
     setVideoPreviewActive((prev) => ({ ...prev, [videoId]: true }));
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const el = videoRefs.current[videoId];
-        if (!el) return;
-        el.currentTime = 0;
-        el.play().catch(() => {});
-      });
-    });
+
+    const beginPlay = () => {
+      const el = videoRefs.current[videoId];
+      if (!el) return;
+      el.currentTime = 0;
+      el.play().catch(() => {});
+    };
+
+    if (videoEl.readyState >= 2) {
+      beginPlay();
+    } else {
+      const onReady = () => {
+        videoEl.removeEventListener("loadeddata", onReady);
+        beginPlay();
+      };
+      videoEl.addEventListener("loadeddata", onReady);
+      if (videoEl.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+        videoEl.load();
+      }
+    }
+  };
+
+  const toggleVideoPreview = (videoId, durationSeconds) => {
+    if (videoPreviewActive[videoId]) stopVideoPreview(videoId);
+    else startVideoPreview(videoId, durationSeconds);
   };
 
   const toggleVideoPreviewMute = (e) => {
@@ -2692,38 +2713,46 @@ useEffect(() => {
     const isPreviewing = Boolean(videoPreviewActive[video.id]);
     const previewProgress = videoPreviewProgress[video.id] || 0;
     const posterSrc = video.thumbnail_url || videoPosterCache[video.id] || null;
-    const hasPoster = Boolean(posterSrc);
-    const showPoster = hasPoster && !isPreviewing;
+    const showPosterImage = Boolean(posterSrc) && !isPreviewing;
+    const showIdleOverlay = !isPreviewing && !posterSrc;
     const previewLimit = video.duration_seconds || videoDurationCache[video.id];
 
     return (
       <div
         key={video.id}
         style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }}
-        {...(CAN_HOVER_VIDEO_PREVIEW ? {
-          onMouseEnter: () => startVideoPreview(video.id, previewLimit),
-          onMouseLeave: () => stopVideoPreview(video.id),
-        } : {})}
       >
         <div
-          style={{ position: "relative", paddingBottom: "56.25%", background: showPoster ? "#000" : "#111" }}
+          className="video-card-media"
+          style={{ position: "relative", paddingBottom: "56.25%", background: "#0a0a0a" }}
           onContextMenu={(e) => e.preventDefault()}
+          {...(CAN_HOVER_VIDEO_PREVIEW ? {
+            onMouseEnter: () => startVideoPreview(video.id, previewLimit),
+            onMouseLeave: () => stopVideoPreview(video.id),
+          } : {
+            onClick: (e) => {
+              e.stopPropagation();
+              toggleVideoPreview(video.id, previewLimit);
+            },
+          })}
         >
-          {showPoster && (
+          {showPosterImage && (
             <img
               src={posterSrc}
               alt=""
               decoding="async"
-              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 5 }}
+              className="video-card-poster"
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 4 }}
             />
           )}
+          {showIdleOverlay && <WatermarkedVideoOverlay photographer={video.photographer?.name} />}
           <video
             ref={(el) => { videoRefs.current[video.id] = el; }}
-            className="video-card-preview"
+            className={`video-card-preview${isPreviewing ? " is-playing" : ""}`}
             src={video.preview_url}
             muted={videoPreviewMuted}
             playsInline
-            preload={showPoster ? "none" : "metadata"}
+            preload="metadata"
             controls={false}
             controlsList="nodownload noplaybackrate nofullscreen noremoteplayback"
             disablePictureInPicture
@@ -2734,31 +2763,20 @@ useEffect(() => {
               if (dur > 0) {
                 setVideoDurationCache((prev) => (prev[video.id] === dur ? prev : { ...prev, [video.id]: dur }));
               }
-              if (!video.thumbnail_url && !videoPosterCache[video.id]) {
-                const seekTo = Math.min(0.5, (el.duration || 1) * 0.08);
-                const saved = el.currentTime;
-                const onSeeked = () => {
-                  el.removeEventListener("seeked", onSeeked);
-                  captureVideoPoster(el, video.id);
-                  el.currentTime = saved;
-                };
-                el.addEventListener("seeked", onSeeked);
-                el.currentTime = seekTo;
-              }
             }}
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-              zIndex: showPoster ? 1 : 2,
-              display: showPoster ? "none" : "block",
-              transition: "opacity 0.2s ease",
+            onLoadedData={(e) => {
+              const el = e.currentTarget;
+              if (video.thumbnail_url || videoPosterCache[video.id] || el.dataset.posterCaptured === "1") return;
+              const seekTo = Math.min(1, Math.max(0.1, (el.duration || 1) * 0.1));
+              const onSeeked = () => {
+                el.removeEventListener("seeked", onSeeked);
+                captureVideoPoster(el, video.id);
+                el.currentTime = 0;
+              };
+              el.addEventListener("seeked", onSeeked);
+              el.currentTime = seekTo;
             }}
           />
-          {!showPoster && !isPreviewing && <WatermarkedVideoOverlay photographer={video.photographer?.name} />}
           <button
             type="button"
             aria-label={videoPreviewMuted ? "Activar sonido del preview" : "Silenciar preview"}
@@ -8186,10 +8204,22 @@ const renderVendorRequest = () => {
     .hero-video-bg::-webkit-media-controls { display: none !important; }
     .hero-video-bg::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
     .hero-video-bg::-webkit-media-controls-overlay-play-button { display: none !important; }
-    .video-card-preview { background: #111; }
+    .video-card-media { overflow: hidden; }
+    .video-card-preview {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; background: #0a0a0a;
+      opacity: 0; visibility: hidden; pointer-events: none; z-index: 2;
+      transition: opacity 0.2s ease, visibility 0.2s ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .video-card-preview.is-playing {
+      opacity: 1; visibility: visible; pointer-events: auto; z-index: 6;
+    }
     .video-card-preview::-webkit-media-controls { display: none !important; }
     .video-card-preview::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
     .video-card-preview::-webkit-media-controls-overlay-play-button { display: none !important; }
+    .video-card-preview::-webkit-media-controls-panel { display: none !important; }
+    .video-card-poster { pointer-events: none; }
     .search-bar { display: flex; gap: 10px; margin: 20px; }
     .search-input { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 12px 16px;
       border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color 0.2s; }
