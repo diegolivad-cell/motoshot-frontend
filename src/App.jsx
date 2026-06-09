@@ -415,6 +415,103 @@ function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
   );
 }
 
+const profileSearchTokens = (q) =>
+  String(q ?? "")
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => {
+      if (t.length >= 4 && /[oa]$/.test(t)) return t.slice(0, -1);
+      return t;
+    })
+    .filter((t) => t.length >= 2);
+
+const buildProfileSearchHaystack = (values) =>
+  values
+    .flatMap((v) => (Array.isArray(v) ? v : [v]))
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+const matchesProfileSearch = (haystack, q) => {
+  const tokens = profileSearchTokens(q);
+  if (tokens.length === 0) return true;
+  return tokens.every((token) => haystack.includes(token));
+};
+
+const photoMatchesProfileSearch = (photo, q) =>
+  matchesProfileSearch(
+    buildProfileSearchHaystack([
+      photo.location,
+      photo.ride_date,
+      photo.time_start,
+      photo.time_end,
+      photo.tags,
+    ]),
+    q
+  );
+
+const videoMatchesProfileSearch = (video, q) =>
+  matchesProfileSearch(
+    buildProfileSearchHaystack([
+      video.moto_brand,
+      video.moto_model,
+      video.moto_color,
+      video.helmet_color,
+      video.suit_color,
+      video.dorsal,
+      video.sector,
+      video.additional_tags,
+      video.event_time_start,
+      video.event_time_end,
+    ]),
+    q
+  );
+
+function ProfileSearchBar({ value, onChange, onSearch, placeholder }) {
+  return (
+    <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "stretch" }}>
+      <input
+        className="search-input"
+        style={{ marginBottom: 0, flex: 1, minWidth: 0 }}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") onSearch(); }}
+      />
+      <button
+        type="button"
+        aria-label="Buscar"
+        onClick={onSearch}
+        style={{
+          flexShrink: 0,
+          width: 42,
+          height: 42,
+          borderRadius: 10,
+          border: "1px solid rgba(255,107,0,0.45)",
+          background: "linear-gradient(145deg, rgba(255,140,50,0.95), var(--orange))",
+          color: "#1a1008",
+          display: "grid",
+          placeItems: "center",
+          cursor: "pointer",
+          boxShadow: "0 2px 10px rgba(255,107,0,0.22)",
+          transition: "transform 0.15s ease, box-shadow 0.15s ease",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.transform = "scale(1.04)";
+          e.currentTarget.style.boxShadow = "0 4px 14px rgba(255,107,0,0.32)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.transform = "scale(1)";
+          e.currentTarget.style.boxShadow = "0 2px 10px rgba(255,107,0,0.22)";
+        }}
+      >
+        <AppIcon name="search" size={17} />
+      </button>
+    </div>
+  );
+}
+
 function WatermarkedVideoOverlay({ photographer }) {
   const label = photographer || "MOTOSHOT";
   return (
@@ -554,6 +651,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [albums, setAlbums] = useState([]);
   const [selectedAlbum, setSelectedAlbum] = useState(null);
   const [profileMediaTab, setProfileMediaTab] = useState("photos");
+  const [profileSearchInput, setProfileSearchInput] = useState("");
+  const [profileSearchQuery, setProfileSearchQuery] = useState("");
+  const [profileSearchRan, setProfileSearchRan] = useState(false);
   const [albumForm, setAlbumForm] = useState({ name: "", event_date: "" });
   const [showAlbumModal, setShowAlbumModal] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -1626,6 +1726,9 @@ const fetchPhotographerProfile = async (id) => {
     setAlbums(albumsData.albums || []);
     setPhotographerVideos(Array.isArray(videosData) ? videosData : []);
     setProfileMediaTab("photos");
+    setProfileSearchInput("");
+    setProfileSearchQuery("");
+    setProfileSearchRan(false);
     setSelectedAlbum(null);
     setSelectedTag(null);
   } catch (err) {
@@ -4086,11 +4189,25 @@ const renderPhotographerSocialLinks = (person) => {
 const renderPhotographerProfile = () => {
   const subscribed = isSubscribedToPhotographer(selectedPhotographer?.id);
   const profilePhotoCount = photographerPhotos.length;
+  const runProfileSearch = () => {
+    const q = profileSearchInput.trim();
+    setProfileSearchQuery(q);
+    setProfileSearchRan(q.length > 0);
+  };
+  const filteredProfileVideos = profileSearchQuery
+    ? photographerVideos.filter((v) => videoMatchesProfileSearch(v, profileSearchQuery))
+    : photographerVideos;
 
   const profileTabBtn = (tab, label, count) => (
     <button
       type="button"
-      onClick={() => setProfileMediaTab(tab)}
+      onClick={() => {
+        setProfileMediaTab(tab);
+        setProfileSearchInput("");
+        setProfileSearchQuery("");
+        setProfileSearchRan(false);
+        setSelectedTag(null);
+      }}
       style={{
         fontFamily: "'Bebas Neue', sans-serif",
         fontSize: 18,
@@ -4234,6 +4351,17 @@ const renderPhotographerProfile = () => {
   </div>
 </div>
 
+<ProfileSearchBar
+  value={profileSearchInput}
+  onChange={setProfileSearchInput}
+  onSearch={runProfileSearch}
+  placeholder={
+    profileMediaTab === "videos"
+      ? "Marca, modelo, color, sector, dorsal…"
+      : "Ubicación, marca, tags de IA…"
+  }
+/>
+
 {profileMediaTab === "videos" && (
   <div style={{ marginBottom: 28 }}>
     {photographerVideos.length === 0 ? (
@@ -4241,9 +4369,14 @@ const renderPhotographerProfile = () => {
         <EmptyIcon name="video" />
         <div>Este fotógrafo aún no tiene videos publicados.</div>
       </div>
+    ) : filteredProfileVideos.length === 0 ? (
+      <div className="empty" style={{ padding: "32px 16px" }}>
+        <EmptyIcon name="search" />
+        <div>No hay videos que coincidan con tu búsqueda.</div>
+      </div>
     ) : (
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
-        {renderVideoCards(photographerVideos)}
+        {renderVideoCards(filteredProfileVideos)}
       </div>
     )}
     <div style={{ textAlign: "center", marginTop: 16 }}>
@@ -4265,14 +4398,6 @@ const renderPhotographerProfile = () => {
 
 {profileMediaTab === "photos" && (
   <>
-      {/* Búsqueda dentro del perfil */}
-      <input className="search-input" style={{ marginBottom: 16 }}
-        placeholder="Buscar fotos por ubicación o marca..."
-        onChange={e => {
-          const term = e.target.value.toLowerCase();
-          // filtrar photographerPhotos localmente
-        }} />
-
       {/* Álbumes */}
       {albums.length > 0 && (
   <div style={{ marginBottom: 24 }}>
@@ -4386,8 +4511,21 @@ const renderPhotographerProfile = () => {
     ? photographerPhotos.filter(p => p.album_id === selectedAlbum.id)
     : photographerPhotos;
 
+  if (profileSearchQuery) {
+    displayPhotos = displayPhotos.filter((p) => photoMatchesProfileSearch(p, profileSearchQuery));
+  }
+
   if (selectedTag) {
     displayPhotos = displayPhotos.filter(p => p.tags?.includes(selectedTag));
+  }
+
+  if (displayPhotos.length === 0 && profileSearchRan) {
+    return (
+      <div className="empty" style={{ padding: "32px 16px" }}>
+        <EmptyIcon name="search" />
+        <div>No hay fotos que coincidan con tu búsqueda.</div>
+      </div>
+    );
   }
 
   return (
