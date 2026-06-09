@@ -33,6 +33,26 @@ import {
 } from "./authFlow.js";
 
 const API = import.meta.env.VITE_API_URL || "";
+const API_BASE = API || "https://motoshot-backend.onrender.com";
+
+async function parseApiJson(res) {
+  const text = await res.text();
+  if (!text.trim()) {
+    if (res.status === 502) {
+      return { error: "El servidor no respondió a tiempo. Probá de nuevo o usá un video más liviano." };
+    }
+    return { error: `Error del servidor (${res.status})` };
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {
+      error: res.status === 502
+        ? "El servidor tardó demasiado. Probá de nuevo en unos minutos."
+        : "Respuesta inválida del servidor.",
+    };
+  }
+}
 const VIEWS = {
   PHOTOGRAPHERS: "photographers",
   PHOTOGRAPHER_PROFILE: "photographer_profile",
@@ -4760,6 +4780,10 @@ const renderPhotographerProfile = () => {
     const handleVideoSubmit = async () => {
       if (!videoFile || !session?.access_token) return;
       setVideoUploadLoading(true);
+      setGlobalLoading({
+        active: true,
+        message: "Subiendo video… no cierres la app",
+      });
       const formData = new FormData();
       formData.append("video", videoFile);
       if (videoThumbnailFile) formData.append("thumbnail", videoThumbnailFile);
@@ -4779,14 +4803,14 @@ const renderPhotographerProfile = () => {
         formData.append("dorsal", autoTags.dorsal || "");
       }
       try {
-        const res = await fetch("/api/videos/upload", {
+        const res = await fetch(`${API_BASE}/api/videos/upload`, {
           method: "POST",
           headers: { Authorization: `Bearer ${session.access_token}` },
           body: formData,
         });
-        const data = await res.json();
+        const data = await parseApiJson(res);
         if (res.ok) {
-          showToast("Listo: video subido exitosamente.");
+          showToast(data.message || "Listo: video subido exitosamente.");
           setVideoFile(null);
           setVideoThumbnailFile(null);
           setVideoDurationSeconds(null);
@@ -4798,9 +4822,10 @@ const renderPhotographerProfile = () => {
         }
       } catch (err) {
         console.error("Error subiendo video:", err);
-        showToast("Error al subir el video.");
+        showToast("Error de conexión al subir el video. Verificá tu internet e intentá de nuevo.");
       } finally {
         setVideoUploadLoading(false);
+        setGlobalLoading({ active: false, message: "" });
       }
     };
 
@@ -5032,7 +5057,7 @@ const renderPhotographerProfile = () => {
               disabled={!videoFile || analyzingMedia || videoUploadLoading}
               onClick={handleVideoSubmit}
             >
-              {videoUploadLoading ? "SUBIENDO..." : analyzingMedia ? "ANALIZANDO..." : "SUBIR VIDEO"}
+              {analyzingMedia ? "ANALIZANDO..." : "SUBIR VIDEO"}
             </AppButton>
           </div>
         )}
