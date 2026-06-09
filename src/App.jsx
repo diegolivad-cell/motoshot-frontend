@@ -652,6 +652,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [selectedAlbum, setSelectedAlbum] = useState(null);
   const [profileMediaTab, setProfileMediaTab] = useState("photos");
   const [myProfileMediaTab, setMyProfileMediaTab] = useState("photos");
+  const [uploadMediaTab, setUploadMediaTab] = useState("photo");
   const [profileSearchInput, setProfileSearchInput] = useState("");
   const [profileSearchQuery, setProfileSearchQuery] = useState("");
   const [profileSearchRan, setProfileSearchRan] = useState(false);
@@ -2432,6 +2433,10 @@ useEffect(() => {
       setVideosLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (view === VIEWS.UPLOAD_VIDEO) setUploadMediaTab("video");
+  }, [view]);
 
   useEffect(() => {
     if (view === VIEWS.VIDEO_SEARCH) {
@@ -4797,14 +4802,14 @@ const renderPhotographerProfile = () => {
 
     if (!user) {
       return (
-        <div className="upload-view upload-split-view">
+        <div className="upload-view">
           <div className="empty"><EmptyIcon name="lock" /><div>Iniciá sesión para subir fotos y videos.</div></div>
         </div>
       );
     }
     if (!profile) {
       return (
-        <div className="upload-view upload-split-view">
+        <div className="upload-view">
           <div className="empty">
             <EmptyIcon name="clipboard" />
             <div>
@@ -4819,7 +4824,7 @@ const renderPhotographerProfile = () => {
     }
     if (profile.verification_status !== "approved") {
       return (
-        <div className="upload-view upload-split-view">
+        <div className="upload-view">
           <div className="empty">
             <LoaderIcon size={44} />
             <div>Tu perfil está <strong style={{ color: "var(--orange)" }}>{profile.verification_status}</strong>. Esperá la aprobación del administrador.</div>
@@ -4828,11 +4833,49 @@ const renderPhotographerProfile = () => {
       );
     }
 
+    const uploadTabBtn = (tab, label) => (
+      <button
+        type="button"
+        onClick={() => setUploadMediaTab(tab)}
+        style={{
+          fontFamily: "'Bebas Neue', sans-serif",
+          fontSize: 18,
+          letterSpacing: 1,
+          padding: "14px 8px",
+          background: "none",
+          border: "none",
+          borderBottom: uploadMediaTab === tab ? "2px solid var(--orange)" : "2px solid transparent",
+          color: uploadMediaTab === tab ? "var(--orange)" : "var(--muted)",
+          cursor: "pointer",
+          width: "100%",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 8,
+        }}
+      >
+        <AppIcon name={tab === "video" ? "video" : "camera"} size={18} color={uploadMediaTab === tab ? "var(--orange)" : "var(--muted)"} />
+        {label}
+      </button>
+    );
+
     return (
-      <div className="upload-view upload-split-view">
-        <div className="upload-split-grid">
-          {/* Izquierda — video */}
-          <div className="upload-split-pane upload-split-pane-video">
+      <div className="upload-view">
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          borderBottom: "1px solid var(--border)",
+          marginBottom: 20,
+        }}
+        >
+          {uploadTabBtn("video", "VIDEO")}
+          <div style={{ borderLeft: "1px solid var(--border)" }}>
+            {uploadTabBtn("photo", "FOTO")}
+          </div>
+        </div>
+
+        {uploadMediaTab === "video" && (
+          <div>
             <SectionTitleIcon icon="video">SUBIR VIDEO</SectionTitleIcon>
             <div className="section-sub" style={{ marginBottom: 20 }}>MP4, MOV o AVI — máx 500MB. La IA detecta marca y colores del frame 5s.</div>
 
@@ -4988,10 +5031,11 @@ const renderPhotographerProfile = () => {
               {videoUploadLoading ? "SUBIENDO..." : analyzingMedia ? "ANALIZANDO..." : "SUBIR VIDEO"}
             </AppButton>
           </div>
+        )}
 
-          {/* Derecha — fotos */}
-          <div className="upload-split-pane upload-split-pane-photo">
-            <div className="section-title">SUBIR FOTO</div>
+        {uploadMediaTab === "photo" && (
+          <div>
+            <SectionTitleIcon icon="camera">SUBIR FOTO</SectionTitleIcon>
             <div className="section-sub">La marca de agua se aplica automáticamente al publicar.</div>
 
             <div className="form-group">
@@ -5035,7 +5079,7 @@ const renderPhotographerProfile = () => {
               )}
 
               {uploadFiles.length > 0 && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, maxHeight: 320, overflowY: "auto" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, maxHeight: 400, overflowY: "auto" }}>
                   {uploadFiles.map(({ id, file, url, tags }) => {
                     const status = uploadProgress[file.name];
                     return (
@@ -5133,7 +5177,7 @@ const renderPhotographerProfile = () => {
               {uploadLoading ? "SUBIENDO..." : `↑ PUBLICAR ${uploadFiles.length > 1 ? uploadFiles.length + " FOTOS" : "FOTO"}`}
             </AppButton>
           </div>
-        </div>
+        )}
       </div>
     );
   };
@@ -7027,7 +7071,7 @@ const renderVendorRequest = () => {
             <AppButton
               className="nav-btn primary"
               style={{ fontSize: 11, padding: "6px 12px" }}
-              onClick={() => { setActiveTab("upload"); setView(VIEWS.UPLOAD); }}
+              onClick={() => { setUploadMediaTab("video"); setActiveTab("upload"); setView(VIEWS.UPLOAD); }}
             >
               Subir video
             </AppButton>
@@ -7045,7 +7089,7 @@ const renderVendorRequest = () => {
               <AppButton
                 className="nav-btn primary"
                 style={{ marginTop: 16 }}
-                onClick={() => { setActiveTab("upload"); setView(VIEWS.UPLOAD); }}
+                onClick={() => { setUploadMediaTab("video"); setActiveTab("upload"); setView(VIEWS.UPLOAD); }}
               >
                 Subir primer video
               </AppButton>
@@ -7664,31 +7708,6 @@ const renderVendorRequest = () => {
     .close-btn-secondary { width: 100%; padding: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; color: var(--muted); font-family: 'DM Sans', sans-serif; font-size: 14px; cursor: pointer; transition: all 0.2s; }
     .close-btn-secondary:hover { color: var(--text); border-color: var(--orange); }
     .upload-view { padding: 24px 20px 80px; max-width: 540px; margin: 0 auto; }
-    .upload-view.upload-split-view { max-width: none; width: 100%; margin: 0; padding: 12px 6px 88px; box-sizing: border-box; }
-    .upload-split-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      overflow: hidden;
-      background: var(--surface);
-      width: 100%;
-    }
-    .upload-split-pane {
-      padding: 16px 12px 20px;
-      min-width: 0;
-      overflow-x: hidden;
-      overflow-y: auto;
-      max-height: calc(100dvh - 168px);
-    }
-    .upload-split-pane-video { border-right: 1px solid var(--border); }
-    .upload-split-pane .section-title { font-size: clamp(22px, 3.5vw, 32px); }
-    .upload-split-pane .section-sub { font-size: 12px; margin-bottom: 16px; }
-    .upload-split-pane .form-label { font-size: 10px; }
-    .upload-split-pane .form-input { padding: 10px 10px; font-size: 13px; }
-    .upload-split-pane .dropzone { padding: 24px 10px; }
-    .upload-split-pane .dropzone-icon svg { width: 28px; height: 28px; }
-    .upload-split-pane .pay-btn, .upload-split-pane .upload-btn { font-size: 15px; padding: 12px 8px; letter-spacing: 0.5px; }
     .section-title { font-family: 'Bebas Neue', sans-serif; font-size: 32px; letter-spacing: 2px; color: var(--text); margin-bottom: 6px; }
     .section-sub { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
     .form-group { margin-bottom: 18px; }
