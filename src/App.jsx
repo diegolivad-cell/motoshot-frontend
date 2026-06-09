@@ -1,6 +1,7 @@
 ﻿import { useEffect, useState, useRef, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { supabase } from "./supabaseClient";
+import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile } from "./storageUpload";
 import { motion, AnimatePresence } from "framer-motion";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
@@ -2605,34 +2606,66 @@ useEffect(() => {
     }
   };
 
-  const uploadQueuedVideo = async (item, { thumbnailFile, tags, form }) => {
-    const formData = new FormData();
-    formData.append("video", item.file);
-    if (thumbnailFile) formData.append("thumbnail", thumbnailFile);
-    const dur = await readVideoDuration(item.file).catch(() => null);
-    if (dur) formData.append("duration_seconds", String(dur));
-    formData.append("photographer_id", profile.id);
-    formData.append("price", form.price);
-    formData.append("sector", form.sector);
-    formData.append("event_time_start", form.event_time_start);
-    formData.append("event_time_end", form.event_time_end);
-    formData.append("album_id", form.album_id);
-    const videoTags = tags || (await analyzeVideoFrameTags(item.file));
-    if (videoTags) {
-      formData.append("moto_brand", videoTags.moto_brand || "");
-      formData.append("moto_model", videoTags.moto_model || "");
-      formData.append("moto_color", videoTags.moto_color || "");
-      formData.append("helmet_color", videoTags.helmet_color || "");
-      formData.append("suit_color", videoTags.suit_color || "");
-      formData.append("dorsal", videoTags.dorsal || "");
-    }
-    const res = await fetch(apiUrl("/api/videos/upload"), {
-      method: "POST",
-      headers: { Authorization: `Bearer ${session.access_token}` },
-      body: formData,
+  const fileToBase64 = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",")[1] || null);
+      reader.onerror = () => reject(new Error("No se pudo leer el archivo."));
+      reader.readAsDataURL(file);
     });
-    const data = await parseApiJson(res);
-    if (!res.ok) throw new Error(data.error || "No se pudo subir el video.");
+
+  // El video se sube directo a Supabase Storage desde el navegador (el backend
+  // en Render no aguanta archivos grandes en memoria). Luego solo se registran
+  // los metadatos en el backend.
+  const uploadQueuedVideo = async (item, { thumbnailFile, tags, form, onProgress }) => {
+    const file = item.file;
+    const ext = videoExtForFile(file);
+    const videoId = crypto.randomUUID();
+    const storagePath = `${profile.id}/${videoId}/preview_${Date.now()}.${ext}`;
+
+    await uploadToSupabaseStorage({
+      bucket: "videos-preview",
+      path: storagePath,
+      file,
+      accessToken: session.access_token,
+      onProgress,
+    });
+
+    const dur = await readVideoDuration(file).catch(() => null);
+    const videoTags = tags || (await analyzeVideoFrameTags(file));
+    const thumbnail_base64 = thumbnailFile ? await fileToBase64(thumbnailFile).catch(() => null) : null;
+
+    const body = {
+      video_id: videoId,
+      storage_path: storagePath,
+      ext,
+      duration_seconds: dur || null,
+      price: form.price,
+      sector: form.sector,
+      event_time_start: form.event_time_start,
+      event_time_end: form.event_time_end,
+      album_id: form.album_id,
+      moto_brand: videoTags?.moto_brand || "",
+      moto_model: videoTags?.moto_model || "",
+      moto_color: videoTags?.moto_color || "",
+      helmet_color: videoTags?.helmet_color || "",
+      suit_color: videoTags?.suit_color || "",
+      dorsal: videoTags?.dorsal || "",
+      thumbnail_base64,
+    };
+
+    const { res, data } = await apiJson("/api/videos/register", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify(body),
+    }, { wake: true });
+    if (!res.ok) {
+      removeFromSupabaseStorage("videos-preview", storagePath);
+      throw new Error(data?.error || "No se pudo registrar el video.");
+    }
     return data;
   };
 
@@ -2654,11 +2687,14 @@ useEffect(() => {
     let done = 0;
     let failed = 0;
     for (const item of items) {
-      setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "uploading", error: null } : q)));
+      setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "uploading", error: null, progress: 0 } : q)));
       try {
-        await uploadQueuedVideo(item, { thumbnailFile: singleThumb, tags: singleTags, form });
+        const onProgress = (pct) => {
+          setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, progress: pct } : q)));
+        };
+        await uploadQueuedVideo(item, { thumbnailFile: singleThumb, tags: singleTags, form, onProgress });
         done += 1;
-        setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "done" } : q)));
+        setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "done", progress: 100 } : q)));
       } catch (err) {
         failed += 1;
         const message = err?.message || "No se pudo subir el video.";
@@ -5304,7 +5340,11 @@ const renderPhotographerProfile = () => {
                         <div className="video-queue-name">{item.file.name}</div>
                         <div className="video-queue-meta">
                           {formatFileSize(item.file.size)}
-                          {item.status === "uploading" && uploadingIndex === idx ? " · Subiendo…" : ""}
+                          {item.status === "uploading"
+                            ? (typeof item.progress === "number" && item.progress < 100
+                              ? ` · Subiendo… ${item.progress}%`
+                              : " · Procesando…")
+                            : ""}
                           {item.status === "done" ? " · Subido" : ""}
                           {item.status === "error" ? ` · ${item.error || "Error"}` : ""}
                         </div>
@@ -5663,48 +5703,88 @@ const renderPhotographerProfile = () => {
   );
 
   const renderPendingDeliveries = () => {
-    const uploadHqFile = (mediaType, itemId, file) => {
-      const key = `${mediaType}-${itemId}`;
-      const endpoint = mediaType === "video"
-        ? `/api/videos/${itemId}/upload-hq`
-        : `/api/photos/${itemId}/upload-hq`;
-      const formData = new FormData();
-      formData.append(mediaType === "video" ? "video_hq" : "photo_hq", file);
+    const finishHqDelivery = (mediaType, itemId) => {
+      showToast(mediaType === "video"
+        ? "Listo: video HQ entregado. El comprador recibirá un email."
+        : "Listo: foto HQ entregada. El comprador recibirá un email.");
+      setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === mediaType && p.id === itemId)));
+      setPendingDeliveryCount((prev) => Math.max(0, prev - 1));
+    };
 
-      setHqUploads((prev) => ({ ...prev, [key]: { progress: 0, phase: "uploading" } }));
+    const setHqProgress = (key, progress, phase) => {
+      setHqUploads((prev) => ({ ...prev, [key]: { progress, phase } }));
+    };
 
-      const clearUpload = () => {
-        setHqUploads((prev) => {
-          const next = { ...prev };
-          delete next[key];
-          return next;
+    const clearHqUpload = (key) => {
+      setHqUploads((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    };
+
+    // Videos HQ: directo a Supabase Storage (el backend en Render no aguanta
+    // archivos grandes en memoria), luego solo se confirma con metadatos.
+    const uploadVideoHq = async (itemId, file) => {
+      const key = `video-${itemId}`;
+      const ext = videoExtForFile(file);
+      const storagePath = `${profile.id}/${itemId}/hq_${Date.now()}.${ext}`;
+      setHqProgress(key, 0, "uploading");
+      try {
+        await uploadToSupabaseStorage({
+          bucket: "videos-hq",
+          path: storagePath,
+          file,
+          accessToken: session.access_token,
+          onProgress: (pct) => setHqProgress(key, pct, pct >= 100 ? "processing" : "uploading"),
         });
-      };
+
+        setHqProgress(key, 100, "processing");
+        const { res, data } = await apiJson(`/api/videos/${itemId}/confirm-hq`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ storage_path: storagePath }),
+        }, { wake: true });
+
+        clearHqUpload(key);
+        if (res.ok) {
+          finishHqDelivery("video", itemId);
+        } else {
+          removeFromSupabaseStorage("videos-hq", storagePath);
+          showToast(data?.error || "No se pudo entregar el video.");
+        }
+      } catch (err) {
+        clearHqUpload(key);
+        showToast(err?.message || "Error al subir el video HQ. Intentá de nuevo.");
+      }
+    };
+
+    // Fotos HQ (≤30MB): siguen pasando por el backend, que aplica su flujo actual.
+    const uploadPhotoHq = (itemId, file) => {
+      const key = `photo-${itemId}`;
+      const formData = new FormData();
+      formData.append("photo_hq", file);
+      setHqProgress(key, 0, "uploading");
 
       const xhr = new XMLHttpRequest();
-      xhr.open("PUT", apiUrl(endpoint));
+      xhr.open("PUT", apiUrl(`/api/photos/${itemId}/upload-hq`));
       xhr.setRequestHeader("Authorization", `Bearer ${session.access_token}`);
       xhr.timeout = 30 * 60 * 1000;
 
       xhr.upload.onprogress = (e) => {
         if (!e.lengthComputable) return;
         const pct = Math.min(100, Math.round((e.loaded / e.total) * 100));
-        setHqUploads((prev) => ({
-          ...prev,
-          [key]: { progress: pct, phase: pct >= 100 ? "processing" : "uploading" },
-        }));
+        setHqProgress(key, pct, pct >= 100 ? "processing" : "uploading");
       };
-
       xhr.onload = () => {
-        clearUpload();
+        clearHqUpload(key);
         if (xhr.status >= 200 && xhr.status < 300) {
-          showToast(mediaType === "video"
-            ? "Listo: video HQ entregado. El comprador recibirá un email."
-            : "Listo: foto HQ entregada. El comprador recibirá un email.");
-          setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === mediaType && p.id === itemId)));
-          setPendingDeliveryCount((prev) => Math.max(0, prev - 1));
+          finishHqDelivery("photo", itemId);
         } else {
-          let msg = mediaType === "video" ? "No se pudo entregar el video." : "No se pudo entregar la foto.";
+          let msg = "No se pudo entregar la foto.";
           try {
             const data = JSON.parse(xhr.responseText);
             if (data?.error) msg = data.error;
@@ -5713,15 +5793,20 @@ const renderPhotographerProfile = () => {
         }
       };
       xhr.onerror = () => {
-        clearUpload();
+        clearHqUpload(key);
         showToast("Error de conexión al subir el archivo HQ. Intentá de nuevo.");
       };
       xhr.ontimeout = () => {
-        clearUpload();
+        clearHqUpload(key);
         showToast("La subida tardó demasiado y se canceló. Intentá de nuevo.");
       };
 
       xhr.send(formData);
+    };
+
+    const uploadHqFile = (mediaType, itemId, file) => {
+      if (mediaType === "video") uploadVideoHq(itemId, file);
+      else uploadPhotoHq(itemId, file);
     };
 
     const handleDeliverHQ = (mediaType, itemId) => {
