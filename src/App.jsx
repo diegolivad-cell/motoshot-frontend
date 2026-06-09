@@ -420,6 +420,162 @@ const CAN_HOVER_VIDEO_PREVIEW =
   typeof window !== "undefined" &&
   window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 
+function VideoSearchCard({ video, onBuy }) {
+  const canvasRef = useRef(null);
+  const videoRef = useRef(null);
+  const [thumbReady, setThumbReady] = useState(false);
+  const [isHovering, setIsHovering] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    if (!video.preview_url) return undefined;
+    let cancelled = false;
+    const memVideo = document.createElement("video");
+    memVideo.crossOrigin = "anonymous";
+    memVideo.muted = true;
+    memVideo.playsInline = true;
+    memVideo.preload = "auto";
+
+    const onLoadedData = () => {
+      memVideo.currentTime = 1;
+    };
+
+    const onSeeked = () => {
+      if (cancelled) return;
+      const canvas = canvasRef.current;
+      if (!canvas || !memVideo.videoWidth) return;
+      canvas.width = memVideo.videoWidth;
+      canvas.height = memVideo.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (ctx) ctx.drawImage(memVideo, 0, 0);
+      setThumbReady(true);
+    };
+
+    memVideo.addEventListener("loadeddata", onLoadedData);
+    memVideo.addEventListener("seeked", onSeeked);
+    memVideo.src = video.preview_url;
+
+    return () => {
+      cancelled = true;
+      memVideo.removeEventListener("loadeddata", onLoadedData);
+      memVideo.removeEventListener("seeked", onSeeked);
+      memVideo.removeAttribute("src");
+      memVideo.load();
+    };
+  }, [video.id, video.preview_url]);
+
+  const handleMouseEnter = () => {
+    if (!CAN_HOVER_VIDEO_PREVIEW) return;
+    setIsHovering(true);
+    const el = videoRef.current;
+    if (el) el.play().catch(() => {});
+  };
+
+  const handleMouseLeave = () => {
+    if (!CAN_HOVER_VIDEO_PREVIEW) return;
+    setIsHovering(false);
+    setProgress(0);
+    const el = videoRef.current;
+    if (el) {
+      el.pause();
+      el.currentTime = 0;
+    }
+  };
+
+  const handleTimeUpdate = () => {
+    const el = videoRef.current;
+    if (!el || !el.duration) return;
+    setProgress(el.currentTime / el.duration);
+  };
+
+  const durationLabel = formatVideoDuration(video.duration_seconds);
+
+  return (
+    <div style={{ background: "var(--surface)", borderRadius: 12, overflow: "hidden", cursor: "pointer", border: "1px solid var(--border)" }}>
+      <div
+        style={{ position: "relative", paddingBottom: "56.25%", background: "#0a0a0a" }}
+        onContextMenu={(e) => e.preventDefault()}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+        <canvas
+          ref={canvasRef}
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            display: isHovering ? "none" : thumbReady ? "block" : "none",
+            zIndex: 2,
+          }}
+        />
+        <video
+          ref={videoRef}
+          src={video.preview_url}
+          muted
+          playsInline
+          preload="auto"
+          controls={false}
+          controlsList="nodownload noplaybackrate nofullscreen noremoteplayback"
+          disablePictureInPicture
+          disableRemotePlayback
+          onTimeUpdate={handleTimeUpdate}
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+            display: isHovering ? "block" : "none",
+            zIndex: 3,
+          }}
+        />
+        {durationLabel && (
+          <div style={{
+            position: "absolute",
+            bottom: 8,
+            right: 8,
+            zIndex: 4,
+            background: "rgba(0,0,0,0.82)",
+            color: "#fff",
+            padding: "2px 6px",
+            borderRadius: 4,
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+          >
+            {durationLabel}
+          </div>
+        )}
+        {isHovering && (
+          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 3, zIndex: 5, background: "rgba(255,255,255,0.2)" }}>
+            <div style={{ width: `${progress * 100}%`, height: "100%", background: "#FF6B00", transition: "width 0.08s linear" }} />
+          </div>
+        )}
+      </div>
+      <div style={{ padding: 12 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+          {video.moto_brand && (
+            <span className="tag active" style={{ fontSize: 11 }}>
+              {video.moto_brand} {video.moto_model}
+            </span>
+          )}
+          {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
+          {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
+          {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
+          <AppButton className="card-buy" onClick={onBuy}>Comprar</AppButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
   const activeIndex = Math.max(0, items.findIndex(i => i.id === activeTab));
   const activeItem = items[activeIndex] || items[0];
@@ -5734,7 +5890,9 @@ const renderPhotographerProfile = () => {
             <div>Cargando videos...</div>
           </div>
         ) : videos.length > 0 ? (
-          renderVideoCards(videos)
+          videos.map((video) => (
+            <VideoSearchCard key={video.id} video={video} onBuy={() => handleBuyVideo(video)} />
+          ))
         ) : (
           <div className="empty" style={{ gridColumn: "1 / -1" }}>
             <EmptyIcon name="video" />
