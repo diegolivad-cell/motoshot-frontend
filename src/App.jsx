@@ -881,6 +881,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [pendingDeliveries, setPendingDeliveries] = useState([]);
   const [pendingDeliveriesLoading, setPendingDeliveriesLoading] = useState(false);
   const [pendingDeliveryCount, setPendingDeliveryCount] = useState(0);
+  const [hqUploads, setHqUploads] = useState({});
   const [videoMediaReady, setVideoMediaReady] = useState({});
   const [videoQueue, setVideoQueue] = useState([]);
   const [videoThumbnailFile, setVideoThumbnailFile] = useState(null);
@@ -5662,70 +5663,75 @@ const renderPhotographerProfile = () => {
   );
 
   const renderPendingDeliveries = () => {
-    const handleDeliverPhotoHQ = (photoId) => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = "image/*";
-      input.onchange = async (e) => {
-        const file = e.target.files[0];
-        if (!file || !session?.access_token) return;
-        setGlobalLoading({ active: true, message: "Subiendo foto HQ..." });
-        const formData = new FormData();
-        formData.append("photo_hq", file);
-        try {
-          const res = await fetch(apiUrl(`/api/photos/${photoId}/upload-hq`), {
-            method: "PUT",
-            headers: { Authorization: `Bearer ${session.access_token}` },
-            body: formData,
-          });
-          if (res.ok) {
-            showToast("Listo: foto HQ entregada. El comprador recibirá un email.");
-            setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === "photo" && p.id === photoId)));
-            fetchPendingDeliveryCount();
-          } else {
-            const data = await parseApiJson(res);
-            showToast(data.error || "No se pudo entregar la foto.");
-          }
-        } catch (err) {
-          console.error(err);
-          showToast("Error al subir la foto HQ.");
-        } finally {
-          setGlobalLoading({ active: false, message: "" });
+    const uploadHqFile = (mediaType, itemId, file) => {
+      const key = `${mediaType}-${itemId}`;
+      const endpoint = mediaType === "video"
+        ? `/api/videos/${itemId}/upload-hq`
+        : `/api/photos/${itemId}/upload-hq`;
+      const formData = new FormData();
+      formData.append(mediaType === "video" ? "video_hq" : "photo_hq", file);
+
+      setHqUploads((prev) => ({ ...prev, [key]: { progress: 0, phase: "uploading" } }));
+
+      const clearUpload = () => {
+        setHqUploads((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      };
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", apiUrl(endpoint));
+      xhr.setRequestHeader("Authorization", `Bearer ${session.access_token}`);
+      xhr.timeout = 30 * 60 * 1000;
+
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        const pct = Math.min(100, Math.round((e.loaded / e.total) * 100));
+        setHqUploads((prev) => ({
+          ...prev,
+          [key]: { progress: pct, phase: pct >= 100 ? "processing" : "uploading" },
+        }));
+      };
+
+      xhr.onload = () => {
+        clearUpload();
+        if (xhr.status >= 200 && xhr.status < 300) {
+          showToast(mediaType === "video"
+            ? "Listo: video HQ entregado. El comprador recibirá un email."
+            : "Listo: foto HQ entregada. El comprador recibirá un email.");
+          setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === mediaType && p.id === itemId)));
+          setPendingDeliveryCount((prev) => Math.max(0, prev - 1));
+        } else {
+          let msg = mediaType === "video" ? "No se pudo entregar el video." : "No se pudo entregar la foto.";
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (data?.error) msg = data.error;
+          } catch { /* respuesta no JSON (ej. HTML de error del proxy) */ }
+          showToast(msg);
         }
       };
-      input.click();
+      xhr.onerror = () => {
+        clearUpload();
+        showToast("Error de conexión al subir el archivo HQ. Intentá de nuevo.");
+      };
+      xhr.ontimeout = () => {
+        clearUpload();
+        showToast("La subida tardó demasiado y se canceló. Intentá de nuevo.");
+      };
+
+      xhr.send(formData);
     };
 
-    const handleDeliverVideoHQ = (videoId) => {
+    const handleDeliverHQ = (mediaType, itemId) => {
       const input = document.createElement("input");
       input.type = "file";
-      input.accept = "video/mp4,video/quicktime,video/avi";
-      input.onchange = async (e) => {
+      input.accept = mediaType === "video" ? "video/mp4,video/quicktime,video/avi" : "image/*";
+      input.onchange = (e) => {
         const file = e.target.files[0];
         if (!file || !session?.access_token) return;
-        setGlobalLoading({ active: true, message: "Subiendo video HQ..." });
-        const formData = new FormData();
-        formData.append("video_hq", file);
-        try {
-          const res = await fetch(apiUrl(`/api/videos/${videoId}/upload-hq`), {
-            method: "PUT",
-            headers: { Authorization: `Bearer ${session.access_token}` },
-            body: formData,
-          });
-          if (res.ok) {
-            showToast("Listo: video HQ entregado. El comprador recibirá un email.");
-            setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === "video" && p.id === videoId)));
-            fetchPendingDeliveryCount();
-          } else {
-            const data = await parseApiJson(res);
-            showToast(data.error || "No se pudo entregar el video.");
-          }
-        } catch (err) {
-          console.error(err);
-          showToast("Error al subir el video HQ.");
-        } finally {
-          setGlobalLoading({ active: false, message: "" });
-        }
+        uploadHqFile(mediaType, itemId, file);
       };
       input.click();
     };
@@ -5773,6 +5779,7 @@ const renderPhotographerProfile = () => {
               const title = isVideo
                 ? (item.label || [item.moto_brand, item.moto_model].filter(Boolean).join(" ") || item.sector || "Video")
                 : (item.location || "Sin ubicación");
+              const upload = hqUploads[`${item.media_type}-${item.id}`];
               return (
                 <div key={`${item.media_type}-${item.id}`} className="pending-delivery-card">
                   <div className="pending-delivery-top">
@@ -5792,13 +5799,29 @@ const renderPhotographerProfile = () => {
                       <div className="pending-delivery-time">Vendido {getTimeSince(item.completed_at)}</div>
                     </div>
                   </div>
-                  <AppButton
-                    type="button"
-                    className="pending-delivery-btn"
-                    onClick={() => (isVideo ? handleDeliverVideoHQ(item.id) : handleDeliverPhotoHQ(item.id))}
-                  >
-                    <AppIcon name="upload" size={14} /> Entregar HQ
-                  </AppButton>
+                  {upload ? (
+                    <div className="pending-delivery-progress">
+                      <div className="pending-delivery-progress-track">
+                        <div
+                          className={`pending-delivery-progress-fill${upload.phase === "processing" ? " is-processing" : ""}`}
+                          style={{ width: `${upload.progress}%` }}
+                        />
+                      </div>
+                      <div className="pending-delivery-progress-label">
+                        {upload.phase === "processing"
+                          ? "Procesando en el servidor..."
+                          : `Subiendo HQ... ${upload.progress}%`}
+                      </div>
+                    </div>
+                  ) : (
+                    <AppButton
+                      type="button"
+                      className="pending-delivery-btn"
+                      onClick={() => handleDeliverHQ(item.media_type, item.id)}
+                    >
+                      <AppIcon name="upload" size={14} /> Entregar HQ
+                    </AppButton>
+                  )}
                 </div>
               );
             })}
@@ -8392,6 +8415,41 @@ const renderVendorRequest = () => {
     }
     .pending-delivery-btn:hover:not(:disabled) { background: #e55e00; }
     .pending-delivery-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .pending-delivery-progress {
+      width: 100%;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .pending-delivery-progress-track {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 106, 0, 0.25);
+      overflow: hidden;
+    }
+    .pending-delivery-progress-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--orange), #ff8c33);
+      transition: width 0.25s ease;
+    }
+    .pending-delivery-progress-fill.is-processing {
+      animation: hq-progress-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes hq-progress-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.55; }
+    }
+    .pending-delivery-progress-label {
+      text-align: center;
+      font-size: 13px;
+      color: var(--orange);
+      font-family: 'Bebas Neue', sans-serif;
+      letter-spacing: 1px;
+    }
     .video-queue {
       display: flex;
       flex-direction: column;
