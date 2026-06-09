@@ -2563,6 +2563,15 @@ useEffect(() => {
       if (!res.ok) throw new Error(data.error || "Error al buscar videos");
       const list = Array.isArray(data) ? data : [];
       setVideos(list);
+      if (list.some((v) => !v.thumbnail_url)) {
+        window.setTimeout(async () => {
+          try {
+            const retryRes = await fetch(url);
+            const retryData = await retryRes.json();
+            if (retryRes.ok && Array.isArray(retryData)) setVideos(retryData);
+          } catch (_) {}
+        }, 10000);
+      }
       if (session?.access_token && profile?.id) {
         list
           .filter((v) => !v.thumbnail_url && v.photographer_id === profile.id)
@@ -2690,31 +2699,22 @@ useEffect(() => {
     setVideoPreviewMuted((prev) => !prev);
   };
 
-  const captureVideoPoster = useCallback((videoEl, videoId) => {
-    if (!videoEl || videoPosterCache[videoId] || videoEl.dataset.posterCaptured === "1") return;
-    const w = videoEl.videoWidth;
-    const h = videoEl.videoHeight;
-    if (!w || !h) return;
-    try {
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      canvas.getContext("2d").drawImage(videoEl, 0, 0, w, h);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-      videoEl.dataset.posterCaptured = "1";
-      setVideoPosterCache((prev) => (prev[videoId] ? prev : { ...prev, [videoId]: dataUrl }));
-    } catch (err) {
-      console.warn("captureVideoPoster:", err);
-    }
-  }, [videoPosterCache]);
+  const pauseVideoOnFirstFrame = useCallback((videoEl) => {
+    if (!videoEl || videoEl.classList.contains("is-playing")) return;
+    const seekTo = Math.min(0.5, Math.max(0.05, (videoEl.duration || 1) * 0.05));
+    const onSeeked = () => {
+      videoEl.removeEventListener("seeked", onSeeked);
+      if (!videoEl.classList.contains("is-playing")) videoEl.pause();
+    };
+    videoEl.addEventListener("seeked", onSeeked);
+    videoEl.currentTime = seekTo;
+  }, []);
 
   const renderVideoCards = (videoList) => videoList.map((video) => {
     const durationLabel = formatVideoDuration(video.duration_seconds || videoDurationCache[video.id]);
     const isPreviewing = Boolean(videoPreviewActive[video.id]);
     const previewProgress = videoPreviewProgress[video.id] || 0;
     const posterSrc = video.thumbnail_url || videoPosterCache[video.id] || null;
-    const showPosterImage = Boolean(posterSrc) && !isPreviewing;
-    const showIdleOverlay = !isPreviewing && !posterSrc;
     const previewLimit = video.duration_seconds || videoDurationCache[video.id];
 
     return (
@@ -2724,35 +2724,27 @@ useEffect(() => {
       >
         <div
           className="video-card-media"
-          style={{ position: "relative", paddingBottom: "56.25%", background: "#0a0a0a" }}
+          style={{ position: "relative", paddingBottom: "56.25%", background: "#111" }}
           onContextMenu={(e) => e.preventDefault()}
           {...(CAN_HOVER_VIDEO_PREVIEW ? {
             onMouseEnter: () => startVideoPreview(video.id, previewLimit),
             onMouseLeave: () => stopVideoPreview(video.id),
           } : {
-            onClick: (e) => {
+            onTouchEnd: (e) => {
+              e.preventDefault();
               e.stopPropagation();
               toggleVideoPreview(video.id, previewLimit);
             },
           })}
         >
-          {showPosterImage && (
-            <img
-              src={posterSrc}
-              alt=""
-              decoding="async"
-              className="video-card-poster"
-              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 4 }}
-            />
-          )}
-          {showIdleOverlay && <WatermarkedVideoOverlay photographer={video.photographer?.name} />}
           <video
             ref={(el) => { videoRefs.current[video.id] = el; }}
             className={`video-card-preview${isPreviewing ? " is-playing" : ""}`}
             src={video.preview_url}
+            poster={posterSrc || undefined}
             muted={videoPreviewMuted}
             playsInline
-            preload="metadata"
+            preload="auto"
             controls={false}
             controlsList="nodownload noplaybackrate nofullscreen noremoteplayback"
             disablePictureInPicture
@@ -2763,20 +2755,29 @@ useEffect(() => {
               if (dur > 0) {
                 setVideoDurationCache((prev) => (prev[video.id] === dur ? prev : { ...prev, [video.id]: dur }));
               }
-            }}
-            onLoadedData={(e) => {
-              const el = e.currentTarget;
-              if (video.thumbnail_url || videoPosterCache[video.id] || el.dataset.posterCaptured === "1") return;
-              const seekTo = Math.min(1, Math.max(0.1, (el.duration || 1) * 0.1));
-              const onSeeked = () => {
-                el.removeEventListener("seeked", onSeeked);
-                captureVideoPoster(el, video.id);
-                el.currentTime = 0;
-              };
-              el.addEventListener("seeked", onSeeked);
-              el.currentTime = seekTo;
+              if (!posterSrc && !el.classList.contains("is-playing")) {
+                pauseVideoOnFirstFrame(el);
+              }
             }}
           />
+          {posterSrc && !isPreviewing && (
+            <img
+              src={posterSrc}
+              alt=""
+              decoding="async"
+              className="video-card-poster-cover"
+            />
+          )}
+          {!isPreviewing && (
+            <div className="video-card-watermark">
+              <WatermarkedVideoOverlay photographer={video.photographer?.name} />
+            </div>
+          )}
+          {!CAN_HOVER_VIDEO_PREVIEW && !isPreviewing && (
+            <div className="video-card-tap-hint" aria-hidden="true">
+              <span className="video-card-play-icon" />
+            </div>
+          )}
           <button
             type="button"
             aria-label={videoPreviewMuted ? "Activar sonido del preview" : "Silenciar preview"}
@@ -8207,19 +8208,35 @@ const renderVendorRequest = () => {
     .video-card-media { overflow: hidden; }
     .video-card-preview {
       position: absolute; inset: 0; width: 100%; height: 100%;
-      object-fit: cover; background: #0a0a0a;
-      opacity: 0; visibility: hidden; pointer-events: none; z-index: 2;
-      transition: opacity 0.2s ease, visibility 0.2s ease;
+      object-fit: cover; background: #111; z-index: 2;
       -webkit-tap-highlight-color: transparent;
     }
-    .video-card-preview.is-playing {
-      opacity: 1; visibility: visible; pointer-events: auto; z-index: 6;
-    }
+    .video-card-preview:not(.is-playing) { pointer-events: none; }
+    .video-card-preview.is-playing { z-index: 8; }
     .video-card-preview::-webkit-media-controls { display: none !important; }
     .video-card-preview::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
     .video-card-preview::-webkit-media-controls-overlay-play-button { display: none !important; }
     .video-card-preview::-webkit-media-controls-panel { display: none !important; }
-    .video-card-poster { pointer-events: none; }
+    .video-card-poster-cover {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; z-index: 4; pointer-events: none;
+    }
+    .video-card-watermark {
+      position: absolute; inset: 0; z-index: 5; pointer-events: none;
+    }
+    .video-card-tap-hint {
+      position: absolute; inset: 0; z-index: 6; pointer-events: none;
+      display: grid; place-items: center;
+      background: radial-gradient(circle, rgba(0,0,0,0.28) 0%, rgba(0,0,0,0.04) 55%, transparent 70%);
+    }
+    .video-card-play-icon {
+      width: 0; height: 0;
+      border-top: 14px solid transparent;
+      border-bottom: 14px solid transparent;
+      border-left: 22px solid rgba(255,255,255,0.9);
+      margin-left: 6px;
+      filter: drop-shadow(0 2px 8px rgba(0,0,0,0.45));
+    }
     .search-bar { display: flex; gap: 10px; margin: 20px; }
     .search-input { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 12px 16px;
       border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color 0.2s; }
