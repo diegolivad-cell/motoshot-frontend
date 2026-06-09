@@ -5704,7 +5704,91 @@ const renderPhotographerProfile = () => {
     );
   };
 
-  const renderVideoSearch = () => (
+  const renderVideoSearch = () => {
+    const SearchVideoCard = ({ video }) => {
+      const [playing, setPlaying] = useState(false);
+      const [progress, setProgress] = useState(0);
+      const videoRef = useRef(null);
+
+      const togglePlay = () => {
+        const el = videoRef.current;
+        if (!el) return;
+        if (!playing) {
+          el.play().catch(() => {});
+          setPlaying(true);
+        } else {
+          el.pause();
+          el.currentTime = 0;
+          setPlaying(false);
+          setProgress(0);
+        }
+      };
+
+      return (
+        <div style={{ position: "relative", background: "var(--surface)", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
+          <div style={{ position: "relative" }}>
+            <video
+              ref={videoRef}
+              src={video.preview_url}
+              muted
+              loop
+              playsInline
+              preload="metadata"
+              style={{ width: "100%", height: 180, objectFit: "cover", display: "block" }}
+              onTimeUpdate={(e) => {
+                const el = e.currentTarget;
+                if (!el.duration) return;
+                setProgress(el.currentTime / el.duration);
+              }}
+            />
+            <button
+              type="button"
+              aria-label={playing ? "Pausar video" : "Reproducir video"}
+              onClick={togglePlay}
+              style={{
+                position: "absolute",
+                zIndex: 2,
+                border: "none",
+                cursor: "pointer",
+                color: "#fff",
+                background: "rgba(0,0,0,0.55)",
+                display: "grid",
+                placeItems: "center",
+                padding: 0,
+                ...(playing
+                  ? { top: 8, right: 8, width: 32, height: 32, borderRadius: 6, fontSize: 14 }
+                  : { top: "50%", left: "50%", transform: "translate(-50%, -50%)", width: 56, height: 56, borderRadius: "50%", fontSize: 24 }),
+              }}
+            >
+              {playing ? "■" : "▶"}
+            </button>
+          </div>
+          {playing && (
+            <div style={{ height: 3, background: "#333", width: "100%" }}>
+              <div style={{ height: 3, background: "#FF6B00", width: `${progress * 100}%` }} />
+            </div>
+          )}
+          <div style={{ padding: 12 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+              {video.moto_brand && (
+                <span className="tag active" style={{ fontSize: 11 }}>
+                  {video.moto_brand} {video.moto_model}
+                </span>
+              )}
+              {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
+              {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
+              {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
+              <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    return (
     <div style={{ padding: "20px", paddingBottom: 100 }}>
       <SectionTitleIcon icon="video">BUSCAR VIDEOS</SectionTitleIcon>
       <div className="section-sub" style={{ marginBottom: 20 }}>
@@ -5734,61 +5818,7 @@ const renderPhotographerProfile = () => {
             <div>Cargando videos...</div>
           </div>
         ) : videos.length > 0 ? (
-          videos.map((video) => {
-            const searchProgress = videoPreviewProgress[video.id] || 0;
-            return (
-              <div
-                key={video.id}
-                style={{ position: "relative", background: "var(--surface)", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}
-                onMouseEnter={() => videoRefs.current[video.id]?.play().catch(() => {})}
-                onMouseLeave={() => {
-                  const el = videoRefs.current[video.id];
-                  if (el) {
-                    el.pause();
-                    el.currentTime = 0;
-                  }
-                  setVideoPreviewProgress((prev) => ({ ...prev, [video.id]: 0 }));
-                }}
-              >
-                <video
-                  ref={(el) => { videoRefs.current[video.id] = el; }}
-                  src={video.preview_url}
-                  muted
-                  loop
-                  playsInline
-                  preload="metadata"
-                  style={{ width: "100%", height: 180, objectFit: "cover", display: "block" }}
-                  onTimeUpdate={(e) => {
-                    const el = e.currentTarget;
-                    if (!el.duration) return;
-                    setVideoPreviewProgress((prev) => ({
-                      ...prev,
-                      [video.id]: el.currentTime / el.duration,
-                    }));
-                  }}
-                />
-                <div style={{ height: 3, background: "#333", width: "100%" }}>
-                  <div style={{ height: 3, background: "#FF6B00", width: `${searchProgress * 100}%` }} />
-                </div>
-                <div style={{ padding: 12 }}>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-                    {video.moto_brand && (
-                      <span className="tag active" style={{ fontSize: 11 }}>
-                        {video.moto_brand} {video.moto_model}
-                      </span>
-                    )}
-                    {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
-                    {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
-                    {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-                    <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
-                  </div>
-                </div>
-              </div>
-            );
-          })
+          videos.map((video) => <SearchVideoCard key={video.id} video={video} />)
         ) : (
           <div className="empty" style={{ gridColumn: "1 / -1" }}>
             <EmptyIcon name="video" />
@@ -5797,7 +5827,8 @@ const renderPhotographerProfile = () => {
         )}
       </div>
     </div>
-  );
+    );
+  };
 
   const renderPendingDeliveries = () => {
     const finishHqDelivery = (mediaType, itemId) => {
