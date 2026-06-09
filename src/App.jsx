@@ -2283,7 +2283,7 @@ useEffect(() => {
     const tabByView = {
       [VIEWS.PHOTOGRAPHERS]: "feed",
       [VIEWS.UPLOAD]: "upload",
-      [VIEWS.UPLOAD_VIDEO]: "uploadVideo",
+      [VIEWS.UPLOAD_VIDEO]: "upload",
       [VIEWS.VIDEO_SEARCH]: "videos",
       [VIEWS.PENDING_DELIVERIES]: "deliveries",
       [VIEWS.DASHBOARD]: "dash",
@@ -4737,24 +4737,7 @@ const renderPhotographerProfile = () => {
   );
 
 
-  const renderVideoUpload = () => {
-    if (!user) {
-      return (
-        <div className="upload-view">
-          <SectionTitleIcon icon="video">SUBIR VIDEO</SectionTitleIcon>
-          <div className="empty"><EmptyIcon name="lock" /><div>Iniciá sesión para subir videos.</div></div>
-        </div>
-      );
-    }
-    if (!profile || profile.verification_status !== "approved") {
-      return (
-        <div className="upload-view">
-          <SectionTitleIcon icon="video">SUBIR VIDEO</SectionTitleIcon>
-          <div className="empty"><EmptyIcon name="clipboard" /><div>Necesitás un perfil de fotógrafo aprobado.</div></div>
-        </div>
-      );
-    }
-
+  const renderUpload = () => {
     const handleVideoFileSelect = async (e) => {
       const file = e.target.files[0];
       if (!file) return;
@@ -4811,162 +4794,345 @@ const renderPhotographerProfile = () => {
       }
     };
 
-    return (
-      <div className="upload-view">
-        <SectionTitleIcon icon="video">SUBIR VIDEO</SectionTitleIcon>
-        <div className="section-sub">MP4, MOV o AVI — máx 500MB. La IA detecta marca y colores del frame 5s.</div>
-
-        <div
-          className={`dropzone${videoFile ? " active" : ""}`}
-          style={{ marginBottom: 20 }}
-          onClick={() => document.getElementById("videoInput").click()}
-        >
-          <input
-            id="videoInput"
-            type="file"
-            accept="video/mp4,video/quicktime,video/avi"
-            style={{ display: "none" }}
-            onChange={handleVideoFileSelect}
-          />
-          <div className="dropzone-icon" style={{ display: "grid", placeItems: "center" }}>
-            <AppIcon name="video" size={36} color="var(--muted)" />
-          </div>
-          <div className="dropzone-text">
-            {videoFile ? (
-              <span style={{ color: "var(--orange)", fontWeight: 700 }}>{videoFile.name}</span>
-            ) : (
-              <><span style={{ color: "var(--orange)" }}>Tocá para seleccionar</span> un video</>
-            )}
-          </div>
+    if (!user) {
+      return (
+        <div className="upload-view upload-split-view">
+          <div className="empty"><EmptyIcon name="lock" /><div>Iniciá sesión para subir fotos y videos.</div></div>
         </div>
-
-        <div className="form-group" style={{ marginBottom: 20 }}>
-          <label className="form-label">Miniatura (opcional)</label>
-          <div className="section-sub" style={{ marginBottom: 10 }}>
-            Subí una foto del rider — se muestra antes de reproducir el preview.
-          </div>
-          <div
-            className={`dropzone${videoThumbnailFile ? " active" : ""}`}
-            style={{ padding: "20px 16px" }}
-            onClick={() => document.getElementById("videoThumbInput").click()}
-          >
-            <input
-              id="videoThumbInput"
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              style={{ display: "none" }}
-              onChange={(e) => setVideoThumbnailFile(e.target.files?.[0] || null)}
-            />
-            {videoThumbnailFile ? (
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <img
-                  src={URL.createObjectURL(videoThumbnailFile)}
-                  alt=""
-                  style={{ width: 96, height: 54, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)" }}
-                />
-                <div>
-                  <div style={{ color: "var(--orange)", fontWeight: 700, fontSize: 13 }}>{videoThumbnailFile.name}</div>
-                  <AppButton
-                    className="nav-btn"
-                    style={{ marginTop: 8, fontSize: 11 }}
-                    onClick={(ev) => { ev.stopPropagation(); setVideoThumbnailFile(null); }}
-                  >
-                    Quitar miniatura
-                  </AppButton>
-                </div>
-              </div>
-            ) : (
-              <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-                <IconText icon="image" size={14}>Tocá para elegir imagen de portada</IconText>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {videoDurationSeconds ? (
-          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16 }}>
-            Duración detectada: <strong style={{ color: "var(--text)" }}>{formatVideoDuration(videoDurationSeconds)}</strong>
-          </div>
-        ) : null}
-
-        {analyzingMedia && (
-          <div className="empty" style={{ padding: "24px 0" }}>
-            <LoaderIcon size={36} />
-            <div>Analizando video con IA...</div>
-            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>Detectando marca, modelo y colores</div>
-          </div>
-        )}
-
-        {autoTags && !analyzingMedia && (
-          <div style={{ background: "var(--surface)", borderRadius: 12, padding: 16, marginBottom: 20, border: "1px solid var(--border)" }}>
-            <div style={{ color: "var(--orange)", fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
-              <AppIcon name="search" size={16} color="var(--orange)" />
-              Tags detectados (podés editar)
+      );
+    }
+    if (!profile) {
+      return (
+        <div className="upload-view upload-split-view">
+          <div className="empty">
+            <EmptyIcon name="clipboard" />
+            <div>
+              Necesitás un perfil de fotógrafo aprobado.{" "}
+              <AppButton className="nav-btn primary" style={{ marginTop: 12 }} onClick={() => setView(VIEWS.VENDOR_REQUEST)}>
+                Solicitar perfil
+              </AppButton>
             </div>
-            {[
-              { label: "Marca", key: "moto_brand" },
-              { label: "Modelo", key: "moto_model" },
-              { label: "Color moto", key: "moto_color" },
-              { label: "Color casco", key: "helmet_color" },
-              { label: "Color traje", key: "suit_color" },
-              { label: "Dorsal", key: "dorsal" },
-            ].map(({ label, key }) => (
-              <div key={key} className="form-group" style={{ marginBottom: 10 }}>
-                <label className="form-label">{label}</label>
+          </div>
+        </div>
+      );
+    }
+    if (profile.verification_status !== "approved") {
+      return (
+        <div className="upload-view upload-split-view">
+          <div className="empty">
+            <LoaderIcon size={44} />
+            <div>Tu perfil está <strong style={{ color: "var(--orange)" }}>{profile.verification_status}</strong>. Esperá la aprobación del administrador.</div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="upload-view upload-split-view">
+        <div className="upload-split-grid">
+          {/* Izquierda — video */}
+          <div className="upload-split-pane upload-split-pane-video">
+            <SectionTitleIcon icon="video">SUBIR VIDEO</SectionTitleIcon>
+            <div className="section-sub" style={{ marginBottom: 20 }}>MP4, MOV o AVI — máx 500MB. La IA detecta marca y colores del frame 5s.</div>
+
+            <div
+              className={`dropzone${videoFile ? " active" : ""}`}
+              style={{ marginBottom: 20 }}
+              onClick={() => document.getElementById("videoInput").click()}
+            >
+              <input
+                id="videoInput"
+                type="file"
+                accept="video/mp4,video/quicktime,video/avi"
+                style={{ display: "none" }}
+                onChange={handleVideoFileSelect}
+              />
+              <div className="dropzone-icon" style={{ display: "grid", placeItems: "center" }}>
+                <AppIcon name="video" size={36} color="var(--muted)" />
+              </div>
+              <div className="dropzone-text">
+                {videoFile ? (
+                  <span style={{ color: "var(--orange)", fontWeight: 700 }}>{videoFile.name}</span>
+                ) : (
+                  <><span style={{ color: "var(--orange)" }}>Tocá para seleccionar</span> un video</>
+                )}
+              </div>
+            </div>
+
+            <div className="form-group" style={{ marginBottom: 20 }}>
+              <label className="form-label">Miniatura (opcional)</label>
+              <div className="section-sub" style={{ marginBottom: 10 }}>
+                Subí una foto del rider — se muestra antes de reproducir el preview.
+              </div>
+              <div
+                className={`dropzone${videoThumbnailFile ? " active" : ""}`}
+                style={{ padding: "20px 16px" }}
+                onClick={() => document.getElementById("videoThumbInput").click()}
+              >
+                <input
+                  id="videoThumbInput"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  style={{ display: "none" }}
+                  onChange={(e) => setVideoThumbnailFile(e.target.files?.[0] || null)}
+                />
+                {videoThumbnailFile ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <img
+                      src={URL.createObjectURL(videoThumbnailFile)}
+                      alt=""
+                      style={{ width: 96, height: 54, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)" }}
+                    />
+                    <div>
+                      <div style={{ color: "var(--orange)", fontWeight: 700, fontSize: 13 }}>{videoThumbnailFile.name}</div>
+                      <AppButton
+                        className="nav-btn"
+                        style={{ marginTop: 8, fontSize: 11 }}
+                        onClick={(ev) => { ev.stopPropagation(); setVideoThumbnailFile(null); }}
+                      >
+                        Quitar miniatura
+                      </AppButton>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                    <IconText icon="image" size={14}>Tocá para elegir imagen de portada</IconText>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {videoDurationSeconds ? (
+              <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16 }}>
+                Duración detectada: <strong style={{ color: "var(--text)" }}>{formatVideoDuration(videoDurationSeconds)}</strong>
+              </div>
+            ) : null}
+
+            {analyzingMedia && (
+              <div className="empty" style={{ padding: "24px 0" }}>
+                <LoaderIcon size={36} />
+                <div>Analizando video con IA...</div>
+                <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>Detectando marca, modelo y colores</div>
+              </div>
+            )}
+
+            {autoTags && !analyzingMedia && (
+              <div style={{ background: "var(--card)", borderRadius: 12, padding: 16, marginBottom: 20, border: "1px solid var(--border)" }}>
+                <div style={{ color: "var(--orange)", fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                  <AppIcon name="search" size={16} color="var(--orange)" />
+                  Tags detectados (podés editar)
+                </div>
+                {[
+                  { label: "Marca", key: "moto_brand" },
+                  { label: "Modelo", key: "moto_model" },
+                  { label: "Color moto", key: "moto_color" },
+                  { label: "Color casco", key: "helmet_color" },
+                  { label: "Color traje", key: "suit_color" },
+                  { label: "Dorsal", key: "dorsal" },
+                ].map(({ label, key }) => (
+                  <div key={key} className="form-group" style={{ marginBottom: 10 }}>
+                    <label className="form-label">{label}</label>
+                    <input
+                      className="form-input"
+                      value={autoTags[key] || ""}
+                      onChange={(e) => setAutoTags({ ...autoTags, [key]: e.target.value })}
+                    />
+                  </div>
+                ))}
+                <div style={{ color: "var(--muted)", fontSize: 12 }}>Confianza: {autoTags.confidence ?? 0}%</div>
+              </div>
+            )}
+
+            <div className="form-group">
+              <label className="form-label">Sector / Curva</label>
+              <input
+                className="form-input"
+                placeholder="Ej: Curva del Rodeo"
+                value={videoForm.sector}
+                onChange={(e) => setVideoForm({ ...videoForm, sector: e.target.value })}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Hora (rango)</label>
+              <div style={{ display: "flex", gap: 8 }}>
                 <input
                   className="form-input"
-                  value={autoTags[key] || ""}
-                  onChange={(e) => setAutoTags({ ...autoTags, [key]: e.target.value })}
+                  type="time"
+                  value={videoForm.event_time_start}
+                  onChange={(e) => setVideoForm({ ...videoForm, event_time_start: e.target.value })}
+                />
+                <input
+                  className="form-input"
+                  type="time"
+                  value={videoForm.event_time_end}
+                  onChange={(e) => setVideoForm({ ...videoForm, event_time_end: e.target.value })}
                 />
               </div>
-            ))}
-            <div style={{ color: "var(--muted)", fontSize: 12 }}>Confianza: {autoTags.confidence ?? 0}%</div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Precio (Q)</label>
+              <input
+                className="form-input"
+                type="number"
+                placeholder="Ej: 150"
+                value={videoForm.price}
+                onChange={(e) => setVideoForm({ ...videoForm, price: e.target.value })}
+              />
+            </div>
+            <AppButton
+              className="pay-btn"
+              disabled={!videoFile || analyzingMedia || videoUploadLoading}
+              onClick={handleVideoSubmit}
+            >
+              {videoUploadLoading ? "SUBIENDO..." : analyzingMedia ? "ANALIZANDO..." : "SUBIR VIDEO"}
+            </AppButton>
           </div>
-        )}
 
-        <div className="form-group">
-          <label className="form-label">Sector / Curva</label>
-          <input
-            className="form-input"
-            placeholder="Ej: Curva del Rodeo"
-            value={videoForm.sector}
-            onChange={(e) => setVideoForm({ ...videoForm, sector: e.target.value })}
-          />
-        </div>
-        <div className="form-group">
-          <label className="form-label">Hora (rango)</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              className="form-input"
-              type="time"
-              value={videoForm.event_time_start}
-              onChange={(e) => setVideoForm({ ...videoForm, event_time_start: e.target.value })}
-            />
-            <input
-              className="form-input"
-              type="time"
-              value={videoForm.event_time_end}
-              onChange={(e) => setVideoForm({ ...videoForm, event_time_end: e.target.value })}
-            />
+          {/* Derecha — fotos */}
+          <div className="upload-split-pane upload-split-pane-photo">
+            <div className="section-title">SUBIR FOTO</div>
+            <div className="section-sub">La marca de agua se aplica automáticamente al publicar.</div>
+
+            <div className="form-group">
+              <label className="form-label">Fotos (JPG / PNG / WebP — máx 30MB c/u)</label>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>
+                En cada foto indicá tags con marca y modelo de moto (ej. Honda, CBR600) para que los compradores te encuentren.
+              </div>
+              <div className={`dropzone${uploadFiles.length > 0 ? " active" : ""}`}
+                onClick={() => document.getElementById("photo-input").click()}>
+                <div className="dropzone-icon" style={{ display: "grid", placeItems: "center" }}><AppIcon name="camera" size={36} color="var(--muted)" /></div>
+                <div className="dropzone-text">
+                  {uploadFiles.length > 0
+                    ? <span style={{ color: "var(--orange)", fontWeight: 700 }}>{uploadFiles.length} foto(s) seleccionada(s)</span>
+                    : <><span style={{ color: "var(--orange)" }}>Toca para seleccionar</span> una o varias fotos</>}
+                </div>
+              </div>
+              <input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp"
+                multiple style={{ display: "none" }}
+                disabled={uploadLoading}
+                onChange={e => {
+                  addUploadFiles(e.target.files);
+                  e.target.value = "";
+                }} />
+
+              {uploadFiles.length > 0 && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>{uploadFiles.length} seleccionada(s)</span>
+                  {!uploadLoading && (
+                    <AppButton
+                      type="button"
+                      className="nav-btn"
+                      style={{ fontSize: 11, padding: "4px 10px" }}
+                      onClick={clearUploadFiles}
+                    >
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <AppIcon name="x" size={12} /> Quitar todas
+                      </span>
+                    </AppButton>
+                  )}
+                </div>
+              )}
+
+              {uploadFiles.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, maxHeight: 320, overflowY: "auto" }}>
+                  {uploadFiles.map(({ id, file, url, tags }) => {
+                    const status = uploadProgress[file.name];
+                    return (
+                      <div key={id} style={{ display: "flex", gap: 10, alignItems: "center", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 10, padding: 8 }}>
+                        <div style={{ position: "relative", width: 64, height: 64, borderRadius: 8, overflow: "hidden", flexShrink: 0 }}>
+                          <img src={url} alt={file.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          {status === "uploading" && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center" }}><LoaderIcon size={24} /></div>}
+                          {status === "done" && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.5)", display: "grid", placeItems: "center" }}><AppIcon name="success" size={24} color="var(--success)" /></div>}
+                          {status === "error" && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.5)", display: "grid", placeItems: "center" }}><AppIcon name="error" size={24} color="#ff4444" /></div>}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</div>
+                          <input
+                            className="form-input"
+                            placeholder="Tags / modelo: Honda CBR, ZX6R, Yamaha…"
+                            value={tags}
+                            style={{ fontSize: 12, padding: "6px 10px" }}
+                            disabled={uploadLoading}
+                            onChange={e => {
+                              const val = e.target.value;
+                              setUploadFiles(prev => prev.map(item =>
+                                item.id === id ? { ...item, tags: val } : item
+                              ));
+                            }}
+                          />
+                        </div>
+                        {!uploadLoading && (
+                          <AppButton
+                            type="button"
+                            className="nav-btn"
+                            aria-label={`Quitar ${file.name}`}
+                            style={{ flexShrink: 0, padding: "8px 10px" }}
+                            onClick={() => removeUploadFile(id)}
+                          >
+                            <AppIcon name="x" size={16} />
+                          </AppButton>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Ubicación / Punto de fotografía</label>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>
+                Los compradores podrán buscar fotos por este lugar.
+              </div>
+              <input className="form-input" placeholder="Ej: Curva del Caminero KM 14"
+                value={uploadForm.location} onChange={e => setUploadForm({ ...uploadForm, location: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Hora (rango)</label>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input className="form-input" type="time"
+                  value={uploadForm.time_start || ""}
+                  onChange={e => setUploadForm({ ...uploadForm, time_start: e.target.value })}
+                  style={{ flex: 1 }} />
+                <span style={{ color: "var(--muted)", fontSize: 13 }}>a</span>
+                <input className="form-input" type="time"
+                  value={uploadForm.time_end || ""}
+                  onChange={e => setUploadForm({ ...uploadForm, time_end: e.target.value })}
+                  style={{ flex: 1 }} />
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Álbum (opcional)</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                <select className="form-input"
+                  value={uploadForm.album_id || ""}
+                  onChange={e => setUploadForm({ ...uploadForm, album_id: e.target.value })}>
+                  <option value="">Sin álbum</option>
+                  {albums.map(a => (
+                    <option key={a.id} value={a.id}>{a.name} {a.event_date ? `· ${a.event_date}` : ""}</option>
+                  ))}
+                </select>
+                <AppButton className="nav-btn" style={{ flexShrink: 0 }} onClick={() => setShowAlbumModal(true)}>
+                  + Nuevo
+                </AppButton>
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Fecha de rodada</label>
+              <input className="form-input" type="date"
+                value={uploadForm.ride_date} onChange={e => setUploadForm({ ...uploadForm, ride_date: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Precio (Q)</label>
+              <input className="form-input" type="number" placeholder="50"
+                value={uploadForm.price} onChange={e => setUploadForm({ ...uploadForm, price: e.target.value })} />
+            </div>
+            <AppButton className="upload-btn" onClick={handleUploadPhoto} disabled={uploadLoading}
+              style={{ opacity: uploadLoading ? 0.6 : 1 }}>
+              {uploadLoading ? "SUBIENDO..." : `↑ PUBLICAR ${uploadFiles.length > 1 ? uploadFiles.length + " FOTOS" : "FOTO"}`}
+            </AppButton>
           </div>
         </div>
-        <div className="form-group">
-          <label className="form-label">Precio (Q)</label>
-          <input
-            className="form-input"
-            type="number"
-            placeholder="Ej: 150"
-            value={videoForm.price}
-            onChange={(e) => setVideoForm({ ...videoForm, price: e.target.value })}
-          />
-        </div>
-        <AppButton
-          className="pay-btn"
-          disabled={!videoFile || analyzingMedia || videoUploadLoading}
-          onClick={handleVideoSubmit}
-        >
-          {videoUploadLoading ? "SUBIENDO..." : analyzingMedia ? "ANALIZANDO..." : "SUBIR VIDEO"}
-        </AppButton>
       </div>
     );
   };
@@ -5693,163 +5859,6 @@ const renderPhotographerProfile = () => {
       </div>
     );
   };
-
-  const renderUpload = () => (
-  <div className="upload-view">
-    <div className="section-title">SUBIR FOTO</div>
-    <div className="section-sub">La marca de agua se aplica automáticamente al publicar.</div>
-
-    {!user ? (
-      <div className="empty"><EmptyIcon name="lock" /><div>Iniciá sesión para subir fotos.</div></div>
-    ) : !profile ? (
-      <div className="empty"><EmptyIcon name="clipboard" /><div>Necesitás un perfil de fotógrafo aprobado. <br /><AppButton className="nav-btn primary" style={{ marginTop: 12 }} onClick={() => setView(VIEWS.VENDOR_REQUEST)}>Solicitar perfil</AppButton></div></div>
-    ) : profile.verification_status !== "approved" ? (
-      <div className="empty"><LoaderIcon size={44} /><div>Tu perfil está <strong style={{ color: "var(--orange)" }}>{profile.verification_status}</strong>. Esperá la aprobación del administrador.</div></div>
-    ) : (
-      <>
-
-        <div className="form-group">
-          <label className="form-label">Fotos (JPG / PNG / WebP — máx 30MB c/u)</label>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>
-            En cada foto indicá tags con marca y modelo de moto (ej. Honda, CBR600) para que los compradores te encuentren.
-          </div>
-          <div className={`dropzone${uploadFiles.length > 0 ? " active" : ""}`}
-            onClick={() => document.getElementById("photo-input").click()}>
-            <div className="dropzone-icon" style={{ display: "grid", placeItems: "center" }}><AppIcon name="camera" size={36} color="var(--muted)" /></div>
-            <div className="dropzone-text">
-              {uploadFiles.length > 0
-                ? <span style={{ color: "var(--orange)", fontWeight: 700 }}>{uploadFiles.length} foto(s) seleccionada(s)</span>
-                : <><span style={{ color: "var(--orange)" }}>Toca para seleccionar</span> una o varias fotos</>}
-            </div>
-          </div>
-          <input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp"
-            multiple style={{ display: "none" }}
-            disabled={uploadLoading}
-            onChange={e => {
-              addUploadFiles(e.target.files);
-              e.target.value = "";
-            }} />
-
-          {uploadFiles.length > 0 && (
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, marginBottom: 4 }}>
-              <span style={{ fontSize: 12, color: "var(--muted)" }}>{uploadFiles.length} seleccionada(s)</span>
-              {!uploadLoading && (
-                <AppButton
-                  type="button"
-                  className="nav-btn"
-                  style={{ fontSize: 11, padding: "4px 10px" }}
-                  onClick={clearUploadFiles}
-                >
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                    <AppIcon name="x" size={12} /> Quitar todas
-                  </span>
-                </AppButton>
-              )}
-            </div>
-          )}
-
-          {uploadFiles.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, maxHeight: 400, overflowY: "auto" }}>
-              {uploadFiles.map(({ id, file, url, tags }) => {
-                const status = uploadProgress[file.name];
-                return (
-                  <div key={id} style={{ display: "flex", gap: 10, alignItems: "center", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 8 }}>
-                    <div style={{ position: "relative", width: 64, height: 64, borderRadius: 8, overflow: "hidden", flexShrink: 0 }}>
-                      <img src={url} alt={file.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                      {status === "uploading" && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center" }}><LoaderIcon size={24} /></div>}
-                      {status === "done" && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.5)", display: "grid", placeItems: "center" }}><AppIcon name="success" size={24} color="var(--success)" /></div>}
-                      {status === "error" && <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.5)", display: "grid", placeItems: "center" }}><AppIcon name="error" size={24} color="#ff4444" /></div>}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</div>
-                      <input
-                        className="form-input"
-                        placeholder="Tags / modelo: Honda CBR, ZX6R, Yamaha…"
-                        value={tags}
-                        style={{ fontSize: 12, padding: "6px 10px" }}
-                        disabled={uploadLoading}
-                        onChange={e => {
-                          const val = e.target.value;
-                          setUploadFiles(prev => prev.map(item =>
-                            item.id === id ? { ...item, tags: val } : item
-                          ));
-                        }}
-                      />
-                    </div>
-                    {!uploadLoading && (
-                      <AppButton
-                        type="button"
-                        className="nav-btn"
-                        aria-label={`Quitar ${file.name}`}
-                        style={{ flexShrink: 0, padding: "8px 10px" }}
-                        onClick={() => removeUploadFile(id)}
-                      >
-                        <AppIcon name="x" size={16} />
-                      </AppButton>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Ubicación / Punto de fotografía</label>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>
-            Los compradores podrán buscar fotos por este lugar.
-          </div>
-          <input className="form-input" placeholder="Ej: Curva del Caminero KM 14"
-            value={uploadForm.location} onChange={e => setUploadForm({ ...uploadForm, location: e.target.value })} />
-        </div>
-      <div className="form-group">
-        <label className="form-label">Hora (rango)</label>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input className="form-input" type="time"
-            value={uploadForm.time_start || ""}
-            onChange={e => setUploadForm({ ...uploadForm, time_start: e.target.value })}
-            style={{ flex: 1 }} />
-    <span style={{ color: "var(--muted)", fontSize: 13 }}>a</span>
-    <input className="form-input" type="time"
-      value={uploadForm.time_end || ""}
-      onChange={e => setUploadForm({ ...uploadForm, time_end: e.target.value })}
-      style={{ flex: 1 }} />
-  </div>
-</div>
-          <div className="form-group">
-  <label className="form-label">Álbum (opcional)</label>
-  <div style={{ display: "flex", gap: 8 }}>
-    <select className="form-input"
-      value={uploadForm.album_id || ""}
-      onChange={e => setUploadForm({ ...uploadForm, album_id: e.target.value })}>
-      <option value="">Sin álbum</option>
-      {albums.map(a => (
-        <option key={a.id} value={a.id}>{a.name} {a.event_date ? `· ${a.event_date}` : ""}</option>
-      ))}
-    </select>
-    <AppButton className="nav-btn" style={{ flexShrink: 0 }} onClick={() => setShowAlbumModal(true)}>
-      + Nuevo
-    </AppButton>
-  </div>
-</div>
-        <div className="form-group">
-          <label className="form-label">Fecha de rodada</label>
-          <input className="form-input" type="date"
-            value={uploadForm.ride_date} onChange={e => setUploadForm({ ...uploadForm, ride_date: e.target.value })} />
-        </div>
-        <div className="form-group">
-          <label className="form-label">Precio (Q)</label>
-          <input className="form-input" type="number" placeholder="50"
-            value={uploadForm.price} onChange={e => setUploadForm({ ...uploadForm, price: e.target.value })} />
-        </div>
-        <AppButton className="upload-btn" onClick={handleUploadPhoto} disabled={uploadLoading}
-          style={{ opacity: uploadLoading ? 0.6 : 1 }}>
-          {uploadLoading ? "SUBIENDO..." : `↑ PUBLICAR ${uploadFiles.length > 1 ? uploadFiles.length + " FOTOS" : "FOTO"}`}
-        </AppButton>
-      </>
-    )}
-  </div>
-);
 
   const renderMyPurchases = () => {
     const purchaseItems = [
@@ -6981,7 +6990,7 @@ const renderVendorRequest = () => {
             <AppButton
               className="nav-btn primary"
               style={{ fontSize: 11, padding: "6px 12px" }}
-              onClick={() => { setActiveTab("uploadVideo"); setView(VIEWS.UPLOAD_VIDEO); }}
+              onClick={() => { setActiveTab("upload"); setView(VIEWS.UPLOAD); }}
             >
               Subir video
             </AppButton>
@@ -6999,7 +7008,7 @@ const renderVendorRequest = () => {
               <AppButton
                 className="nav-btn primary"
                 style={{ marginTop: 16 }}
-                onClick={() => { setActiveTab("uploadVideo"); setView(VIEWS.UPLOAD_VIDEO); }}
+                onClick={() => { setActiveTab("upload"); setView(VIEWS.UPLOAD); }}
               >
                 Subir primer video
               </AppButton>
@@ -7613,6 +7622,27 @@ const renderVendorRequest = () => {
     .close-btn-secondary { width: 100%; padding: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; color: var(--muted); font-family: 'DM Sans', sans-serif; font-size: 14px; cursor: pointer; transition: all 0.2s; }
     .close-btn-secondary:hover { color: var(--text); border-color: var(--orange); }
     .upload-view { padding: 24px 20px 80px; max-width: 540px; margin: 0 auto; }
+    .upload-split-view { max-width: 1120px; padding: 20px 12px 88px; }
+    .upload-split-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      background: var(--surface);
+    }
+    .upload-split-pane {
+      padding: 20px 16px 24px;
+      min-width: 0;
+      overflow-y: auto;
+      max-height: calc(100dvh - 168px);
+    }
+    .upload-split-pane-video { border-right: 1px solid var(--border); }
+    @media (max-width: 820px) {
+      .upload-split-grid { grid-template-columns: 1fr; }
+      .upload-split-pane-video { border-right: none; border-bottom: 1px solid var(--border); }
+      .upload-split-pane { max-height: none; }
+    }
     .section-title { font-family: 'Bebas Neue', sans-serif; font-size: 32px; letter-spacing: 2px; color: var(--text); margin-bottom: 6px; }
     .section-sub { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
     .form-group { margin-bottom: 18px; }
@@ -8812,8 +8842,7 @@ const renderVendorRequest = () => {
         <>
           {view === VIEWS.GALLERY && renderGallery()}
           {view === VIEWS.DETAIL && renderDetail()}
-          {view === VIEWS.UPLOAD && renderUpload()}
-          {view === VIEWS.UPLOAD_VIDEO && renderVideoUpload()}
+          {(view === VIEWS.UPLOAD || view === VIEWS.UPLOAD_VIDEO) && renderUpload()}
           {view === VIEWS.VIDEO_SEARCH && renderVideoSearch()}
           {view === VIEWS.PENDING_DELIVERIES && renderPendingDeliveries()}
           {view === VIEWS.AUTH && renderAuth()}
@@ -8969,7 +8998,6 @@ const renderVendorRequest = () => {
           ...(profile?.verification_status === "approved"
             ? [
               { id: "upload", label: "Subir", v: VIEWS.UPLOAD },
-              { id: "uploadVideo", icon: "video", label: "Video", v: VIEWS.UPLOAD_VIDEO },
               { id: "deliveries", icon: "package", label: pendingDeliveries.length > 0 ? `Entregas (${pendingDeliveries.length})` : "Entregas", v: VIEWS.PENDING_DELIVERIES },
               { id: "dash", label: "Dashboard", v: VIEWS.DASHBOARD },
             ]
