@@ -5566,7 +5566,7 @@ const renderPhotographerProfile = () => {
                 : (item.location || "Sin ubicación");
               return (
                 <div key={`${item.media_type}-${item.id}`} className="pending-delivery-card">
-                  <div className="pending-delivery-card-main">
+                  <div className="pending-delivery-top">
                     {isVideo ? (
                       <div className="pending-delivery-thumb">
                         <video src={item.preview_url} muted playsInline />
@@ -5584,12 +5584,11 @@ const renderPhotographerProfile = () => {
                     </div>
                   </div>
                   <AppButton
-                    className="pay-btn pending-delivery-action"
+                    type="button"
+                    className="pending-delivery-btn"
                     onClick={() => (isVideo ? handleDeliverVideoHQ(item.id) : handleDeliverPhotoHQ(item.id))}
                   >
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                      <AppIcon name="upload" size={14} /> Entregar HQ
-                    </span>
+                    <AppIcon name="upload" size={14} /> Entregar HQ
                   </AppButton>
                 </div>
               );
@@ -8089,6 +8088,7 @@ const renderVendorRequest = () => {
       display: flex;
       flex-direction: column;
       gap: 16px;
+      width: 100%;
     }
     .pending-delivery-card {
       background: var(--surface);
@@ -8098,11 +8098,16 @@ const renderVendorRequest = () => {
       display: flex;
       flex-direction: column;
       gap: 14px;
+      width: 100%;
+      box-sizing: border-box;
+      overflow: hidden;
     }
-    .pending-delivery-card-main {
-      display: flex;
+    .pending-delivery-top {
+      display: grid;
+      grid-template-columns: 88px minmax(0, 1fr);
       gap: 14px;
-      align-items: flex-start;
+      align-items: start;
+      width: 100%;
       min-width: 0;
     }
     .pending-delivery-thumb {
@@ -8121,8 +8126,8 @@ const renderVendorRequest = () => {
       display: block;
     }
     .pending-delivery-info {
-      flex: 1;
       min-width: 0;
+      overflow: hidden;
     }
     .pending-delivery-title-row {
       display: flex;
@@ -8147,33 +8152,37 @@ const renderVendorRequest = () => {
       font-size: 13px;
       line-height: 1.45;
       word-break: break-word;
+      overflow-wrap: anywhere;
     }
     .pending-delivery-time {
       color: var(--orange);
       font-size: 13px;
       margin-top: 4px;
       line-height: 1.4;
+      white-space: normal;
     }
-    .pending-delivery-action {
+    .pending-delivery-btn {
       width: 100%;
+      max-width: 100%;
+      box-sizing: border-box;
+      display: inline-flex;
+      align-items: center;
       justify-content: center;
-      padding: 12px 16px !important;
+      gap: 8px;
+      padding: 12px 16px;
+      background: var(--orange);
+      border: none;
+      border-radius: 10px;
+      color: #fff;
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 17px;
+      letter-spacing: 1px;
+      cursor: pointer;
+      transition: background 0.2s;
+      flex-shrink: 0;
     }
-    @media (min-width: 640px) {
-      .pending-delivery-card {
-        flex-direction: row;
-        align-items: center;
-        gap: 16px;
-      }
-      .pending-delivery-card-main {
-        flex: 1;
-      }
-      .pending-delivery-action {
-        width: auto;
-        flex-shrink: 0;
-        white-space: nowrap;
-      }
-    }
+    .pending-delivery-btn:hover:not(:disabled) { background: #e55e00; }
+    .pending-delivery-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .ceo-payroll-stat {
       background: var(--surface);
       border: 1px solid rgba(255, 194, 102, 0.2);
