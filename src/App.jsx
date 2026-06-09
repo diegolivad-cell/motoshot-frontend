@@ -371,6 +371,7 @@ const formatPhoneDisplay = (fullPhone) => {
 
 const HERO_POSTER_URL =
   "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/STATICBANNER.png";
+const VIDEO_CARD_PLACEHOLDER_URL = HERO_POSTER_URL;
 const HERO_VIDEO_URL =
   "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/14022738_720_1280_60fps.mp4";
 
@@ -861,7 +862,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [autoTags, setAutoTags] = useState(null);
   const [pendingDeliveries, setPendingDeliveries] = useState([]);
   const [pendingDeliveryCount, setPendingDeliveryCount] = useState(0);
-  const [videoPosterCache, setVideoPosterCache] = useState({});
+  const [videoMediaReady, setVideoMediaReady] = useState({});
   const [videoFile, setVideoFile] = useState(null);
   const [videoThumbnailFile, setVideoThumbnailFile] = useState(null);
   const [videoDurationSeconds, setVideoDurationSeconds] = useState(null);
@@ -1752,29 +1753,30 @@ const fetchNotifications = async () => {
     setNotifLoading(false);
   }
 };
-const fetchVendorDashboard = async () => {
+const fetchVendorDashboard = async ({ reconcile = false, silent = false } = {}) => {
   if (!session || !user) return;
   try {
-    setVendorStatsLoading(true);
-    if (profile?.verification_status === "approved") {
-      await fetch("/api/payments/reconcile-photographer-sales", {
+    if (!silent) setVendorStatsLoading(true);
+    if (reconcile && profile?.verification_status === "approved") {
+      const reconcileRes = await fetch("/api/payments/reconcile-photographer-sales", {
         method: "POST",
         headers: { Authorization: `Bearer ${session.access_token}` },
-      }).catch(() => {});
+      });
+      await parseApiJson(reconcileRes).catch(() => ({}));
     }
     const res = await fetch("/api/auth/vendor-dashboard", {
       headers: {
         Authorization: `Bearer ${session.access_token}`,
       },
     });
-    const data = await res.json();
+    const data = await parseApiJson(res);
     if (!res.ok) throw new Error(data.error || "Error cargando dashboard");
     setVendorStats(data);
   } catch (err) {
     console.error(err);
-    showToast("No se pudo cargar el dashboard de vendedor.");
+    if (!silent) showToast("No se pudo cargar el dashboard de vendedor.");
   } finally {
-    setVendorStatsLoading(false);
+    if (!silent) setVendorStatsLoading(false);
   }
 };
   const fetchPosts = async (photographerId) => {
@@ -2423,7 +2425,10 @@ useEffect(() => {
     const isApproved = profile?.verification_status === "approved";
     const needsStats = (view === VIEWS.DASHBOARD || view === VIEWS.VENDOR_REQUEST) && isApproved && session?.access_token && user;
     if (needsStats) {
-      fetchVendorDashboard();
+      fetchVendorDashboard({
+        reconcile: view === VIEWS.DASHBOARD,
+        silent: view !== VIEWS.DASHBOARD,
+      });
       fetchMyWithdrawals();
     }
     // Perfil propio del fotógrafo — cargar sus fotos y álbumes
@@ -2448,8 +2453,8 @@ useEffect(() => {
       const res = await fetch(`/api/videos/pending-delivery-count/${profile.id}`, {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
+      const data = await parseApiJson(res);
       if (res.ok) {
-        const data = await res.json();
         setPendingDeliveryCount(Number(data.count) || 0);
       }
     } catch (err) {
@@ -2487,14 +2492,18 @@ useEffect(() => {
   useEffect(() => {
     if (profile?.verification_status !== "approved" || !session?.access_token) return undefined;
     fetchPendingDeliveryCount();
-    fetchVendorDashboard();
-    const countTimer = window.setInterval(fetchPendingDeliveryCount, 10000);
-    const dashTimer = window.setInterval(fetchVendorDashboard, 20000);
-    return () => {
-      window.clearInterval(countTimer);
-      window.clearInterval(dashTimer);
-    };
+    const countTimer = window.setInterval(fetchPendingDeliveryCount, 45000);
+    return () => window.clearInterval(countTimer);
   }, [profile?.verification_status, profile?.id, session?.access_token, fetchPendingDeliveryCount]);
+
+  useEffect(() => {
+    if (view !== VIEWS.DASHBOARD || profile?.verification_status !== "approved" || !session?.access_token) {
+      return undefined;
+    }
+    fetchVendorDashboard({ reconcile: true });
+    const dashTimer = window.setInterval(() => fetchVendorDashboard({ silent: true }), 45000);
+    return () => window.clearInterval(dashTimer);
+  }, [view, profile?.verification_status, profile?.id, session?.access_token]);
 
   const analyzeMediaWithAI = async (file) => {
     if (!session?.access_token) return;
@@ -2699,6 +2708,10 @@ useEffect(() => {
     setVideoPreviewMuted((prev) => !prev);
   };
 
+  const markVideoMediaReady = useCallback((videoId) => {
+    setVideoMediaReady((prev) => (prev[videoId] ? prev : { ...prev, [videoId]: true }));
+  }, []);
+
   const pauseVideoOnFirstFrame = useCallback((videoEl) => {
     if (!videoEl || videoEl.classList.contains("is-playing")) return;
     const seekTo = Math.min(0.5, Math.max(0.05, (videoEl.duration || 1) * 0.05));
@@ -2714,7 +2727,9 @@ useEffect(() => {
     const durationLabel = formatVideoDuration(video.duration_seconds || videoDurationCache[video.id]);
     const isPreviewing = Boolean(videoPreviewActive[video.id]);
     const previewProgress = videoPreviewProgress[video.id] || 0;
-    const posterSrc = video.thumbnail_url || videoPosterCache[video.id] || null;
+    const posterSrc = video.thumbnail_url || null;
+    const mediaReady = Boolean(videoMediaReady[video.id]);
+    const showPlaceholder = !isPreviewing && !mediaReady;
     const previewLimit = video.duration_seconds || videoDurationCache[video.id];
 
     return (
@@ -2724,7 +2739,7 @@ useEffect(() => {
       >
         <div
           className="video-card-media"
-          style={{ position: "relative", paddingBottom: "56.25%", background: "#111" }}
+          style={{ position: "relative", paddingBottom: "56.25%", background: "#0a0a0a" }}
           onContextMenu={(e) => e.preventDefault()}
           {...(CAN_HOVER_VIDEO_PREVIEW ? {
             onMouseEnter: () => startVideoPreview(video.id, previewLimit),
@@ -2737,11 +2752,17 @@ useEffect(() => {
             },
           })}
         >
+          <img
+            src={VIDEO_CARD_PLACEHOLDER_URL}
+            alt=""
+            decoding="async"
+            aria-hidden
+            className={`video-card-static-banner${showPlaceholder ? "" : " is-hidden"}`}
+          />
           <video
             ref={(el) => { videoRefs.current[video.id] = el; }}
-            className={`video-card-preview${isPreviewing ? " is-playing" : ""}`}
+            className={`video-card-preview${isPreviewing ? " is-playing" : ""}${mediaReady ? " is-ready" : ""}`}
             src={video.preview_url}
-            poster={posterSrc || undefined}
             muted={videoPreviewMuted}
             playsInline
             preload="auto"
@@ -2755,9 +2776,16 @@ useEffect(() => {
               if (dur > 0) {
                 setVideoDurationCache((prev) => (prev[video.id] === dur ? prev : { ...prev, [video.id]: dur }));
               }
-              if (!posterSrc && !el.classList.contains("is-playing")) {
+            }}
+            onLoadedData={(e) => {
+              const el = e.currentTarget;
+              if (!posterSrc) {
                 pauseVideoOnFirstFrame(el);
+                markVideoMediaReady(video.id);
               }
+            }}
+            onCanPlay={() => {
+              if (!posterSrc) markVideoMediaReady(video.id);
             }}
           />
           {posterSrc && !isPreviewing && (
@@ -2765,17 +2793,13 @@ useEffect(() => {
               src={posterSrc}
               alt=""
               decoding="async"
-              className="video-card-poster-cover"
+              className={`video-card-poster-cover${mediaReady ? " is-visible" : ""}`}
+              onLoad={() => markVideoMediaReady(video.id)}
             />
           )}
-          {!isPreviewing && (
+          {!isPreviewing && mediaReady && (
             <div className="video-card-watermark">
               <WatermarkedVideoOverlay photographer={video.photographer?.name} />
-            </div>
-          )}
-          {!CAN_HOVER_VIDEO_PREVIEW && !isPreviewing && (
-            <div className="video-card-tap-hint" aria-hidden="true">
-              <span className="video-card-play-icon" />
             </div>
           )}
           <button
@@ -5900,13 +5924,48 @@ const renderPhotographerProfile = () => {
           border: `1px solid ${isEditing ? "var(--orange)" : "var(--border)"}`,
         }}
       >
-        <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#000" }}>
+        <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#0a0a0a", overflow: "hidden" }}>
+          <img
+            src={VIDEO_CARD_PLACEHOLDER_URL}
+            alt=""
+            decoding="async"
+            aria-hidden
+            className={`video-card-static-banner gallery-video-banner${videoMediaReady[video.id] ? " is-hidden" : ""}`}
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+          />
+          {video.thumbnail_url && (
+            <img
+              src={video.thumbnail_url}
+              alt=""
+              decoding="async"
+              className={`video-card-poster-cover gallery-video-poster${videoMediaReady[video.id] ? " is-visible" : ""}`}
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+              onLoad={() => markVideoMediaReady(video.id)}
+            />
+          )}
           <video
             src={video.preview_url}
             muted
             playsInline
             preload="metadata"
-            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            className={`gallery-video-preview${videoMediaReady[video.id] ? " is-ready" : ""}`}
+            onLoadedData={(e) => {
+              if (!video.thumbnail_url) {
+                const el = e.currentTarget;
+                el.currentTime = Math.min(0.5, (el.duration || 1) * 0.05);
+                el.pause();
+                markVideoMediaReady(video.id);
+              }
+            }}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              opacity: videoMediaReady[video.id] && !video.thumbnail_url ? 1 : 0,
+              transition: "opacity 0.35s ease",
+            }}
           />
           {video.duration_seconds ? (
             <div style={{
@@ -8206,13 +8265,21 @@ const renderVendorRequest = () => {
     .hero-video-bg::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
     .hero-video-bg::-webkit-media-controls-overlay-play-button { display: none !important; }
     .video-card-media { overflow: hidden; }
+    .video-card-static-banner {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; z-index: 3; pointer-events: none;
+      opacity: 1; transition: opacity 0.4s ease;
+    }
+    .video-card-static-banner.is-hidden { opacity: 0; visibility: hidden; }
     .video-card-preview {
       position: absolute; inset: 0; width: 100%; height: 100%;
-      object-fit: cover; background: #111; z-index: 2;
+      object-fit: cover; background: #0a0a0a; z-index: 2;
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.35s ease;
       -webkit-tap-highlight-color: transparent;
     }
-    .video-card-preview:not(.is-playing) { pointer-events: none; }
-    .video-card-preview.is-playing { z-index: 8; }
+    .video-card-preview.is-ready { opacity: 1; }
+    .video-card-preview.is-playing { opacity: 1; z-index: 8; pointer-events: auto; }
     .video-card-preview::-webkit-media-controls { display: none !important; }
     .video-card-preview::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
     .video-card-preview::-webkit-media-controls-overlay-play-button { display: none !important; }
@@ -8220,23 +8287,15 @@ const renderVendorRequest = () => {
     .video-card-poster-cover {
       position: absolute; inset: 0; width: 100%; height: 100%;
       object-fit: cover; z-index: 4; pointer-events: none;
+      opacity: 0; transition: opacity 0.35s ease;
     }
+    .video-card-poster-cover.is-visible { opacity: 1; }
     .video-card-watermark {
       position: absolute; inset: 0; z-index: 5; pointer-events: none;
     }
-    .video-card-tap-hint {
-      position: absolute; inset: 0; z-index: 6; pointer-events: none;
-      display: grid; place-items: center;
-      background: radial-gradient(circle, rgba(0,0,0,0.28) 0%, rgba(0,0,0,0.04) 55%, transparent 70%);
-    }
-    .video-card-play-icon {
-      width: 0; height: 0;
-      border-top: 14px solid transparent;
-      border-bottom: 14px solid transparent;
-      border-left: 22px solid rgba(255,255,255,0.9);
-      margin-left: 6px;
-      filter: drop-shadow(0 2px 8px rgba(0,0,0,0.45));
-    }
+    .gallery-video-poster { opacity: 0; transition: opacity 0.35s ease; }
+    .gallery-video-preview.is-ready { opacity: 1 !important; }
+    .gallery-video-poster.is-visible { opacity: 1; }
     .search-bar { display: flex; gap: 10px; margin: 20px; }
     .search-input { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 12px 16px;
       border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color 0.2s; }
