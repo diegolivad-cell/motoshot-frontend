@@ -5036,12 +5036,12 @@ const renderPhotographerProfile = () => {
         {uploadMediaTab === "photo" && (
           <div>
             <SectionTitleIcon icon="camera">SUBIR FOTO</SectionTitleIcon>
-            <div className="section-sub">La marca de agua se aplica automáticamente al publicar.</div>
+            <div className="section-sub">JPG, PNG o WebP — máx 30MB c/u. La IA detecta marca y modelo de la moto; la marca de agua se aplica al publicar.</div>
 
             <div className="form-group">
-              <label className="form-label">Fotos (JPG / PNG / WebP — máx 30MB c/u)</label>
+              <label className="form-label">Fotos</label>
               <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>
-                En cada foto indicá tags con marca y modelo de moto (ej. Honda, CBR600) para que los compradores te encuentren.
+                Revisá o completá los tags en cada foto si la IA no los detectó bien — así los compradores te encuentran al buscar.
               </div>
               <div className={`dropzone${uploadFiles.length > 0 ? " active" : ""}`}
                 onClick={() => document.getElementById("photo-input").click()}>
@@ -5094,7 +5094,7 @@ const renderPhotographerProfile = () => {
                           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</div>
                           <input
                             className="form-input"
-                            placeholder="Tags / modelo: Honda CBR, ZX6R, Yamaha…"
+                            placeholder="Tags (IA o manual): Honda CBR, ZX6R, Yamaha…"
                             value={tags}
                             style={{ fontSize: 12, padding: "6px 10px" }}
                             disabled={uploadLoading}
