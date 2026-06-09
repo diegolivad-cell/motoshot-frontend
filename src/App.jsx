@@ -92,6 +92,43 @@ const readVideoDuration = (file) => new Promise((resolve) => {
   el.src = url;
 });
 
+const MAX_VIDEO_BATCH = 100;
+
+const formatFileSize = (bytes) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+  return `${mb.toFixed(1)} MB`;
+};
+
+const extractVideoFrameBase64 = async (file) => {
+  const video = document.createElement("video");
+  video.src = URL.createObjectURL(file);
+  video.muted = true;
+  video.playsInline = true;
+  await new Promise((resolve, reject) => {
+    video.onloadeddata = resolve;
+    video.onerror = () => reject(new Error("No se pudo leer el video"));
+  });
+  video.currentTime = Math.min(5, video.duration || 5);
+  await new Promise((resolve) => { video.onseeked = resolve; });
+  const maxDim = 1280;
+  let w = video.videoWidth;
+  let h = video.videoHeight;
+  if (w > maxDim || h > maxDim) {
+    const scale = maxDim / Math.max(w, h);
+    w = Math.round(w * scale);
+    h = Math.round(h * scale);
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+  const imageBase64 = canvas.toDataURL("image/jpeg", 0.75).split(",")[1];
+  URL.revokeObjectURL(video.src);
+  return imageBase64;
+};
+
 const PENDING_EMAIL_CONFIRM_KEY = "motoshot_pending_email_confirm";
 
 const getEmailConfirmRedirectUrl = () => {
@@ -844,7 +881,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [pendingDeliveries, setPendingDeliveries] = useState([]);
   const [pendingDeliveryCount, setPendingDeliveryCount] = useState(0);
   const [videoMediaReady, setVideoMediaReady] = useState({});
-  const [videoFile, setVideoFile] = useState(null);
+  const [videoQueue, setVideoQueue] = useState([]);
   const [videoThumbnailFile, setVideoThumbnailFile] = useState(null);
   const [videoDurationSeconds, setVideoDurationSeconds] = useState(null);
   const [videoForm, setVideoForm] = useState({
@@ -2519,26 +2556,8 @@ useEffect(() => {
       let imageBase64;
       let mimeType;
       if (file.type.startsWith("video/")) {
-        const video = document.createElement("video");
-        video.src = URL.createObjectURL(file);
-        await new Promise((resolve) => { video.onloadeddata = resolve; });
-        video.currentTime = Math.min(5, video.duration || 5);
-        await new Promise((resolve) => { video.onseeked = resolve; });
-        const maxDim = 1280;
-        let w = video.videoWidth;
-        let h = video.videoHeight;
-        if (w > maxDim || h > maxDim) {
-          const scale = maxDim / Math.max(w, h);
-          w = Math.round(w * scale);
-          h = Math.round(h * scale);
-        }
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        canvas.getContext("2d").drawImage(video, 0, 0, w, h);
-        imageBase64 = canvas.toDataURL("image/jpeg", 0.75).split(",")[1];
+        imageBase64 = await extractVideoFrameBase64(file);
         mimeType = "image/jpeg";
-        URL.revokeObjectURL(video.src);
       } else {
         const reader = new FileReader();
         await new Promise((resolve) => {
@@ -2563,6 +2582,99 @@ useEffect(() => {
     } finally {
       setAnalyzingMedia(false);
     }
+  };
+
+  const analyzeVideoFrameTags = async (file) => {
+    if (!session?.access_token) return null;
+    try {
+      const imageBase64 = await extractVideoFrameBase64(file);
+      const res = await fetch("/api/videos/analyze-frame", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ imageBase64, mimeType: "image/jpeg" }),
+      });
+      const data = await res.json().catch(() => null);
+      return res.ok ? data : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const uploadQueuedVideo = async (item, { thumbnailFile, tags, form }) => {
+    const formData = new FormData();
+    formData.append("video", item.file);
+    if (thumbnailFile) formData.append("thumbnail", thumbnailFile);
+    const dur = await readVideoDuration(item.file).catch(() => null);
+    if (dur) formData.append("duration_seconds", String(dur));
+    formData.append("photographer_id", profile.id);
+    formData.append("price", form.price);
+    formData.append("sector", form.sector);
+    formData.append("event_time_start", form.event_time_start);
+    formData.append("event_time_end", form.event_time_end);
+    formData.append("album_id", form.album_id);
+    const videoTags = tags || (await analyzeVideoFrameTags(item.file));
+    if (videoTags) {
+      formData.append("moto_brand", videoTags.moto_brand || "");
+      formData.append("moto_model", videoTags.moto_model || "");
+      formData.append("moto_color", videoTags.moto_color || "");
+      formData.append("helmet_color", videoTags.helmet_color || "");
+      formData.append("suit_color", videoTags.suit_color || "");
+      formData.append("dorsal", videoTags.dorsal || "");
+    }
+    const res = await fetch(apiUrl("/api/videos/upload"), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${session.access_token}` },
+      body: formData,
+    });
+    const data = await parseApiJson(res);
+    if (!res.ok) throw new Error(data.error || "No se pudo subir el video.");
+    return data;
+  };
+
+  const startVideoQueueUpload = async () => {
+    if (!session?.access_token || !profile?.id || videoUploadLoading) return;
+    const items = videoQueue.filter((i) => i.status === "pending" || i.status === "error");
+    if (!items.length) return;
+
+    const isSingle = videoQueue.length === 1;
+    const form = { ...videoForm };
+    const singleTags = isSingle ? autoTags : null;
+    const singleThumb = isSingle ? videoThumbnailFile : null;
+
+    setVideoUploadLoading(true);
+    if (isSingle) {
+      setGlobalLoading({ active: true, message: "Subiendo video… no cierres la app" });
+    }
+
+    let done = 0;
+    let failed = 0;
+    for (const item of items) {
+      setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "uploading", error: null } : q)));
+      try {
+        await uploadQueuedVideo(item, { thumbnailFile: singleThumb, tags: singleTags, form });
+        done += 1;
+        setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "done" } : q)));
+      } catch (err) {
+        failed += 1;
+        const message = err?.message || "No se pudo subir el video.";
+        setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "error", error: message } : q)));
+      }
+    }
+
+    setVideoUploadLoading(false);
+    setGlobalLoading({ active: false, message: "" });
+
+    if (failed === 0) {
+      showToast(done === 1 ? "Listo: video subido exitosamente." : `Listo: ${done} videos subidos exitosamente.`);
+      setVideoQueue([]);
+      setVideoThumbnailFile(null);
+      setVideoDurationSeconds(null);
+      setAutoTags(null);
+      setVideoForm({ price: "", sector: "", event_time_start: "", event_time_end: "", album_id: "" });
+    } else {
+      showToast(`${done} video(s) subido(s), ${failed} con error. Tocá SUBIR para reintentar los fallidos.`);
+    }
+    if (profile?.id) fetchMyVideos(profile.id);
   };
 
   const handleVideoSearch = async (query = videoSearchQuery) => {
@@ -4977,65 +5089,57 @@ const renderPhotographerProfile = () => {
 
 
   const renderUpload = () => {
-    const handleVideoFileSelect = async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      setVideoFile(file);
-      setVideoDurationSeconds(null);
-      readVideoDuration(file).then((dur) => setVideoDurationSeconds(dur));
-      await analyzeMediaWithAI(file);
+    const handleVideoFilesSelect = (e) => {
+      const files = Array.from(e.target.files || []).filter((f) => f.type.startsWith("video/"));
+      e.target.value = "";
+      if (!files.length) return;
+
+      const existing = new Set(videoQueue.map((i) => `${i.file.name}|${i.file.size}`));
+      const fresh = files.filter((f) => !existing.has(`${f.name}|${f.size}`));
+      const room = MAX_VIDEO_BATCH - videoQueue.length;
+      if (fresh.length > room) {
+        showToast(`Máximo ${MAX_VIDEO_BATCH} videos por carga. Se agregaron los primeros ${Math.max(0, room)}.`);
+      }
+      const accepted = fresh.slice(0, Math.max(0, room)).map((f) => ({
+        id: `${f.name}-${f.size}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        file: f,
+        status: "pending",
+        error: null,
+      }));
+      if (!accepted.length) return;
+
+      const merged = [...videoQueue, ...accepted];
+      setVideoQueue(merged);
+
+      if (merged.length === 1) {
+        setVideoDurationSeconds(null);
+        readVideoDuration(merged[0].file).then((dur) => setVideoDurationSeconds(dur));
+        analyzeMediaWithAI(merged[0].file);
+      } else {
+        setAutoTags(null);
+        setVideoDurationSeconds(null);
+        setVideoThumbnailFile(null);
+      }
     };
 
-    const handleVideoSubmit = async () => {
-      if (!videoFile || !session?.access_token) return;
-      setVideoUploadLoading(true);
-      setGlobalLoading({
-        active: true,
-        message: "Subiendo video… no cierres la app",
-      });
-      const formData = new FormData();
-      formData.append("video", videoFile);
-      if (videoThumbnailFile) formData.append("thumbnail", videoThumbnailFile);
-      if (videoDurationSeconds) formData.append("duration_seconds", String(videoDurationSeconds));
-      formData.append("photographer_id", profile.id);
-      formData.append("price", videoForm.price);
-      formData.append("sector", videoForm.sector);
-      formData.append("event_time_start", videoForm.event_time_start);
-      formData.append("event_time_end", videoForm.event_time_end);
-      formData.append("album_id", videoForm.album_id);
-      if (autoTags) {
-        formData.append("moto_brand", autoTags.moto_brand || "");
-        formData.append("moto_model", autoTags.moto_model || "");
-        formData.append("moto_color", autoTags.moto_color || "");
-        formData.append("helmet_color", autoTags.helmet_color || "");
-        formData.append("suit_color", autoTags.suit_color || "");
-        formData.append("dorsal", autoTags.dorsal || "");
-      }
-      try {
-        const res = await fetch(apiUrl("/api/videos/upload"), {
-          method: "POST",
-          headers: { Authorization: `Bearer ${session.access_token}` },
-          body: formData,
-        });
-        const data = await parseApiJson(res);
-        if (res.ok) {
-          showToast(data.message || "Listo: video subido exitosamente.");
-          setVideoFile(null);
-          setVideoThumbnailFile(null);
-          setVideoDurationSeconds(null);
+    const removeQueuedVideo = (id) => {
+      if (videoUploadLoading) return;
+      setVideoQueue((prev) => {
+        const next = prev.filter((i) => i.id !== id);
+        if (next.length === 0) {
           setAutoTags(null);
-          setVideoForm({ price: "", sector: "", event_time_start: "", event_time_end: "", album_id: "" });
-          if (profile?.id) fetchMyVideos(profile.id);
-        } else {
-          showToast(data.error || "No se pudo subir el video.");
+          setVideoDurationSeconds(null);
         }
-      } catch (err) {
-        console.error("Error subiendo video:", err);
-        showToast("Error de conexión al subir el video. Verificá tu internet e intentá de nuevo.");
-      } finally {
-        setVideoUploadLoading(false);
-        setGlobalLoading({ active: false, message: "" });
-      }
+        return next;
+      });
+    };
+
+    const clearVideoQueue = () => {
+      if (videoUploadLoading) return;
+      setVideoQueue([]);
+      setVideoThumbnailFile(null);
+      setVideoDurationSeconds(null);
+      setAutoTags(null);
     };
 
     if (!user) {
@@ -5112,35 +5216,117 @@ const renderPhotographerProfile = () => {
           </div>
         </div>
 
-        {uploadMediaTab === "video" && (
+        {uploadMediaTab === "video" && (() => {
+          const queueTotal = videoQueue.length;
+          const queueDone = videoQueue.filter((i) => i.status === "done").length;
+          const queueFailed = videoQueue.filter((i) => i.status === "error").length;
+          const queuePendingCount = videoQueue.filter((i) => i.status === "pending" || i.status === "error").length;
+          const isSingle = queueTotal === 1;
+          const uploadingIndex = videoQueue.findIndex((i) => i.status === "uploading");
+
+          return (
           <div>
             <SectionTitleIcon icon="video">SUBIR VIDEO</SectionTitleIcon>
-            <div className="section-sub" style={{ marginBottom: 20 }}>MP4, MOV o AVI — máx 500MB. La IA detecta marca y colores del frame 5s.</div>
+            <div className="section-sub" style={{ marginBottom: 20 }}>
+              MP4, MOV o AVI — máx 500MB c/u. Hasta {MAX_VIDEO_BATCH} videos por carga; se suben uno por uno.
+            </div>
 
             <div
-              className={`dropzone${videoFile ? " active" : ""}`}
-              style={{ marginBottom: 20 }}
+              className={`dropzone${queueTotal > 0 ? " active" : ""}`}
+              style={{ marginBottom: 20, ...(videoUploadLoading ? { pointerEvents: "none", opacity: 0.6 } : {}) }}
               onClick={() => document.getElementById("videoInput").click()}
             >
               <input
                 id="videoInput"
                 type="file"
                 accept="video/mp4,video/quicktime,video/avi"
+                multiple
                 style={{ display: "none" }}
-                onChange={handleVideoFileSelect}
+                disabled={videoUploadLoading}
+                onChange={handleVideoFilesSelect}
               />
               <div className="dropzone-icon" style={{ display: "grid", placeItems: "center" }}>
                 <AppIcon name="video" size={36} color="var(--muted)" />
               </div>
               <div className="dropzone-text">
-                {videoFile ? (
-                  <span style={{ color: "var(--orange)", fontWeight: 700 }}>{videoFile.name}</span>
+                {queueTotal > 0 ? (
+                  <span style={{ color: "var(--orange)", fontWeight: 700 }}>
+                    {queueTotal} video{queueTotal !== 1 ? "s" : ""} en cola — tocá para agregar más
+                  </span>
                 ) : (
-                  <><span style={{ color: "var(--orange)" }}>Tocá para seleccionar</span> un video</>
+                  <><span style={{ color: "var(--orange)" }}>Tocá para seleccionar</span> uno o varios videos</>
                 )}
               </div>
             </div>
 
+            {queueTotal > 0 && (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                    {videoUploadLoading
+                      ? `Subiendo ${Math.min(queueDone + 1, queueTotal)} de ${queueTotal}…`
+                      : `${queueTotal} en cola${queueDone ? ` · ${queueDone} subido(s)` : ""}${queueFailed ? ` · ${queueFailed} con error` : ""}`}
+                  </span>
+                  {!videoUploadLoading && (
+                    <AppButton className="nav-btn" style={{ fontSize: 11, padding: "4px 10px" }} onClick={clearVideoQueue}>
+                      Quitar todos
+                    </AppButton>
+                  )}
+                </div>
+                {videoUploadLoading && (
+                  <div className="video-queue-progress">
+                    <div
+                      className="video-queue-progress-bar"
+                      style={{ width: `${Math.round((queueDone / Math.max(queueTotal, 1)) * 100)}%` }}
+                    />
+                  </div>
+                )}
+                <div className="video-queue">
+                  {videoQueue.map((item, idx) => (
+                    <div key={item.id} className={`video-queue-item video-queue-item--${item.status}`}>
+                      <span className="video-queue-status">
+                        {item.status === "uploading" ? (
+                          <LoaderIcon size={16} />
+                        ) : item.status === "done" ? (
+                          <AppIcon name="check" size={16} color="var(--success)" />
+                        ) : item.status === "error" ? (
+                          <AppIcon name="alert" size={16} color="#ff4444" />
+                        ) : (
+                          <span className="video-queue-dot" />
+                        )}
+                      </span>
+                      <div className="video-queue-info">
+                        <div className="video-queue-name">{item.file.name}</div>
+                        <div className="video-queue-meta">
+                          {formatFileSize(item.file.size)}
+                          {item.status === "uploading" && uploadingIndex === idx ? " · Subiendo…" : ""}
+                          {item.status === "done" ? " · Subido" : ""}
+                          {item.status === "error" ? ` · ${item.error || "Error"}` : ""}
+                        </div>
+                      </div>
+                      {!videoUploadLoading && item.status !== "done" && (
+                        <button
+                          type="button"
+                          className="video-queue-remove"
+                          aria-label="Quitar video"
+                          onClick={() => removeQueuedVideo(item.id)}
+                        >
+                          <AppIcon name="x" size={14} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {queueTotal > 1 && (
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+                    Los datos de abajo (sector, hora, precio, álbum) se aplican a todos los videos.
+                    La IA detecta marca y colores de cada video al subirlo. No cierres la app durante la carga.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {isSingle && (
             <div className="form-group" style={{ marginBottom: 20 }}>
               <label className="form-label">Miniatura (opcional)</label>
               <div className="section-sub" style={{ marginBottom: 10 }}>
@@ -5183,8 +5369,9 @@ const renderPhotographerProfile = () => {
                 )}
               </div>
             </div>
+            )}
 
-            {videoDurationSeconds ? (
+            {isSingle && videoDurationSeconds ? (
               <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16 }}>
                 Duración detectada: <strong style={{ color: "var(--text)" }}>{formatVideoDuration(videoDurationSeconds)}</strong>
               </div>
@@ -5263,13 +5450,22 @@ const renderPhotographerProfile = () => {
             </div>
             <AppButton
               className="pay-btn"
-              disabled={!videoFile || analyzingMedia || videoUploadLoading}
-              onClick={handleVideoSubmit}
+              disabled={queuePendingCount === 0 || analyzingMedia || videoUploadLoading}
+              onClick={startVideoQueueUpload}
             >
-              {analyzingMedia ? "ANALIZANDO..." : "SUBIR VIDEO"}
+              {analyzingMedia
+                ? "ANALIZANDO..."
+                : videoUploadLoading
+                  ? `SUBIENDO ${Math.min(queueDone + 1, queueTotal)}/${queueTotal}...`
+                  : queueFailed > 0 && queueDone > 0
+                    ? `REINTENTAR ${queueFailed} FALLIDO${queueFailed !== 1 ? "S" : ""}`
+                    : queueTotal > 1
+                      ? `SUBIR ${queuePendingCount} VIDEOS`
+                      : "SUBIR VIDEO"}
             </AppButton>
           </div>
-        )}
+          );
+        })()}
 
         {uploadMediaTab === "photo" && (
           <div>
@@ -8183,6 +8379,82 @@ const renderVendorRequest = () => {
     }
     .pending-delivery-btn:hover:not(:disabled) { background: #e55e00; }
     .pending-delivery-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .video-queue {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .video-queue-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .video-queue-item--uploading { border-color: var(--orange); }
+    .video-queue-item--done { border-color: rgba(76, 217, 100, 0.4); }
+    .video-queue-item--error { border-color: rgba(255, 68, 68, 0.5); }
+    .video-queue-status {
+      flex-shrink: 0;
+      width: 18px;
+      display: grid;
+      place-items: center;
+    }
+    .video-queue-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      display: block;
+    }
+    .video-queue-info { flex: 1; min-width: 0; }
+    .video-queue-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .video-queue-meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+      overflow-wrap: anywhere;
+    }
+    .video-queue-item--error .video-queue-meta { color: #ff6b6b; }
+    .video-queue-remove {
+      flex-shrink: 0;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      width: 26px;
+      height: 26px;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    .video-queue-remove:hover { border-color: #ff4444; color: #ff4444; }
+    .video-queue-progress {
+      height: 6px;
+      border-radius: 999px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      overflow: hidden;
+      margin-bottom: 10px;
+    }
+    .video-queue-progress-bar {
+      height: 100%;
+      background: var(--orange);
+      border-radius: 999px;
+      transition: width 0.4s ease;
+    }
     .ceo-payroll-stat {
       background: var(--surface);
       border: 1px solid rgba(255, 194, 102, 0.2);
