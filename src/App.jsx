@@ -5354,6 +5354,50 @@ const renderPhotographerProfile = () => {
               </div>
             </div>
 
+            <div className="form-group" style={{ marginBottom: 20 }}>
+              <label className="form-label">Portada del video (opcional)</label>
+              <div className="section-sub" style={{ marginBottom: 10 }}>
+                Imagen que ven los compradores antes de reproducir el preview.
+                {queueTotal > 1 ? " Se aplica a todos los videos de esta carga." : ""}
+              </div>
+              <div
+                className={`dropzone${videoThumbnailFile ? " active" : ""}`}
+                style={{ padding: "20px 16px", borderColor: videoThumbnailFile ? undefined : "rgba(255,107,0,0.45)" }}
+                onClick={() => document.getElementById("videoThumbInput").click()}
+              >
+                <input
+                  id="videoThumbInput"
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={(e) => setVideoThumbnailFile(e.target.files?.[0] || null)}
+                />
+                {videoThumbnailFile ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <img
+                      src={URL.createObjectURL(videoThumbnailFile)}
+                      alt=""
+                      style={{ width: 96, height: 54, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)" }}
+                    />
+                    <div>
+                      <div style={{ color: "var(--orange)", fontWeight: 700, fontSize: 13 }}>{videoThumbnailFile.name}</div>
+                      <AppButton
+                        className="nav-btn"
+                        style={{ marginTop: 8, fontSize: 11 }}
+                        onClick={(ev) => { ev.stopPropagation(); setVideoThumbnailFile(null); }}
+                      >
+                        Quitar portada
+                      </AppButton>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                    <IconText icon="image" size={14}>Tocá para elegir imagen de portada</IconText>
+                  </div>
+                )}
+              </div>
+            </div>
+
             {queueTotal > 0 && (
               <div style={{ marginBottom: 20 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -5424,50 +5468,6 @@ const renderPhotographerProfile = () => {
                 )}
               </div>
             )}
-
-            <div className="form-group" style={{ marginBottom: 20 }}>
-              <label className="form-label">Miniatura (opcional)</label>
-              <div className="section-sub" style={{ marginBottom: 10 }}>
-                Subí una foto del rider — se muestra antes de reproducir el preview.
-                {queueTotal > 1 ? " Se aplica a todos los videos de esta carga." : ""}
-              </div>
-              <div
-                className={`dropzone${videoThumbnailFile ? " active" : ""}`}
-                style={{ padding: "20px 16px" }}
-                onClick={() => document.getElementById("videoThumbInput").click()}
-              >
-                <input
-                  id="videoThumbInput"
-                  type="file"
-                  accept="image/*"
-                  style={{ display: "none" }}
-                  onChange={(e) => setVideoThumbnailFile(e.target.files?.[0] || null)}
-                />
-                {videoThumbnailFile ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                    <img
-                      src={URL.createObjectURL(videoThumbnailFile)}
-                      alt=""
-                      style={{ width: 96, height: 54, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)" }}
-                    />
-                    <div>
-                      <div style={{ color: "var(--orange)", fontWeight: 700, fontSize: 13 }}>{videoThumbnailFile.name}</div>
-                      <AppButton
-                        className="nav-btn"
-                        style={{ marginTop: 8, fontSize: 11 }}
-                        onClick={(ev) => { ev.stopPropagation(); setVideoThumbnailFile(null); }}
-                      >
-                        Quitar miniatura
-                      </AppButton>
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-                    <IconText icon="image" size={14}>Tocá para elegir imagen de portada</IconText>
-                  </div>
-                )}
-              </div>
-            </div>
 
             {isSingle && videoDurationSeconds ? (
               <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16 }}>
