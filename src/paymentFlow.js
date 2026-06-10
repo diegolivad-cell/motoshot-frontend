@@ -151,7 +151,7 @@ export async function ensurePaymentBrowserBridge() {
         return;
       }
       if (readPendingPayment()) {
-        paymentResumeHandler?.("browserCancelled");
+        paymentResumeHandler?.("browserClosedPending");
         return;
       }
       paymentResumeHandler?.("browser");
@@ -191,19 +191,11 @@ export async function ensurePaymentBrowserBridge() {
 export async function openRecurrenteCheckout(url, pollSyncFn) {
   if (!url) return;
   paymentReturnTriggered = false;
-  if (Capacitor.isNativePlatform()) {
-    try {
-      await ensurePaymentBrowserBridge();
-      if (pollSyncFn) startPaymentPolling(pollSyncFn, 1000);
-      const { Browser } = await import("@capacitor/browser");
-      await Browser.open({ url, presentationStyle: "fullscreen" });
-      return;
-    } catch (err) {
-      console.warn("Capacitor Browser fallback:", err);
-      stopPaymentPolling();
-    }
-  }
-  window.location.href = url;
+  stopPaymentPolling();
+
+  // Misma WebView = misma sesión + pending payment. El return de Recurrente
+  // pasa por payment-complete.html y redirige a /?payment_return=...
+  window.location.assign(url);
 }
 
 export function onNativePaymentResume(handler) {

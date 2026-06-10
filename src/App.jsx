@@ -1322,9 +1322,11 @@ function WatermarkedImage({ src, photographer, purchased }) {
 
     const pending = readPendingPayment();
     const params = new URLSearchParams(window.location.search);
+    const checkoutIdFromUrl = params.get("checkout_id") || params.get("order_id");
     const paymentReturn =
       params.get("payment_return") === "true" ||
-      params.get("paypal_return") === "true";
+      params.get("paypal_return") === "true" ||
+      Boolean(checkoutIdFromUrl);
     const paypalToken = params.get("token");
     const videoIdFromUrl = params.get("video_id");
     if (!pending && !paymentReturn && !(paypalToken && videoIdFromUrl)) return false;
@@ -1335,6 +1337,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
     }
     const hintVideoId = pending?.videoId || videoIdFromUrl || undefined;
     const hintPhotoId = pending?.photoId || params.get("photo_id") || undefined;
+    const hintCheckoutId = pending?.checkoutId || checkoutIdFromUrl || undefined;
     const shouldRetry = paymentReturn || Boolean(paypalToken && hintVideoId);
     const maxAttempts = shouldRetry ? 12 : 1;
 
@@ -1351,6 +1354,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
           body: JSON.stringify({
             video_id: hintVideoId || undefined,
             photo_id: hintPhotoId || undefined,
+            checkout_id: hintCheckoutId || undefined,
           }),
         });
         const syncData = await syncRes.json().catch(() => ({}));
@@ -1439,8 +1443,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
                 Authorization: `Bearer ${session.access_token}`,
               },
               body: JSON.stringify({
-                checkout_id: pending.checkoutId || undefined,
-                order_id: pending.checkoutId || undefined,
+                checkout_id: pending.checkoutId || hintCheckoutId || undefined,
+                order_id: pending.checkoutId || hintCheckoutId || undefined,
                 video_id: pending.videoId,
               }),
             });
@@ -1459,7 +1463,11 @@ function WatermarkedImage({ src, photographer, purchased }) {
               "Content-Type": "application/json",
               Authorization: `Bearer ${session.access_token}`,
             },
-            body: JSON.stringify({ video_id: hintVideoId }),
+            body: JSON.stringify({
+              checkout_id: hintCheckoutId || undefined,
+              order_id: hintCheckoutId || undefined,
+              video_id: hintVideoId,
+            }),
           });
           if (res.ok) {
             stopPaymentPolling();
@@ -1478,8 +1486,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
               Authorization: `Bearer ${session.access_token}`,
             },
             body: JSON.stringify({
-              checkout_id: pending.checkoutId || undefined,
-              order_id: pending.checkoutId || undefined,
+              checkout_id: pending.checkoutId || hintCheckoutId || undefined,
+              order_id: pending.checkoutId || hintCheckoutId || undefined,
               photo_id: pending.photoId,
             }),
           });
@@ -3466,6 +3474,11 @@ useEffect(() => {
     return onNativePaymentResume((source) => {
       if (source === "browserCancelled" || source === "appUrlCancel") {
         handlePaymentCancelled();
+        return;
+      }
+
+      if (source === "browserClosedPending") {
+        syncPendingPayments({ silent: false });
         return;
       }
 

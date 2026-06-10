@@ -13,9 +13,12 @@
         align-items: center;
         justify-content: center;
         gap: 16px;
+        padding: 24px;
+        box-sizing: border-box;
         background: #0c0c0c;
         color: #fff;
         font-family: system-ui, sans-serif;
+        text-align: center;
       }
       .logo {
         width: 72px;
@@ -26,45 +29,74 @@
         color: #ff6b00;
         font-weight: 600;
         letter-spacing: 0.3px;
+        line-height: 1.5;
+      }
+      .hint {
+        color: #aaa;
+        font-size: 13px;
+        font-weight: 400;
+        max-width: 320px;
+      }
+      a.btn {
+        display: inline-block;
+        margin-top: 8px;
+        padding: 12px 20px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #ff8533, #ff6b00);
+        color: #000;
+        font-weight: 700;
+        text-decoration: none;
       }
     </style>
   </head>
   <body>
     <img class="logo" src="/favicon.png" alt="" width="72" height="72" />
     <p id="status">Confirmando tu pago...</p>
+    <p class="hint" id="hint">Volviendo a MotoShot GT...</p>
+    <a class="btn" id="manualBtn" href="#" style="display: none">Continuar en MotoShot</a>
     <script>
       (function () {
         var q = location.search;
         var params = new URLSearchParams(q || "");
         var isCancel = params.get("payment_cancel") === "true";
         var status = document.getElementById("status");
+        var hint = document.getElementById("hint");
+        var manualBtn = document.getElementById("manualBtn");
+
+        if (!params.get("payment_return") && !isCancel) {
+          params.set("payment_return", "true");
+        }
+        if (isCancel && !params.get("payment_cancel")) {
+          params.set("payment_cancel", "true");
+        }
+
+        var query = "?" + params.toString();
+        var appHome = "/" + query;
+
         if (status) {
           status.textContent = isCancel ? "Pago cancelado..." : "Confirmando tu pago...";
         }
-        if (!q) q = "?payment_return=true";
-        var ua = navigator.userAgent || "";
-        var isAndroid = /Android/i.test(ua);
 
-        if (isAndroid) {
-          var deep = "com.motoshotgt.app://payment-complete" + q;
-          var intent =
-            "intent://motoshot.pro/payment-complete" +
-            q +
-            "#Intent;scheme=https;package=com.motoshotgt.app;S.browser_fallback_url=" +
-            encodeURIComponent("https://motoshot.pro/" + q) +
-            ";end";
-          try {
-            location.replace(deep);
-          } catch (e) {
-            /* ignore */
-          }
-          setTimeout(function () {
-            location.replace(intent);
-          }, 300);
-          return;
+        function goHome() {
+          location.replace(appHome);
         }
 
-        location.replace("/" + q);
+        if (manualBtn) {
+          manualBtn.href = appHome;
+          manualBtn.addEventListener("click", function (e) {
+            e.preventDefault();
+            goHome();
+          });
+        }
+
+        // Same WebView / browser tab: return to the app route with all Recurrente params.
+        setTimeout(goHome, 150);
+
+        // If redirect did not happen (some in-app browsers), show manual continue button.
+        setTimeout(function () {
+          if (hint) hint.textContent = "Si no avanza solo, tocá el botón de abajo.";
+          if (manualBtn) manualBtn.style.display = "inline-block";
+        }, 2500);
       })();
     </script>
   </body>
