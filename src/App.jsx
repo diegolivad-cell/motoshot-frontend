@@ -1039,6 +1039,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [editingVideoId, setEditingVideoId] = useState(null);
   const [videoEditForm, setVideoEditForm] = useState({});
   const [videoEditSaving, setVideoEditSaving] = useState(false);
+  const [videoEditPayPalDisclosureAccepted, setVideoEditPayPalDisclosureAccepted] = useState(false);
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [purchasedVideos, setPurchasedVideos] = useState([]);
   const [buyerGalleryModalIdx, setBuyerGalleryModalIdx] = useState(null);
@@ -6945,7 +6946,9 @@ const renderPhotographerProfile = () => {
   };
   
   const openVideoEdit = (video) => {
+    const price = Number(video.price);
     setEditingVideoId(video.id);
+    setVideoEditPayPalDisclosureAccepted(Number.isFinite(price) && price >= RECURRENTE_MIN_GTQ);
     setVideoEditForm({
       price: String(video.price ?? ""),
       moto_brand: video.moto_brand || "",
@@ -6963,10 +6966,21 @@ const renderPhotographerProfile = () => {
   const cancelVideoEdit = () => {
     setEditingVideoId(null);
     setVideoEditForm({});
+    setVideoEditPayPalDisclosureAccepted(false);
   };
 
   const saveVideoEdit = async (videoId) => {
     if (!session?.access_token) return;
+    const editPrice = Number(videoEditForm.price);
+    if (
+      Number.isFinite(editPrice)
+      && editPrice > 0
+      && editPrice < RECURRENTE_MIN_GTQ
+      && !videoEditPayPalDisclosureAccepted
+    ) {
+      showToast(`Aceptá el aviso de pago con PayPal para guardar un precio menor a Q${RECURRENTE_MIN_GTQ}.`);
+      return;
+    }
     setVideoEditSaving(true);
     try {
       const res = await fetch(apiUrl(`/api/videos/${videoId}`), {
@@ -7031,6 +7045,13 @@ const renderPhotographerProfile = () => {
       "Video";
     const hqReady = video.hq_status === "ready";
     const isEditing = editable && editingVideoId === video.id;
+    const editPrice = Number(videoEditForm.price);
+    const needsPayPalDisclosure =
+      isEditing
+      && Number.isFinite(editPrice)
+      && editPrice > 0
+      && editPrice < RECURRENTE_MIN_GTQ;
+    const canSaveVideoEdit = !needsPayPalDisclosure || videoEditPayPalDisclosureAccepted;
 
     return (
       <div
@@ -7147,17 +7168,62 @@ const renderPhotographerProfile = () => {
                 <input
                   className="form-input"
                   type="number"
+                  min="1"
+                  step="1"
                   style={{ fontSize: 12, padding: "8px 10px" }}
                   value={videoEditForm.price || ""}
                   disabled={videoEditSaving}
-                  onChange={(e) => setVideoEditForm((prev) => ({ ...prev, price: e.target.value }))}
+                  onChange={(e) => {
+                    const nextPrice = e.target.value;
+                    setVideoEditForm((prev) => ({ ...prev, price: nextPrice }));
+                    const n = Number(nextPrice);
+                    if (Number.isFinite(n) && n >= RECURRENTE_MIN_GTQ) {
+                      setVideoEditPayPalDisclosureAccepted(true);
+                    } else if (Number.isFinite(n) && n > 0 && n < RECURRENTE_MIN_GTQ) {
+                      setVideoEditPayPalDisclosureAccepted(false);
+                    }
+                  }}
                 />
               </div>
+              {needsPayPalDisclosure && (
+                <div
+                  style={{
+                    padding: "12px 14px",
+                    borderRadius: 10,
+                    background: "rgba(255,107,0,0.08)",
+                    border: "1px solid rgba(255,107,0,0.35)",
+                  }}
+                >
+                  <p style={{ margin: 0, fontSize: 12, lineHeight: 1.55, color: "var(--text)" }}>
+                    Los precios menores a Q{RECURRENTE_MIN_GTQ} no pueden cobrarse con Recurrente.
+                    {" "}Si guardás este precio, los compradores <strong style={{ color: "var(--orange)" }}>solo podrán pagar con PayPal</strong>.
+                  </p>
+                  {!videoEditPayPalDisclosureAccepted ? (
+                    <AppButton
+                      className="nav-btn primary"
+                      style={{ marginTop: 10, width: "100%", fontSize: 12 }}
+                      disabled={videoEditSaving}
+                      onClick={() => setVideoEditPayPalDisclosureAccepted(true)}
+                    >
+                      ACEPTAR
+                    </AppButton>
+                  ) : (
+                    <div style={{ marginTop: 10, fontSize: 12, color: "var(--success)", fontWeight: 600 }}>
+                      Aceptado — podés guardar los cambios.
+                    </div>
+                  )}
+                </div>
+              )}
               <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
                 <AppButton
                   className="nav-btn primary"
-                  style={{ flex: 1, fontSize: 12 }}
-                  disabled={videoEditSaving}
+                  style={{
+                    flex: 1,
+                    fontSize: 12,
+                    opacity: canSaveVideoEdit ? 1 : 0.55,
+                    cursor: canSaveVideoEdit ? "pointer" : "not-allowed",
+                  }}
+                  disabled={videoEditSaving || !canSaveVideoEdit}
                   onClick={() => saveVideoEdit(video.id)}
                 >
                   {videoEditSaving ? "GUARDANDO..." : "GUARDAR"}
