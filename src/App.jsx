@@ -1,7 +1,7 @@
 ﻿import { useEffect, useState, useRef, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { supabase } from "./supabaseClient";
-import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile } from "./storageUpload";
+import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile, imageMimeForFile } from "./storageUpload";
 import { motion, AnimatePresence } from "framer-motion";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
@@ -2665,63 +2665,88 @@ useEffect(() => {
     const ext = videoExtForFile(file);
     const videoId = crypto.randomUUID();
     const storagePath = `${profile.id}/${videoId}/preview_${Date.now()}.${ext}`;
-
-    await uploadToSupabaseStorage({
-      bucket: "videos-preview",
-      path: storagePath,
-      file,
-      accessToken: session.access_token,
-      onProgress,
-    });
-
     let thumbnail_path = null;
-    if (thumbnailFile) {
-      const thumbExt = imageExtForFile(thumbnailFile);
-      thumbnail_path = `${profile.id}/${videoId}/thumbnail_${Date.now()}.${thumbExt}`;
-      await uploadToSupabaseStorage({
-        bucket: "videos-preview",
-        path: thumbnail_path,
-        file: thumbnailFile,
-        accessToken: session.access_token,
-      });
-    }
+    let thumbnail_base64 = null;
+    const uploadedPaths = [];
 
-    const dur = await readVideoDuration(file).catch(() => null);
-    const videoTags = tags || (await analyzeVideoFrameTags(file));
-
-    const body = {
-      video_id: videoId,
-      storage_path: storagePath,
-      ext,
-      duration_seconds: dur || null,
-      price: form.price,
-      sector: form.sector,
-      event_time_start: form.event_time_start,
-      event_time_end: form.event_time_end,
-      album_id: form.album_id,
-      moto_brand: videoTags?.moto_brand || "",
-      moto_model: videoTags?.moto_model || "",
-      moto_color: videoTags?.moto_color || "",
-      helmet_color: videoTags?.helmet_color || "",
-      suit_color: videoTags?.suit_color || "",
-      dorsal: videoTags?.dorsal || "",
-      thumbnail_path,
+    const cleanupUploaded = () => {
+      uploadedPaths.forEach((p) => removeFromSupabaseStorage("videos-preview", p));
     };
 
-    const { res, data } = await apiJson("/api/videos/register", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify(body),
-    }, { wake: true });
-    if (!res.ok) {
-      removeFromSupabaseStorage("videos-preview", storagePath);
-      if (thumbnail_path) removeFromSupabaseStorage("videos-preview", thumbnail_path);
-      throw new Error(data?.error || "No se pudo registrar el video.");
+    try {
+      if (thumbnailFile) {
+        const thumbExt = imageExtForFile(thumbnailFile);
+        thumbnail_path = `${profile.id}/${videoId}/thumbnail_${Date.now()}.${thumbExt}`;
+        try {
+          await uploadToSupabaseStorage({
+            bucket: "videos-preview",
+            path: thumbnail_path,
+            file: thumbnailFile,
+            contentType: imageMimeForFile(thumbnailFile),
+            accessToken: session.access_token,
+          });
+          uploadedPaths.push(thumbnail_path);
+        } catch (thumbErr) {
+          const msg = String(thumbErr?.message || "");
+          if (/mime type|not supported/i.test(msg)) {
+            thumbnail_path = null;
+            thumbnail_base64 = await fileToBase64(thumbnailFile).catch(() => null);
+            if (!thumbnail_base64) throw thumbErr;
+          } else {
+            throw thumbErr;
+          }
+        }
+      }
+
+      await uploadToSupabaseStorage({
+        bucket: "videos-preview",
+        path: storagePath,
+        file,
+        accessToken: session.access_token,
+        onProgress,
+      });
+      uploadedPaths.push(storagePath);
+
+      const dur = await readVideoDuration(file).catch(() => null);
+      const videoTags = tags || (await analyzeVideoFrameTags(file));
+
+      const body = {
+        video_id: videoId,
+        storage_path: storagePath,
+        ext,
+        duration_seconds: dur || null,
+        price: form.price,
+        sector: form.sector,
+        event_time_start: form.event_time_start,
+        event_time_end: form.event_time_end,
+        album_id: form.album_id,
+        moto_brand: videoTags?.moto_brand || "",
+        moto_model: videoTags?.moto_model || "",
+        moto_color: videoTags?.moto_color || "",
+        helmet_color: videoTags?.helmet_color || "",
+        suit_color: videoTags?.suit_color || "",
+        dorsal: videoTags?.dorsal || "",
+        thumbnail_path,
+        thumbnail_base64,
+      };
+
+      const { res, data } = await apiJson("/api/videos/register", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify(body),
+      }, { wake: true });
+      if (!res.ok) {
+        cleanupUploaded();
+        throw new Error(data?.error || "No se pudo registrar el video.");
+      }
+      return data;
+    } catch (err) {
+      cleanupUploaded();
+      throw err;
     }
-    return data;
   };
 
   const startVideoQueueUpload = async () => {

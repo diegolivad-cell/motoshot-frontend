@@ -21,11 +21,22 @@ export function imageExtForFile(file) {
   return "jpg";
 }
 
+export function imageMimeForFile(file) {
+  const type = String(file?.type || "");
+  if (type.startsWith("image/")) return type;
+  const ext = imageExtForFile(file);
+  if (ext === "png") return "image/png";
+  if (ext === "webp") return "image/webp";
+  if (ext === "gif") return "image/gif";
+  return "image/jpeg";
+}
+
 export function uploadToSupabaseStorage({
   bucket,
   path,
   file,
   accessToken,
+  contentType,
   onProgress,
   timeoutMs = 30 * 60 * 1000,
 }) {
@@ -36,7 +47,7 @@ export function uploadToSupabaseStorage({
     xhr.setRequestHeader("Authorization", `Bearer ${accessToken}`);
     xhr.setRequestHeader("apikey", SUPABASE_ANON_KEY);
     xhr.setRequestHeader("x-upsert", "false");
-    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.setRequestHeader("Content-Type", contentType || file.type || "application/octet-stream");
     xhr.timeout = timeoutMs;
 
     xhr.upload.onprogress = (e) => {
