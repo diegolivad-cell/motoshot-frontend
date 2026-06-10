@@ -13,6 +13,14 @@ export function videoExtForFile(file) {
   return "mp4";
 }
 
+export function imageExtForFile(file) {
+  const type = String(file?.type || "");
+  if (type === "image/png") return "png";
+  if (type === "image/webp") return "webp";
+  if (type === "image/gif") return "gif";
+  return "jpg";
+}
+
 export function uploadToSupabaseStorage({
   bucket,
   path,

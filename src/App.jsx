@@ -1,7 +1,7 @@
 ﻿import { useEffect, useState, useRef, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { supabase } from "./supabaseClient";
-import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile } from "./storageUpload";
+import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile } from "./storageUpload";
 import { motion, AnimatePresence } from "framer-motion";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
@@ -2674,9 +2674,20 @@ useEffect(() => {
       onProgress,
     });
 
+    let thumbnail_path = null;
+    if (thumbnailFile) {
+      const thumbExt = imageExtForFile(thumbnailFile);
+      thumbnail_path = `${profile.id}/${videoId}/thumbnail_${Date.now()}.${thumbExt}`;
+      await uploadToSupabaseStorage({
+        bucket: "videos-preview",
+        path: thumbnail_path,
+        file: thumbnailFile,
+        accessToken: session.access_token,
+      });
+    }
+
     const dur = await readVideoDuration(file).catch(() => null);
     const videoTags = tags || (await analyzeVideoFrameTags(file));
-    const thumbnail_base64 = thumbnailFile ? await fileToBase64(thumbnailFile).catch(() => null) : null;
 
     const body = {
       video_id: videoId,
@@ -2694,7 +2705,7 @@ useEffect(() => {
       helmet_color: videoTags?.helmet_color || "",
       suit_color: videoTags?.suit_color || "",
       dorsal: videoTags?.dorsal || "",
-      thumbnail_base64,
+      thumbnail_path,
     };
 
     const { res, data } = await apiJson("/api/videos/register", {
@@ -2707,6 +2718,7 @@ useEffect(() => {
     }, { wake: true });
     if (!res.ok) {
       removeFromSupabaseStorage("videos-preview", storagePath);
+      if (thumbnail_path) removeFromSupabaseStorage("videos-preview", thumbnail_path);
       throw new Error(data?.error || "No se pudo registrar el video.");
     }
     return data;
@@ -2720,7 +2732,7 @@ useEffect(() => {
     const isSingle = videoQueue.length === 1;
     const form = { ...videoForm };
     const singleTags = isSingle ? autoTags : null;
-    const singleThumb = isSingle ? videoThumbnailFile : null;
+    const queueThumb = videoThumbnailFile;
 
     setVideoUploadLoading(true);
     if (isSingle) {
@@ -2735,7 +2747,7 @@ useEffect(() => {
         const onProgress = (pct) => {
           setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, progress: pct } : q)));
         };
-        await uploadQueuedVideo(item, { thumbnailFile: singleThumb, tags: singleTags, form, onProgress });
+        await uploadQueuedVideo(item, { thumbnailFile: queueThumb, tags: singleTags, form, onProgress });
         done += 1;
         setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "done", progress: 100 } : q)));
       } catch (err) {
@@ -5202,7 +5214,6 @@ const renderPhotographerProfile = () => {
       } else {
         setAutoTags(null);
         setVideoDurationSeconds(null);
-        setVideoThumbnailFile(null);
       }
     };
 
@@ -5414,11 +5425,11 @@ const renderPhotographerProfile = () => {
               </div>
             )}
 
-            {isSingle && (
             <div className="form-group" style={{ marginBottom: 20 }}>
               <label className="form-label">Miniatura (opcional)</label>
               <div className="section-sub" style={{ marginBottom: 10 }}>
                 Subí una foto del rider — se muestra antes de reproducir el preview.
+                {queueTotal > 1 ? " Se aplica a todos los videos de esta carga." : ""}
               </div>
               <div
                 className={`dropzone${videoThumbnailFile ? " active" : ""}`}
@@ -5428,7 +5439,7 @@ const renderPhotographerProfile = () => {
                 <input
                   id="videoThumbInput"
                   type="file"
-                  accept="image/jpeg,image/png,image/webp"
+                  accept="image/*"
                   style={{ display: "none" }}
                   onChange={(e) => setVideoThumbnailFile(e.target.files?.[0] || null)}
                 />
@@ -5457,7 +5468,6 @@ const renderPhotographerProfile = () => {
                 )}
               </div>
             </div>
-            )}
 
             {isSingle && videoDurationSeconds ? (
               <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16 }}>
@@ -5705,17 +5715,38 @@ const renderPhotographerProfile = () => {
   };
 
   const renderVideoSearch = () => {
+    const getPreviewLimit = (duration) => {
+      if (!duration || !Number.isFinite(duration)) return 7;
+      return duration <= 7 ? 3 : 7;
+    };
+
     const SearchVideoCard = ({ video }) => {
       const [playing, setPlaying] = useState(false);
       const [progress, setProgress] = useState(0);
       const videoRef = useRef(null);
+      const previewLimitRef = useRef(7);
+
+      const stopAtPreviewLimit = (el) => {
+        if (!el) return;
+        const limit = getPreviewLimit(el.duration);
+        previewLimitRef.current = limit;
+        if (el.currentTime >= limit) {
+          el.pause();
+          el.currentTime = 0;
+          setPlaying(false);
+          setProgress(0);
+        }
+      };
 
       const togglePlay = () => {
         const el = videoRef.current;
         if (!el) return;
         if (!playing) {
+          el.currentTime = 0;
+          previewLimitRef.current = getPreviewLimit(el.duration);
           el.play().catch(() => {});
           setPlaying(true);
+          setProgress(0);
         } else {
           el.pause();
           el.currentTime = 0;
@@ -5724,23 +5755,95 @@ const renderPhotographerProfile = () => {
         }
       };
 
+      const hasThumb = Boolean(video.thumbnail_url);
+      const photographerHandle = video.photographer?.handle || video.photographer?.name || "MOTOSHOT";
+      const watermarkText = `@${String(photographerHandle).replace(/^@/, "")} • MotoShot GT`;
+
       return (
         <div style={{ position: "relative", background: "var(--surface)", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
-          <div style={{ position: "relative" }}>
+          <div style={{ position: "relative", height: 180, background: "#0a0a0a" }}>
+            {hasThumb && (
+              <img
+                src={video.thumbnail_url}
+                alt=""
+                style={{
+                  width: "100%",
+                  height: 180,
+                  objectFit: "cover",
+                  display: "block",
+                  opacity: playing ? 0 : 1,
+                }}
+              />
+            )}
             <video
               ref={videoRef}
               src={video.preview_url}
               muted
-              loop
               playsInline
               preload="metadata"
-              style={{ width: "100%", height: 180, objectFit: "cover", display: "block" }}
+              style={{
+                width: "100%",
+                height: 180,
+                objectFit: "cover",
+                display: "block",
+                ...(hasThumb
+                  ? { position: "absolute", top: 0, left: 0, opacity: playing ? 1 : 0 }
+                  : {}),
+              }}
+              onLoadedMetadata={(e) => {
+                previewLimitRef.current = getPreviewLimit(e.currentTarget.duration);
+              }}
               onTimeUpdate={(e) => {
                 const el = e.currentTarget;
-                if (!el.duration) return;
-                setProgress(el.currentTime / el.duration);
+                const limit = getPreviewLimit(el.duration);
+                previewLimitRef.current = limit;
+                if (!limit) return;
+                setProgress(Math.min(1, el.currentTime / limit));
+                stopAtPreviewLimit(el);
               }}
             />
+            {playing && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  zIndex: 1,
+                  pointerEvents: "none",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "-40%",
+                    left: "-40%",
+                    width: "180%",
+                    height: "180%",
+                    display: "grid",
+                    gridTemplateColumns: "repeat(3, 1fr)",
+                    gap: "28px 20px",
+                    transform: "rotate(-30deg)",
+                    alignContent: "center",
+                    justifyItems: "center",
+                  }}
+                >
+                  {Array.from({ length: 18 }).map((_, i) => (
+                    <span
+                      key={i}
+                      style={{
+                        color: "rgba(255,255,255,0.5)",
+                        fontSize: 14,
+                        fontWeight: 700,
+                        whiteSpace: "nowrap",
+                        userSelect: "none",
+                      }}
+                    >
+                      {watermarkText}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             <button
               type="button"
               aria-label={playing ? "Pausar video" : "Reproducir video"}
