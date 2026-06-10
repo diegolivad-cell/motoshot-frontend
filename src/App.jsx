@@ -1761,6 +1761,22 @@ const fetchPurchases = async ({ silent = false } = {}) => {
   }
 };
 
+const downloadFromSignedUrl = async (url, filename) => {
+  const fileRes = await fetch(url);
+  if (!fileRes.ok) {
+    throw new Error("El archivo ya no está disponible. Pedile al fotógrafo que lo vuelva a subir.");
+  }
+  const blob = await fileRes.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = filename || "MotoShot_descarga";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objectUrl);
+};
+
 // Compras listas para descargar y aún no reclamadas (badge estilo Facebook)
 const unclaimedPurchasesCount =
   purchases.filter((p) => p.photo?.hq_status === "ready" && !p.hq_downloaded_at).length +
@@ -7250,9 +7266,9 @@ const renderPhotographerProfile = () => {
         {purchaseItems.map((item) => {
           if (item.type === "photo") {
             const p = item.data;
-            const photoPending = p.photo?.hq_status === "pending";
             const photoDownloaded = Boolean(p.hq_downloaded_at) || p.photo?.hq_status === "downloaded";
-            const photoClaimable = p.photo?.hq_status === "ready" && !p.hq_downloaded_at;
+            const photoPending = !photoDownloaded && (p.photo?.hq_status === "pending" || !p.photo?.hq_path);
+            const photoClaimable = !photoDownloaded && !photoPending;
 
             return (
               <div
@@ -7317,7 +7333,7 @@ const renderPhotographerProfile = () => {
                         fetchPurchases({ silent: true });
                         return;
                       }
-                      window.open(data.download_url, "_blank");
+                      await downloadFromSignedUrl(data.download_url, data.filename);
                       fetchPurchases({ silent: true });
                     } catch (err) {
                       console.error(err);
@@ -7406,7 +7422,7 @@ const renderPhotographerProfile = () => {
                       fetchPurchases({ silent: true });
                       return;
                     }
-                    window.open(data.download_url, "_blank");
+                    await downloadFromSignedUrl(data.download_url, data.filename);
                     fetchPurchases({ silent: true });
                   } catch (err) {
                     console.error(err);
