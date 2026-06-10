@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState, useRef, useCallback } from "react";
-import { flushSync } from "react-dom";
+import { flushSync, createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile, imageMimeForFile } from "./storageUpload";
 import { motion, AnimatePresence } from "framer-motion";
@@ -388,9 +388,6 @@ const formatPhoneDisplay = (fullPhone) => {
   return localNumber;
 };
 
-const HERO_POSTER_URL =
-  "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/STATICBANNER.png";
-const VIDEO_CARD_PLACEHOLDER_URL = HERO_POSTER_URL;
 const HERO_VIDEO_URL =
   "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/14022738_720_1280_60fps.mp4";
 
@@ -580,45 +577,6 @@ function ProfileSearchBar({ value, onChange, onSearch, placeholder }) {
         <AppIcon name="search" size={17} />
       </button>
     </div>
-  );
-}
-
-function WatermarkedVideoOverlay({ photographer }) {
-  const label = photographer || "MOTOSHOT";
-  return (
-    <>
-      <div style={{
-        position: "absolute",
-        inset: 0,
-        zIndex: 6,
-        pointerEvents: "none",
-        background: "linear-gradient(180deg, rgba(0,0,0,0) 40%, rgba(0,0,0,0.55) 100%)",
-      }}
-      />
-      <div style={{
-        position: "absolute",
-        inset: 0,
-        zIndex: 6,
-        display: "grid",
-        placeItems: "center",
-        pointerEvents: "none",
-        userSelect: "none",
-      }}
-      >
-        <div style={{
-          color: "rgba(255,255,255,0.16)",
-          fontSize: "clamp(12px, 3.5vw, 28px)",
-          fontWeight: 900,
-          textAlign: "center",
-          textTransform: "uppercase",
-          letterSpacing: 2,
-          padding: "0 8px",
-        }}
-        >
-          {`© ${label} • MOTOSHOT GT`}
-        </div>
-      </div>
-    </>
   );
 }
 
@@ -899,6 +857,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [videoEditSaving, setVideoEditSaving] = useState(false);
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [purchasedVideos, setPurchasedVideos] = useState([]);
+  const [buyerGalleryModalIdx, setBuyerGalleryModalIdx] = useState(null);
+  const buyerGallerySwipeRef = useRef(0);
   const videoRefs = useRef({});
   const playingVideos = useRef([]);
   const videoPreviewHandlers = useRef({});
@@ -2950,6 +2910,10 @@ useEffect(() => {
   }, [view]);
 
   useEffect(() => {
+    if (view !== VIEWS.MY_GALLERY) setBuyerGalleryModalIdx(null);
+  }, [view]);
+
+  useEffect(() => {
     if (view === VIEWS.VIDEO_SEARCH) {
       setVideoSearchRan(false);
       setVideoSearchQuery("");
@@ -3063,7 +3027,6 @@ useEffect(() => {
     const previewProgress = videoPreviewProgress[video.id] || 0;
     const posterSrc = video.thumbnail_url || null;
     const mediaReady = Boolean(videoMediaReady[video.id]);
-    const showPlaceholder = !isPreviewing && !mediaReady;
     const previewLimit = video.duration_seconds || videoDurationCache[video.id];
 
     return (
@@ -3086,13 +3049,6 @@ useEffect(() => {
             },
           })}
         >
-          <img
-            src={VIDEO_CARD_PLACEHOLDER_URL}
-            alt=""
-            decoding="async"
-            aria-hidden
-            className={`video-card-static-banner${showPlaceholder ? "" : " is-hidden"}`}
-          />
           <video
             ref={(el) => { videoRefs.current[video.id] = el; }}
             className={`video-card-preview${isPreviewing ? " is-playing" : ""}${mediaReady ? " is-ready" : ""}`}
@@ -3130,11 +3086,6 @@ useEffect(() => {
               className={`video-card-poster-cover${mediaReady ? " is-visible" : ""}`}
               onLoad={() => markVideoMediaReady(video.id)}
             />
-          )}
-          {!isPreviewing && mediaReady && (
-            <div className="video-card-watermark">
-              <WatermarkedVideoOverlay photographer={video.photographer?.name} />
-            </div>
           )}
           <button
             type="button"
@@ -3190,6 +3141,35 @@ useEffect(() => {
           )}
         </div>
         <div style={{ padding: 12 }}>
+          {video.photographer?.name && (
+            <button
+              type="button"
+              onClick={(e) => openPhotographerFromVideo(video, e)}
+              style={{
+                background: "none",
+                border: "none",
+                padding: 0,
+                marginBottom: 8,
+                color: "var(--orange)",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+                textAlign: "left",
+                display: "block",
+                maxWidth: "100%",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {video.photographer.name}
+              {video.photographer.handle && (
+                <span style={{ marginLeft: 6, color: "var(--muted)", fontWeight: 500, fontSize: 12 }}>
+                  {video.photographer.handle.startsWith("@") ? video.photographer.handle : `@${video.photographer.handle}`}
+                </span>
+              )}
+            </button>
+          )}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
             {video.moto_brand && (
               <span className="tag active" style={{ fontSize: 11 }}>
@@ -4317,10 +4297,15 @@ const openPhotographerFromPhoto = (photo, e) => {
   setView(VIEWS.PHOTOGRAPHER_PROFILE);
 };
 
+const openPhotographerFromVideo = (video, e) => {
+  e?.stopPropagation();
+  if (!video?.photographer?.id) return;
+  openPhotographerResult(video.photographer);
+};
+
 const renderPhotographers = () => (
   <div style={{ paddingBottom: 100 }}>
     {/* Hero */}
-{/* Hero: STATICBANNER tapa el play nativo hasta que el video reproduce (web + APK) */}
 <div style={{ position: "relative", width: "100%", height: 320, overflow: "hidden", background: "#0a0a0a" }}>
   <video
     ref={heroVideoRef}
@@ -4350,24 +4335,6 @@ const renderPhotographers = () => (
       pointerEvents: "none",
     }}
     src={HERO_VIDEO_URL}
-  />
-  <img
-    src={HERO_POSTER_URL}
-    alt=""
-    decoding="async"
-    fetchPriority="high"
-    aria-hidden
-    style={{
-      position: "absolute",
-      inset: 0,
-      width: "100%",
-      height: "100%",
-      objectFit: "cover",
-      zIndex: 1,
-      opacity: heroVideoReady ? 0 : 1,
-      transition: "opacity 0.45s ease",
-      pointerEvents: "none",
-    }}
   />
 <div style={{ position: "absolute", inset: 0, zIndex: 2, background: "linear-gradient(180deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.65) 100%)" }} />
 <div style={{ position: "relative", zIndex: 3, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 20px", textAlign: "center" }}>
@@ -5862,8 +5829,10 @@ const renderPhotographerProfile = () => {
     const SearchVideoCard = ({ video }) => {
       const [playing, setPlaying] = useState(false);
       const [progress, setProgress] = useState(0);
+      const [durationSec, setDurationSec] = useState(video.duration_seconds || null);
       const videoRef = useRef(null);
       const previewLimitRef = useRef(7);
+      const durationLabel = formatVideoDuration(durationSec);
 
       const stopAtPreviewLimit = (el) => {
         if (!el) return;
@@ -5930,6 +5899,8 @@ const renderPhotographerProfile = () => {
                   : {}),
               }}
               onLoadedMetadata={(e) => {
+                const dur = Math.round(e.currentTarget.duration);
+                if (dur > 0) setDurationSec((prev) => prev || dur);
                 previewLimitRef.current = getPreviewLimit(e.currentTarget.duration);
               }}
               onTimeUpdate={(e) => {
@@ -6004,6 +5975,25 @@ const renderPhotographerProfile = () => {
             >
               {playing ? "■" : "▶"}
             </button>
+            {durationLabel && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: 8,
+                  right: 8,
+                  zIndex: 3,
+                  background: "rgba(0,0,0,0.82)",
+                  color: "#fff",
+                  padding: "2px 6px",
+                  borderRadius: 4,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  pointerEvents: "none",
+                }}
+              >
+                {durationLabel}
+              </div>
+            )}
           </div>
           {playing && (
             <div style={{ height: 3, background: "#333", width: "100%" }}>
@@ -6011,6 +6001,35 @@ const renderPhotographerProfile = () => {
             </div>
           )}
           <div style={{ padding: 12 }}>
+            {video.photographer?.name && (
+              <button
+                type="button"
+                onClick={(e) => openPhotographerFromVideo(video, e)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  marginBottom: 8,
+                  color: "var(--orange)",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  textAlign: "left",
+                  display: "block",
+                  maxWidth: "100%",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {video.photographer.name}
+                {video.photographer.handle && (
+                  <span style={{ marginLeft: 6, color: "var(--muted)", fontWeight: 500, fontSize: 12 }}>
+                    {video.photographer.handle.startsWith("@") ? video.photographer.handle : `@${video.photographer.handle}`}
+                  </span>
+                )}
+              </button>
+            )}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
               {video.moto_brand && (
                 <span className="tag active" style={{ fontSize: 11 }}>
@@ -6603,14 +6622,6 @@ const renderPhotographerProfile = () => {
         }}
       >
         <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#0a0a0a", overflow: "hidden" }}>
-          <img
-            src={VIDEO_CARD_PLACEHOLDER_URL}
-            alt=""
-            decoding="async"
-            aria-hidden
-            className={`video-card-static-banner gallery-video-banner${videoMediaReady[video.id] ? " is-hidden" : ""}`}
-            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
-          />
           {video.thumbnail_url && (
             <img
               src={video.thumbnail_url}
@@ -7175,49 +7186,258 @@ const renderPhotographerProfile = () => {
   }
   
     // ── COMPRADOR ──────────────────────────────────────────────────
+    const buyerGalleryItems = [
+      ...purchases.map((p) => ({
+        type: "photo",
+        key: `photo-${p.id}`,
+        purchase: p,
+        completed_at: p.completed_at,
+      })),
+      ...videoPurchases.map((v) => ({
+        type: "video",
+        key: `video-${v.id}`,
+        purchase: v,
+        completed_at: v.completed_at,
+      })),
+    ].sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
+
+    const downloadBuyerGalleryItem = async (item) => {
+      if (!session?.access_token) return;
+      const toastOutsideModal = (msg) => {
+        setBuyerGalleryModalIdx(null);
+        showToast(msg);
+      };
+      try {
+        if (item.type === "photo") {
+          const p = item.purchase;
+          const res = await fetch(`/api/downloads/${p.photo.id}`, {
+            headers: { Authorization: `Bearer ${session.access_token}` },
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Error al descargar");
+          if (data.status === "pending") {
+            toastOutsideModal(data.message || "El fotógrafo está preparando tu foto.");
+            fetchPurchases({ silent: true });
+            return;
+          }
+          if (data.status === "downloaded") {
+            toastOutsideModal(data.message || "Ya descargaste esta foto.");
+            fetchPurchases({ silent: true });
+            return;
+          }
+          await downloadFromSignedUrl(data.download_url, data.filename);
+          fetchPurchases({ silent: true });
+          return;
+        }
+        const v = item.purchase;
+        const res = await fetch(`/api/videos/${v.video.id}/download`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Error al descargar");
+        if (data.status === "pending") {
+          toastOutsideModal(data.message || "El fotógrafo está preparando tu video.");
+          fetchPurchases({ silent: true });
+          return;
+        }
+        if (data.status === "downloaded") {
+          toastOutsideModal(data.message || "Ya descargaste este video.");
+          fetchPurchases({ silent: true });
+          return;
+        }
+        await downloadFromSignedUrl(data.download_url, data.filename);
+        fetchPurchases({ silent: true });
+      } catch (err) {
+        console.error(err);
+        toastOutsideModal(err.message || "Error al descargar.");
+      }
+    };
+
+    const modalItem = buyerGalleryModalIdx !== null ? buyerGalleryItems[buyerGalleryModalIdx] : null;
+
     return (
       <div style={{ paddingBottom: 100 }}>
-        <div className="upload-view" style={{ paddingBottom: 0 }}>
-          <SectionTitleIcon icon="gallery">MIS FOTOS</SectionTitleIcon>
-          <div className="section-sub">Fotos que compraste — tocá para descargar.</div>
+        <div className="upload-view" style={{ paddingBottom: 12 }}>
+          <SectionTitleIcon icon="gallery">Mi Galeria</SectionTitleIcon>
+          <div className="section-sub">Fotos y videos que compraste — tocá para ver en grande.</div>
         </div>
         {!user ? (
-          <div className="empty"><EmptyIcon name="lock" /><div>Iniciá sesión para ver tus fotos.</div></div>
+          <div className="empty"><EmptyIcon name="lock" /><div>Iniciá sesión para ver tu galería.</div></div>
         ) : purchasesLoading ? (
           <div className="empty"><LoaderIcon size={44} /><div>Cargando...</div></div>
-        ) : purchases.length === 0 ? (
+        ) : buyerGalleryItems.length === 0 ? (
           <div className="empty">
             <EmptyIcon name="receipt" />
-            <div>Todavía no compraste fotos.</div>
+            <div>Todavía no compraste fotos ni videos.</div>
             <AppButton className="nav-btn primary" style={{ marginTop: 16 }} onClick={() => { setActiveTab("feed"); setView(VIEWS.PHOTOGRAPHERS); }}>
               Explorar fotógrafos
             </AppButton>
           </div>
         ) : (
-          <div className="grid">
-            {purchases.map(p => (
-              <div key={p.id} className="card"
-                onClick={async () => {
-                  try {
-                    const res = await fetch(`/api/downloads/${p.photo.id}`, { headers: { Authorization: `Bearer ${session.access_token}` } });
-                    if (!res.ok) throw new Error();
-                    const data = await res.json();
-                    window.open(data.download_url, "_blank");
-                  } catch { setMessage("Error al descargar."); }
-                }}>
-                <div className="card-bought-badge" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="check" size={12} color="#000" /> Comprada</div>
-                <WatermarkedImage src={p.photo?.watermark_url} photographer={p.photo?.photographer?.name || "MOTOSHOT"} purchased={true} />
-                <div className="card-overlay">
-                  <div className="card-photographer">{p.photo?.photographer?.name}</div>
-                  <div className="card-location"><IconText icon="pin" size={12}>{p.photo?.location}</IconText></div>
-                  <div className="card-footer">
-                    <div className="card-price">Q{p.amount}</div>
-                    <div style={{ fontSize: 11, background: "var(--success)", color: "#000", padding: "3px 8px", borderRadius: 6, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={10} color="#000" style={{ transform: "rotate(90deg)" }} /> Descargar</div>
-                  </div>
-                </div>
-              </div>
-            ))}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, 1fr)",
+              gap: 2,
+              width: "100%",
+            }}
+          >
+            {buyerGalleryItems.map((item, idx) => {
+              const thumb = item.type === "photo"
+                ? item.purchase.photo?.watermark_url
+                : item.purchase.video?.thumbnail_url;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  aria-label={item.type === "video" ? "Abrir video comprado" : "Abrir foto comprada"}
+                  onClick={() => setBuyerGalleryModalIdx(idx)}
+                  style={{
+                    position: "relative",
+                    aspectRatio: "1 / 1",
+                    padding: 0,
+                    border: "none",
+                    cursor: "pointer",
+                    background: "#0a0a0a",
+                    overflow: "hidden",
+                    display: "block",
+                    width: "100%",
+                  }}
+                >
+                  {thumb ? (
+                    <img
+                      src={thumb}
+                      alt=""
+                      loading="lazy"
+                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                    />
+                  ) : item.type === "video" ? (
+                    <div style={{ width: "100%", height: "100%", background: "linear-gradient(135deg, #1a1a1a, #0a0a0a)" }} />
+                  ) : null}
+                  {item.type === "video" && (
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: 6,
+                        right: 6,
+                        width: 22,
+                        height: 22,
+                        borderRadius: 4,
+                        background: "rgba(0,0,0,0.55)",
+                        color: "#fff",
+                        fontSize: 10,
+                        display: "grid",
+                        placeItems: "center",
+                        lineHeight: 1,
+                        pointerEvents: "none",
+                      }}
+                    >
+                      ▶
+                    </span>
+                  )}
+                  <span
+                    style={{
+                      position: "absolute",
+                      bottom: 6,
+                      right: 6,
+                      minWidth: 18,
+                      height: 18,
+                      padding: "0 4px",
+                      borderRadius: 4,
+                      background: "#FF6B00",
+                      color: "#000",
+                      fontSize: 11,
+                      fontWeight: 800,
+                      display: "grid",
+                      placeItems: "center",
+                      lineHeight: 1,
+                      pointerEvents: "none",
+                    }}
+                  >
+                    ✓
+                  </span>
+                </button>
+              );
+            })}
           </div>
+        )}
+
+        {modalItem && typeof document !== "undefined" && createPortal(
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 10000,
+              background: "#000",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", padding: "12px 16px 0", paddingTop: "max(12px, env(safe-area-inset-top, 0px))" }}>
+              <AppButton
+                className="modal-close"
+                aria-label="Cerrar galería"
+                onClick={() => setBuyerGalleryModalIdx(null)}
+                style={{ background: "rgba(255,255,255,0.08)", borderColor: "rgba(255,255,255,0.15)", color: "#fff" }}
+              >
+                <AppIcon name="x" size={18} />
+              </AppButton>
+            </div>
+            <div
+              style={{
+                flex: 1,
+                display: "grid",
+                placeItems: "center",
+                padding: "8px 0",
+                touchAction: "pan-y",
+                minHeight: 0,
+                overflow: "hidden",
+              }}
+              onTouchStart={(e) => {
+                buyerGallerySwipeRef.current = e.touches[0]?.clientX ?? 0;
+              }}
+              onTouchEnd={(e) => {
+                const startX = buyerGallerySwipeRef.current;
+                const endX = e.changedTouches[0]?.clientX ?? startX;
+                const dx = endX - startX;
+                if (dx > 55 && buyerGalleryModalIdx > 0) {
+                  setBuyerGalleryModalIdx((i) => i - 1);
+                } else if (dx < -55 && buyerGalleryModalIdx < buyerGalleryItems.length - 1) {
+                  setBuyerGalleryModalIdx((i) => i + 1);
+                }
+              }}
+            >
+              {modalItem.type === "photo" ? (
+                <img
+                  src={modalItem.purchase.photo?.watermark_url}
+                  alt=""
+                  style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+                />
+              ) : (
+                <video
+                  key={modalItem.purchase.video?.id}
+                  src={modalItem.purchase.video?.preview_url}
+                  controls
+                  playsInline
+                  autoPlay
+                  style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+                />
+              )}
+            </div>
+            <div style={{ flexShrink: 0, padding: "12px 16px calc(20px + env(safe-area-inset-bottom, 0px))", display: "flex", justifyContent: "center" }}>
+              <AppButton
+                className="pay-btn"
+                style={{ maxWidth: 320, width: "100%" }}
+                onClick={() => downloadBuyerGalleryItem(modalItem)}
+              >
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <AppIcon name="arrowRight" size={14} style={{ transform: "rotate(90deg)" }} />
+                  Descargar
+                </span>
+              </AppButton>
+            </div>
+          </div>,
+          document.body,
         )}
       </div>
     );
@@ -9230,12 +9450,6 @@ const renderVendorRequest = () => {
     .hero-video-bg::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
     .hero-video-bg::-webkit-media-controls-overlay-play-button { display: none !important; }
     .video-card-media { overflow: hidden; }
-    .video-card-static-banner {
-      position: absolute; inset: 0; width: 100%; height: 100%;
-      object-fit: cover; z-index: 3; pointer-events: none;
-      opacity: 1; transition: opacity 0.4s ease;
-    }
-    .video-card-static-banner.is-hidden { opacity: 0; visibility: hidden; }
     .video-card-preview {
       position: absolute; inset: 0; width: 100%; height: 100%;
       object-fit: cover; background: #0a0a0a; z-index: 2;
@@ -9255,9 +9469,6 @@ const renderVendorRequest = () => {
       opacity: 0; transition: opacity 0.35s ease;
     }
     .video-card-poster-cover.is-visible { opacity: 1; }
-    .video-card-watermark {
-      position: absolute; inset: 0; z-index: 5; pointer-events: none;
-    }
     .gallery-video-poster { opacity: 0; transition: opacity 0.35s ease; }
     .gallery-video-preview.is-ready { opacity: 1 !important; }
     .gallery-video-poster.is-visible { opacity: 1; }
@@ -9458,8 +9669,9 @@ const renderVendorRequest = () => {
     .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
     .empty-icon { margin-bottom: 12px; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .success-page { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; background: radial-gradient(circle at center, rgba(255,107,0,0.08), transparent 70%); }
+    .success-page { min-height: calc(100dvh - 58px); display: flex; flex-direction: column; align-items: center; justify-content: flex-start; text-align: center; padding: 20px 24px 120px; background: radial-gradient(circle at center, rgba(255,107,0,0.08), transparent 70%); box-sizing: border-box; width: 100%; }
     .payment-success-page {
+      padding-top: 12px;
       background:
         radial-gradient(ellipse 90% 55% at 50% -5%, rgba(255,107,0,0.28), transparent 58%),
         radial-gradient(circle at 50% 85%, rgba(255,140,51,0.06), transparent 45%),
@@ -9485,12 +9697,28 @@ const renderVendorRequest = () => {
       font-size: 11px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase;
       margin-bottom: 12px; box-shadow: 0 0 18px rgba(255,107,0,0.15);
     }
-    .success-page-title { font-family: 'Bebas Neue', sans-serif; font-size: 52px; letter-spacing: 4px; color: var(--orange); }
+    .success-page-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: clamp(34px, 10vw, 52px);
+      letter-spacing: 3px;
+      color: var(--orange);
+      line-height: 1.2;
+      padding: 8px 8px 4px;
+      margin: 0;
+      width: 100%;
+      max-width: 360px;
+      overflow: visible;
+    }
     .payment-success-page .success-page-title {
+      display: inline-block;
+      width: auto;
+      max-width: calc(100% - 16px);
       background: linear-gradient(135deg, #ffe0a8 0%, #ffb347 38%, #ff6b00 100%);
       -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+      -webkit-box-decoration-break: clone;
+      box-decoration-break: clone;
       filter: drop-shadow(0 3px 14px rgba(255,107,0,0.35));
-      letter-spacing: 3px;
+      letter-spacing: 2px;
     }
     .success-page-sub { color: var(--muted); font-size: 16px; margin: 10px 0 32px; line-height: 1.6; }
     .payment-success-page .success-page-sub strong { color: var(--orange-light); font-weight: 700; }
@@ -9498,7 +9726,7 @@ const renderVendorRequest = () => {
     .success-page-photo { width: 100%; aspect-ratio: 4/3; border-radius: 10px; overflow: hidden; margin-bottom: 12px; background: var(--card); }
     .success-page-info { text-align: left; font-size: 13px; color: var(--muted); line-height: 1.8; }
     .success-page-info strong { color: var(--text); }
-    .email-confirmed-page { background: radial-gradient(circle at center, rgba(255,107,0,0.1), transparent 72%); }
+    .email-confirmed-page { background: radial-gradient(circle at center, rgba(255,107,0,0.1), transparent 72%); justify-content: center; padding-bottom: 80px; }
     .email-confirmed-page .success-page-title { color: var(--orange); letter-spacing: 2px; }
     .email-confirmed-page .success-page-sub strong { color: var(--orange); }
     .email-confirmed-steps { width: 100%; max-width: 360px; text-align: left; margin-bottom: 28px; }
@@ -9612,7 +9840,6 @@ const renderVendorRequest = () => {
             <div className="success-page-card">
               <div className="success-page-photo" style={{ position: "relative" }}>
                 <video src={selectedVideo.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                <WatermarkedVideoOverlay photographer={selectedVideo.photographer?.name} />
               </div>
               <div className="success-page-info">
                 <div><strong>Video:</strong> {label}</div>
@@ -10628,7 +10855,6 @@ const renderVendorRequest = () => {
         {selectedVideo && (
           <div className="modal-photo" style={{ position: "relative" }}>
             <video src={selectedVideo.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            <WatermarkedVideoOverlay photographer={selectedVideo.photographer?.name} />
           </div>
         )}
         <div className="modal-body">
@@ -10710,7 +10936,8 @@ const renderVendorRequest = () => {
 </AnimatePresence>
 
 {view !== VIEWS.SUCCESS &&
-  view !== VIEWS.AUTH && (
+  view !== VIEWS.AUTH &&
+  buyerGalleryModalIdx === null && (
     isCEO && isLoggedIn ? (
       <BottomNav
         variant="ceo"
@@ -10770,7 +10997,7 @@ const renderVendorRequest = () => {
       const toastBg = isSuccess ? "rgba(255,107,0,0.12)" : isError ? "rgba(255,68,68,0.12)" : "rgba(255,107,0,0.12)";
       return {
         position: "fixed", top: 70, left: "50%",
-        zIndex: 999, maxWidth: 340, width: "90%",
+        zIndex: 10050, maxWidth: 340, width: "90%",
         background: toastBg,
         border: `1px solid ${toastColor}`,
         borderRadius: 12, padding: "12px 20px",
