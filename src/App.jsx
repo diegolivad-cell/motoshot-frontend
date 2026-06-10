@@ -852,6 +852,39 @@ function WatermarkedImage({ src, photographer, purchased }) {
     },
     [isCEO, user, purchased]
   );
+  const getVideoPurchaseState = useCallback(
+    (videoOrId) => {
+      if (!user) return null;
+      const videoObj = typeof videoOrId === "object" && videoOrId ? videoOrId : null;
+      const videoId = videoObj?.id ?? videoOrId;
+      if (!videoId) return null;
+
+      if (videoObj?.buyer_purchase_status) {
+        return videoObj.buyer_purchase_status;
+      }
+
+      const normId = String(videoId).toLowerCase();
+      const purchase = videoPurchases.find((v) => {
+        const pid = v.video?.id ?? v.video_id;
+        return pid && String(pid).toLowerCase() === normId;
+      });
+      if (!purchase) return null;
+      const hqPending = purchase.video?.hq_status === "pending";
+      const hqDownloaded = Boolean(purchase.hq_downloaded_at) || purchase.video?.hq_status === "downloaded";
+      const hqReady = purchase.video?.hq_status === "ready";
+      if (hqReady || hqDownloaded) return "entregado";
+      if (hqPending) return "comprado";
+      return "comprado";
+    },
+    [user, videoPurchases]
+  );
+  const videoPurchaseBtnDisabled = {
+    background: "var(--surface)",
+    color: "var(--muted)",
+    border: "1px solid var(--border)",
+    opacity: 0.85,
+    cursor: "not-allowed",
+  };
   const isOwnPhoto = useCallback(
     (photo) => Boolean(photo && user && photo.photographer?.user_id === user.id),
     [user]
@@ -1905,8 +1938,12 @@ const fetchPurchases = async ({ silent = false } = {}) => {
     });
     if (!res.ok) throw new Error("Error cargando compras");
     const data = await res.json();
-    setPurchases(data.purchases || []);
-    setVideoPurchases(data.video_purchases || []);
+    const photoRows = data.purchases || [];
+    const videoRows = data.video_purchases || [];
+    setPurchases(photoRows);
+    setVideoPurchases(videoRows);
+    setPurchased(photoRows.map((p) => p.photo?.id).filter(Boolean));
+    setPurchasedVideos(videoRows.map((v) => v.video?.id).filter(Boolean));
   } catch (err) {
     console.error(err);
     if (!silent) showToast("No se pudieron cargar tus compras.");
@@ -2039,10 +2076,13 @@ const fetchAlbums = async (photographerId) => {
 
 const fetchPhotographerProfile = async (id) => {
   try {
+    const videoHeaders = session?.access_token
+      ? { Authorization: `Bearer ${session.access_token}` }
+      : undefined;
     const [profileRes, albumsRes, videosRes] = await Promise.all([
       fetch(`/api/auth/photographers/${id}`),
       fetch(`/api/auth/albums/${id}`),
-      fetch(`/api/videos/photographer/${id}`),
+      fetch(`/api/videos/photographer/${id}`, videoHeaders ? { headers: videoHeaders } : undefined),
     ]);
     const [profileData, albumsData, videosData] = await Promise.all([
       profileRes.json(),
@@ -2073,7 +2113,13 @@ const fetchMyVideos = async (photographerId) => {
   if (!photographerId) return;
   try {
     setMyVideosLoading(true);
-    const res = await fetch(`/api/videos/photographer/${photographerId}`);
+    const headers = session?.access_token
+      ? { Authorization: `Bearer ${session.access_token}` }
+      : undefined;
+    const res = await fetch(
+      `/api/videos/photographer/${photographerId}`,
+      headers ? { headers } : undefined
+    );
     if (res.ok) {
       const data = await res.json();
       setMyVideos(Array.isArray(data) ? data : []);
@@ -2696,6 +2742,12 @@ useEffect(() => {
   }, [user, session?.access_token]);
 
   useEffect(() => {
+    if (view === VIEWS.VIDEO_SEARCH && user && session?.access_token) {
+      fetchPurchases({ silent: true });
+    }
+  }, [view, user, session?.access_token]);
+
+  useEffect(() => {
     if (view !== VIEWS.ADMIN || !isStaff || !session) return;
     fetchVendorRequests();
     fetchAdminWithdrawals();
@@ -3023,7 +3075,11 @@ useEffect(() => {
       const params = new URLSearchParams();
       if (q) params.set("q", q);
       const url = params.toString() ? `/api/videos/search?${params}` : "/api/videos/search";
-      const res = await fetch(url);
+      const headers = session?.access_token
+        ? { Authorization: `Bearer ${session.access_token}` }
+        : undefined;
+      const fetchOpts = headers ? { headers } : undefined;
+      const res = await fetch(url, fetchOpts);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Error al buscar videos");
       const list = Array.isArray(data) ? data : [];
@@ -3031,7 +3087,7 @@ useEffect(() => {
       if (list.some((v) => !v.thumbnail_url)) {
         const refreshSearchThumbnails = async () => {
           try {
-            const retryRes = await fetch(url);
+            const retryRes = await fetch(url, fetchOpts);
             const retryData = await retryRes.json();
             if (retryRes.ok && Array.isArray(retryData)) setVideos(retryData);
           } catch (_) {}
@@ -3159,7 +3215,7 @@ useEffect(() => {
       setVideoSearchQuery("");
       handleVideoSearch("");
     }
-  }, [view]);
+  }, [view, session?.access_token]);
 
   useEffect(() => {
     Object.values(videoRefs.current).forEach((el) => {
@@ -3420,7 +3476,7 @@ useEffect(() => {
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-            <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
+            {renderVideoBuyButton(video)}
           </div>
         </div>
       </div>
@@ -3517,9 +3573,34 @@ useEffect(() => {
 
   const handleBuyVideo = (video) => {
     if (!user) { setMessage(""); setView(VIEWS.AUTH); return; }
+    if (getVideoPurchaseState(video)) {
+      showToast("Ya compraste este video.");
+      return;
+    }
     setSelected(null);
     setSelectedVideo(video);
     setPayStep(1);
+  };
+
+  const renderVideoBuyButton = (video) => {
+    const purchaseState = getVideoPurchaseState(video);
+    if (purchaseState === "entregado") {
+      return (
+        <AppButton className="card-buy" disabled style={videoPurchaseBtnDisabled}>
+          Entregado
+        </AppButton>
+      );
+    }
+    if (purchaseState === "comprado") {
+      return (
+        <AppButton className="card-buy" disabled style={videoPurchaseBtnDisabled}>
+          Comprado
+        </AppButton>
+      );
+    }
+    return (
+      <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
+    );
   };
 
   const handlePayment = async () => {
@@ -6291,7 +6372,7 @@ const renderPhotographerProfile = () => {
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-              <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
+              {renderVideoBuyButton(video)}
             </div>
           </div>
         </div>
