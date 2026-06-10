@@ -34,6 +34,8 @@ import {
   isOAuthBrowserOpen,
 } from "./authFlow.js";
 import { apiFetch, apiJson, apiUrl, parseApiJson, wakeApiServer } from "./apiClient.js";
+import { GT_BANKS, isListedBank, normalizeBankName } from "./gtBanks.js";
+import { BankLogo } from "./BankLogo.jsx";
 
 const VIEWS = {
   PHOTOGRAPHERS: "photographers",
@@ -391,6 +393,180 @@ const formatPhoneDisplay = (fullPhone) => {
 const HERO_VIDEO_URL =
   "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/14022738_720_1280_60fps.mp4";
 
+const BANK_ACCOUNT_TYPES = ["Monetaria", "Ahorro"];
+
+const BANK_CURRENCIES = [
+  { value: "GTQ", label: "Quetzales" },
+  { value: "USD", label: "Dólares" },
+];
+
+const EMPTY_BANK_FORM = {
+  bank: "",
+  customBank: "",
+  currency: "GTQ",
+  holder: "",
+  accountNumber: "",
+  accountType: "Monetaria",
+};
+
+const BANK_FIELD_LABEL_STYLE = {
+  display: "block",
+  fontSize: 12,
+  fontWeight: 700,
+  color: "var(--muted)",
+  marginBottom: 6,
+};
+
+function resolveBankName(form) {
+  if (form.bank === "Otro") return form.customBank.trim();
+  return form.bank.trim();
+}
+
+function IconSelectField({ label, value, onChange, placeholder, options }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const selected = options.find((o) => o.value === value);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => {
+      if (!rootRef.current?.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} style={{ position: "relative" }}>
+      {label && <span style={BANK_FIELD_LABEL_STYLE}>{label}</span>}
+      <button
+        type="button"
+        className="form-input"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          cursor: "pointer",
+          textAlign: "left",
+          borderColor: open ? "var(--orange)" : undefined,
+        }}
+      >
+        {selected?.icon || <BankLogo bank="" size={32} />}
+        <span style={{ flex: 1, color: selected ? "var(--text)" : "var(--muted)", fontSize: 14 }}>
+          {selected?.label || placeholder}
+        </span>
+        <span style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1 }}>{open ? "▴" : "▾"}</span>
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: "calc(100% + 4px)",
+            zIndex: 80,
+            background: "var(--card)",
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            maxHeight: 320,
+            overflowY: "auto",
+            boxShadow: "0 14px 36px rgba(0,0,0,0.5)",
+          }}
+        >
+          {options.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => {
+                onChange(opt.value);
+                setOpen(false);
+              }}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "11px 14px",
+                background: value === opt.value ? "rgba(255,107,0,0.12)" : "transparent",
+                border: "none",
+                borderBottom: "1px solid var(--border)",
+                color: "var(--text)",
+                cursor: "pointer",
+                textAlign: "left",
+                fontFamily: "'DM Sans', sans-serif",
+                fontSize: 14,
+              }}
+            >
+              {opt.icon}
+              <span>{opt.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function parseBankAccount(stored) {
+  if (!stored?.trim()) return null;
+  const raw = stored.trim();
+  if (raw.startsWith("{")) {
+    try {
+      const data = JSON.parse(raw);
+      if (data && typeof data === "object") {
+        return {
+          bank: String(data.bank || "").trim(),
+          currency: data.currency === "USD" ? "USD" : "GTQ",
+          holder: String(data.holder || "").trim(),
+          accountNumber: String(data.accountNumber || data.number || "").trim(),
+          accountType: String(data.accountType || data.type || "Monetaria").trim(),
+        };
+      }
+    } catch (_) {
+      /* legacy */
+    }
+  }
+  return {
+    bank: raw,
+    currency: "GTQ",
+    holder: "",
+    accountNumber: "",
+    accountType: "",
+    legacy: true,
+  };
+}
+
+function serializeBankAccount(form) {
+  return JSON.stringify({
+    bank: resolveBankName(form),
+    currency: form.currency === "USD" ? "USD" : "GTQ",
+    holder: form.holder.trim(),
+    accountNumber: form.accountNumber.trim(),
+    accountType: form.accountType,
+  });
+}
+
+function formatBankAccountLabel(stored) {
+  const parsed = parseBankAccount(stored);
+  if (!parsed) return "";
+  if (parsed.legacy) return parsed.bank;
+  const currencyLabel = BANK_CURRENCIES.find((c) => c.value === parsed.currency)?.label || parsed.currency;
+  return [parsed.bank, parsed.accountType, parsed.accountNumber, parsed.holder, currencyLabel]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function isStructuredBankAccount(stored) {
+  const parsed = parseBankAccount(stored);
+  return Boolean(parsed && !parsed.legacy && parsed.bank && parsed.accountNumber);
+}
+
 function buildNavCurvePath(activeIndex, total, w = 400) {
   if (total <= 0) return `M0 0 H${w} V72 H0 Z`;
   const tabW = w / total;
@@ -673,6 +849,10 @@ function WatermarkedImage({ src, photographer, purchased }) {
     },
     [isCEO, user, purchased]
   );
+  const isOwnPhoto = useCallback(
+    (photo) => Boolean(photo && user && photo.photographer?.user_id === user.id),
+    [user]
+  );
   const isLoggedIn = authReady && Boolean(user && session?.access_token);
   const [showPassword, setShowPassword] = useState(false);
   const [showSubscribeModal, setShowSubscribeModal] = useState(false);
@@ -805,7 +985,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [subsLoading, setSubsLoading] = useState(false);
   const [withdrawals, setWithdrawals] = useState([]);
   const [withdrawalsLoading, setWithdrawalsLoading] = useState(false);
-  const [bankAccountInput, setBankAccountInput] = useState("");
+  const [bankAccountForm, setBankAccountForm] = useState({ ...EMPTY_BANK_FORM });
+  const [bankAccountEditing, setBankAccountEditing] = useState(true);
   const [bankAccountSaving, setBankAccountSaving] = useState(false);
   const [showEmailConfirm, setShowEmailConfirm] = useState(false);
   const [adminWithdrawals, setAdminWithdrawals] = useState([]);
@@ -1993,11 +2174,19 @@ const fetchMyWithdrawals = async () => {
 };
 
 const handleSaveBankAccount = async () => {
-  const cleaned = bankAccountInput.trim();
-  if (cleaned.length < 10) {
-    showToast("Ingresá banco, tipo de cuenta y número (mín. 10 caracteres).");
+  const bankName = resolveBankName(bankAccountForm);
+  const holder = bankAccountForm.holder.trim();
+  const accountNumber = bankAccountForm.accountNumber.trim();
+  const accountType = bankAccountForm.accountType;
+  if (!bankName || !holder || !accountNumber || !accountType) {
+    showToast("Completá banco, titular, número y tipo de cuenta.");
     return;
   }
+  if (accountNumber.replace(/\D/g, "").length < 6) {
+    showToast("El número de cuenta debe tener al menos 6 dígitos.");
+    return;
+  }
+  const serialized = serializeBankAccount(bankAccountForm);
   setBankAccountSaving(true);
   try {
     const res = await fetch("/api/auth/bank-account", {
@@ -2006,12 +2195,12 @@ const handleSaveBankAccount = async () => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${session?.access_token}`,
       },
-      body: JSON.stringify({ bank_account: cleaned }),
+      body: JSON.stringify({ bank_account: serialized }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     setProfile(data.photographer);
-    setBankAccountInput(data.photographer?.bank_account || cleaned);
+    setBankAccountEditing(false);
     showToast("Cuenta bancaria guardada.");
   } catch (err) {
     showToast(err.message || "No se pudo guardar la cuenta.");
@@ -2490,8 +2679,35 @@ useEffect(() => {
   }, [view, isStaff, isCEO, session]);
 
   useEffect(() => {
-    setBankAccountInput(profile?.bank_account || "");
-  }, [profile?.bank_account]);
+    const parsed = parseBankAccount(profile?.bank_account);
+    if (isStructuredBankAccount(profile?.bank_account)) {
+      const normalizedBank = normalizeBankName(parsed.bank);
+      const inList = isListedBank(parsed.bank);
+      setBankAccountForm({
+        bank: inList ? normalizedBank : "Otro",
+        customBank: inList ? "" : parsed.bank,
+        currency: parsed.currency,
+        holder: parsed.holder,
+        accountNumber: parsed.accountNumber,
+        accountType: parsed.accountType || "Monetaria",
+      });
+      setBankAccountEditing(false);
+      return;
+    }
+    if (profile?.bank_account?.trim()) {
+      setBankAccountForm({
+        ...EMPTY_BANK_FORM,
+        holder: profile?.name || "",
+      });
+      setBankAccountEditing(true);
+      return;
+    }
+    setBankAccountForm({
+      ...EMPTY_BANK_FORM,
+      holder: profile?.name || "",
+    });
+    setBankAccountEditing(true);
+  }, [profile?.bank_account, profile?.name]);
 
   useEffect(() => {
     const isApproved = profile?.verification_status === "approved";
@@ -3736,7 +3952,8 @@ useEffect(() => {
                 <div className="card-location"><IconText icon="pin" size={12}>{photo.location}</IconText></div>
             <div className="card-footer">
             <div className="card-price">Q{photo.price}</div>
-            { !canDownloadPhoto(photo) ? (
+            {!isOwnPhoto(photo) && (
+            !canDownloadPhoto(photo) ? (
             <AppButton
             className="card-buy"
             onClick={e => { e.stopPropagation(); handleBuy(photo); }}
@@ -3755,7 +3972,7 @@ useEffect(() => {
     >
       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} /> Descargar</span>
     </AppButton>
-  )}
+  ))}
               </div>
 
               </div>
@@ -4216,7 +4433,7 @@ useEffect(() => {
                         <div className="ceo-payroll-meta">Solicitado {new Date(row.pending_withdrawal.created_at).toLocaleDateString("es-GT")}</div>
                       )}
                     </td>
-                    <td className="ceo-payroll-bank">{row.bank_account || "—"}</td>
+                    <td className="ceo-payroll-bank">{formatBankAccountLabel(row.bank_account) || row.bank_account || "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -5274,7 +5491,8 @@ const renderPhotographerProfile = () => {
               ))}
             </div>
           )}
-        {!canDownloadPhoto(selected) ? (
+        {!isOwnPhoto(selected) && (
+        !canDownloadPhoto(selected) ? (
   <AppButton className="pay-btn" onClick={() => handleBuy(selected)}>
     Comprar — Q{selected.price}
   </AppButton>
@@ -5282,7 +5500,7 @@ const renderPhotographerProfile = () => {
   <AppButton className="download-btn" onClick={handleDownload}>
     <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} /> {isCEO && !purchased.includes(selected.id) ? "Descargar HD gratis (CEO)" : "Descarga en HD"}</span>
   </AppButton>
-)}
+))}
 
         </>
       )}
@@ -6398,8 +6616,68 @@ const renderPhotographerProfile = () => {
     const totalWithdrawn = withdrawals.filter(w => ["pending","paid"].includes(w.status)).reduce((sum, w) => sum + Number(w.amount || 0), 0);
     const available = totalEarned - totalWithdrawn;
     const hasPending = withdrawals.some(w => w.status === "pending");
-    const hasBankAccount = Boolean(profile?.bank_account?.trim());
-    const bankDirty = bankAccountInput.trim() !== (profile?.bank_account || "").trim();
+    const hasBankAccount = isStructuredBankAccount(profile?.bank_account);
+    const savedBank = parseBankAccount(profile?.bank_account);
+    const bankFormValid = Boolean(
+      resolveBankName(bankAccountForm)
+      && bankAccountForm.holder.trim()
+      && bankAccountForm.accountNumber.trim()
+      && bankAccountForm.accountType
+      && bankAccountForm.accountNumber.replace(/\D/g, "").length >= 6
+    );
+    const bankOptions = GT_BANKS.map((name) => ({
+      value: name,
+      label: name,
+      icon: <BankLogo bank={name} size={32} />,
+    }));
+    const currencyOptions = BANK_CURRENCIES.map(({ value, label }) => ({
+      value,
+      label,
+      icon: (
+        <span
+          aria-hidden
+          style={{
+            width: 32,
+            height: 32,
+            minWidth: 32,
+            borderRadius: 8,
+            background: "rgba(255,255,255,0.06)",
+            border: "1px solid var(--border)",
+            display: "grid",
+            placeItems: "center",
+            fontSize: 18,
+            flexShrink: 0,
+          }}
+        >
+          {value === "USD" ? "🇺🇸" : "🇬🇹"}
+        </span>
+      ),
+    }));
+    const accountTypeOptions = BANK_ACCOUNT_TYPES.map((type) => ({
+      value: type,
+      label: type,
+      icon: (
+        <span
+          aria-hidden
+          style={{
+            width: 32,
+            height: 32,
+            minWidth: 32,
+            borderRadius: 8,
+            background: type === "Monetaria" ? "rgba(255,107,0,0.12)" : "rgba(59,130,246,0.12)",
+            border: `1px solid ${type === "Monetaria" ? "rgba(255,107,0,0.35)" : "rgba(59,130,246,0.35)"}`,
+            display: "grid",
+            placeItems: "center",
+            flexShrink: 0,
+          }}
+        >
+          <AppIcon name="money" size={16} color={type === "Monetaria" ? "var(--orange)" : "#60a5fa"} />
+        </span>
+      ),
+    }));
+    const bankFieldLabel = BANK_FIELD_LABEL_STYLE;
+    const bankFieldControl = { width: "100%", background: "var(--card)", border: "1px solid var(--border)", color: "var(--text)", padding: "12px 14px", borderRadius: 10, fontFamily: "'DM Sans', sans-serif", fontSize: 14, outline: "none" };
+    const bankFieldReadonly = { ...bankFieldControl, background: "rgba(255,107,0,0.06)", borderColor: "rgba(255,107,0,0.22)" };
     return (
       <>
         <div style={{ padding: 16, borderRadius: 12, background: "var(--surface)", border: "1px solid rgba(255,107,0,0.25)", marginBottom: 16 }}>
@@ -6407,25 +6685,149 @@ const renderPhotographerProfile = () => {
             <AppIcon name="money" size={14} color="var(--orange)" />
             Cuenta bancaria para depósito
           </div>
-          <p style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.55, margin: "0 0 12px" }}>
-            Ingresá el banco, tipo de cuenta y número donde recibirás el depósito de tus retiros.
+          <p style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.55, margin: "0 0 14px" }}>
+            {hasBankAccount && !bankAccountEditing
+              ? "Esta es la cuenta donde recibirás los depósitos de tus retiros."
+              : "Completá los datos de la cuenta donde recibirás el depósito de tus retiros."}
           </p>
-          <textarea
-            className="form-input"
-            rows={3}
-            value={bankAccountInput}
-            onChange={(e) => setBankAccountInput(e.target.value)}
-            placeholder="Ej: Banco Industrial — Monetaria — 1234567890"
-            style={{ resize: "vertical", lineHeight: 1.5, marginBottom: 10 }}
-          />
-          <AppButton
-            className="pay-btn"
-            disabled={bankAccountSaving || !bankAccountInput.trim() || (!bankDirty && hasBankAccount)}
-            onClick={handleSaveBankAccount}
-            style={{ marginBottom: 12, opacity: bankAccountSaving || !bankAccountInput.trim() || (!bankDirty && hasBankAccount) ? 0.55 : 1 }}
-          >
-            {bankAccountSaving ? "GUARDANDO..." : hasBankAccount && !bankDirty ? "CUENTA GUARDADA" : "GUARDAR CUENTA"}
-          </AppButton>
+
+          {hasBankAccount && !bankAccountEditing ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 12 }}>
+              <div>
+                <span style={bankFieldLabel}>Nombre del banco</span>
+                <div style={{ ...bankFieldReadonly, display: "flex", alignItems: "center", gap: 10 }}>
+                  <BankLogo bank={savedBank?.bank} size={32} />
+                  <span>{normalizeBankName(savedBank?.bank) || savedBank?.bank || "—"}</span>
+                </div>
+              </div>
+              <div>
+                <span style={bankFieldLabel}>Moneda</span>
+                <div style={{ ...bankFieldReadonly, display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 20 }}>{savedBank?.currency === "USD" ? "🇺🇸" : "🇬🇹"}</span>
+                  <span>{BANK_CURRENCIES.find((c) => c.value === savedBank?.currency)?.label || "Quetzales"}</span>
+                </div>
+              </div>
+              {[
+                { label: "Nombre completo del titular", value: savedBank?.holder },
+                { label: "Número de cuenta", value: savedBank?.accountNumber },
+              ].map(({ label, value }) => (
+                <div key={label}>
+                  <span style={bankFieldLabel}>{label}</span>
+                  <div style={bankFieldReadonly}>{value || "—"}</div>
+                </div>
+              ))}
+              <div>
+                <span style={bankFieldLabel}>Tipo de cuenta</span>
+                <div style={{ ...bankFieldReadonly, display: "flex", alignItems: "center", gap: 10 }}>
+                  <AppIcon name="money" size={16} color="var(--orange)" />
+                  <span>{savedBank?.accountType || "—"}</span>
+                </div>
+              </div>
+              <AppButton
+                style={{
+                  marginTop: 4,
+                  width: "100%",
+                  padding: "12px",
+                  background: "rgba(255,107,0,0.12)",
+                  border: "1px solid rgba(255,107,0,0.45)",
+                  borderRadius: 10,
+                  color: "var(--orange-light)",
+                  fontFamily: "'DM Sans', sans-serif",
+                  fontSize: 14,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+                onClick={() => setBankAccountEditing(true)}
+              >
+                Cambiar cuenta
+              </AppButton>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 12 }}>
+              <IconSelectField
+                label="Nombre del banco"
+                value={bankAccountForm.bank}
+                onChange={(bank) => setBankAccountForm((f) => ({ ...f, bank, customBank: bank === "Otro" ? f.customBank : "" }))}
+                placeholder="Seleccioná un banco"
+                options={bankOptions}
+              />
+              {bankAccountForm.bank === "Otro" && (
+                <div>
+                  <span style={bankFieldLabel}>Nombre del banco (otro)</span>
+                  <input
+                    className="form-input"
+                    value={bankAccountForm.customBank}
+                    onChange={(e) => setBankAccountForm((f) => ({ ...f, customBank: e.target.value }))}
+                    placeholder="Escribí el nombre del banco"
+                  />
+                </div>
+              )}
+              <IconSelectField
+                label="Moneda"
+                value={bankAccountForm.currency}
+                onChange={(currency) => setBankAccountForm((f) => ({ ...f, currency }))}
+                placeholder="Seleccioná moneda"
+                options={currencyOptions}
+              />
+              <div>
+                <span style={bankFieldLabel}>Nombre completo del titular</span>
+                <input
+                  className="form-input"
+                  value={bankAccountForm.holder}
+                  onChange={(e) => setBankAccountForm((f) => ({ ...f, holder: e.target.value }))}
+                  placeholder="Como figura en la cuenta"
+                />
+              </div>
+              <div>
+                <span style={bankFieldLabel}>Número de cuenta</span>
+                <input
+                  className="form-input"
+                  inputMode="numeric"
+                  value={bankAccountForm.accountNumber}
+                  onChange={(e) => setBankAccountForm((f) => ({ ...f, accountNumber: e.target.value }))}
+                  placeholder="Ej: 1234567890"
+                />
+              </div>
+              <IconSelectField
+                label="Tipo de cuenta"
+                value={bankAccountForm.accountType}
+                onChange={(accountType) => setBankAccountForm((f) => ({ ...f, accountType }))}
+                placeholder="Seleccioná tipo"
+                options={accountTypeOptions}
+              />
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <AppButton
+                  className="pay-btn"
+                  disabled={bankAccountSaving || !bankFormValid}
+                  onClick={handleSaveBankAccount}
+                  style={{ flex: 1, minWidth: 140, opacity: bankAccountSaving || !bankFormValid ? 0.55 : 1 }}
+                >
+                  {bankAccountSaving ? "GUARDANDO..." : "GUARDAR CUENTA"}
+                </AppButton>
+                {hasBankAccount && (
+                  <AppButton
+                    className="close-btn-secondary"
+                    disabled={bankAccountSaving}
+                    onClick={() => {
+                      setBankAccountForm({
+                        bank: savedBank.bank,
+                        customBank: "",
+                        currency: savedBank.currency,
+                        holder: savedBank.holder,
+                        accountNumber: savedBank.accountNumber,
+                        accountType: savedBank.accountType || "Monetaria",
+                      });
+                      setBankAccountEditing(false);
+                    }}
+                    style={{ flex: 1, minWidth: 120 }}
+                  >
+                    Cancelar
+                  </AppButton>
+                )}
+              </div>
+            </div>
+          )}
+
           <div style={{ padding: "10px 12px", borderRadius: 10, background: "rgba(255,107,0,0.08)", border: "1px solid rgba(255,107,0,0.22)", fontSize: 12, color: "var(--muted)", lineHeight: 1.55 }}>
             <strong style={{ color: "var(--orange-light)" }}>Tiempo de depósito:</strong> una vez aprobado tu retiro, el depósito puede demorar <strong style={{ color: "var(--text)" }}>hasta 24 horas</strong> en reflejarse en tu cuenta bancaria.
           </div>
@@ -6476,7 +6878,7 @@ const renderPhotographerProfile = () => {
               onClick={() => {
                 openConfirmDialog({
                   title: "SOLICITAR RETIRO",
-                  message: `¿Solicitar retiro de Q${available.toFixed(2)} a ${profile.bank_account}? El depósito puede demorar hasta 24 horas.`,
+                  message: `¿Solicitar retiro de Q${available.toFixed(2)} a ${formatBankAccountLabel(profile.bank_account)}? El depósito puede demorar hasta 24 horas.`,
                   confirmLabel: "SÍ, SOLICITAR",
                   cancelLabel: "NO",
                   onConfirm: async () => {
