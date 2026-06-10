@@ -3176,6 +3176,7 @@ useEffect(() => {
         await Promise.all([fetchPhotos(), fetchPhotographers(), fetchAnnouncements()]);
         break;
       case VIEWS.VIDEO_SEARCH:
+        if (user && session?.access_token) await fetchPurchases({ silent: true });
         await handleVideoSearch(videoSearchQuery);
         break;
       case VIEWS.MY_PURCHASES:
@@ -3260,7 +3261,7 @@ useEffect(() => {
     !globalLoading.active &&
     ![VIEWS.AUTH, VIEWS.SUCCESS, VIEWS.RESET_PASSWORD].includes(view);
 
-  const { pullDistance, refreshing: pullRefreshing } = usePullToRefresh({
+  const { pullDistance, refreshing: pullRefreshing, contentOffset, refreshHoldPx } = usePullToRefresh({
     onRefresh: refreshCurrentView,
     enabled: pullToRefreshEnabled,
   });
@@ -11479,14 +11480,14 @@ const renderVendorRequest = () => {
   </div>
 </nav>
 
-<PullToRefreshIndicator pullDistance={pullDistance} refreshing={pullRefreshing} />
+<PullToRefreshIndicator pullDistance={pullDistance} refreshing={pullRefreshing} refreshHoldPx={refreshHoldPx} />
 
 <div
   className="app-content-shift"
   style={{
     flex: 1,
-    transform: pullDistance > 0 ? `translateY(${pullDistance}px)` : undefined,
-    transition: pullRefreshing || pullDistance === 0 ? "transform 0.22s ease" : "none",
+    transform: contentOffset > 0 ? `translateY(${contentOffset}px)` : undefined,
+    transition: pullRefreshing || contentOffset === 0 ? "transform 0.28s ease" : "none",
   }}
 >
   <AnimatePresence mode="wait">

@@ -1,36 +1,49 @@
 import { useEffect, useRef, useState } from "react";
 import { AppIcon } from "./icons";
 
+const REFRESH_HOLD_PX = 56;
+const MIN_REFRESH_MS = 450;
+
 function getScrollTop() {
   return window.scrollY || document.documentElement.scrollTop || 0;
 }
 
-/** Pull-to-refresh estilo Facebook: jalar desde arriba con icono de moto naranja. */
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Pull-to-refresh estilo Facebook: el indicador y el contenido se mantienen hasta que termina el refresh. */
 export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) {
   const [pullDistance, setPullDistance] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const startY = useRef(0);
   const pulling = useRef(false);
   const pullDistanceRef = useRef(0);
+  const refreshingRef = useRef(false);
   const onRefreshRef = useRef(onRefresh);
   onRefreshRef.current = onRefresh;
 
+  const contentOffset = refreshing ? REFRESH_HOLD_PX : pullDistance;
+
   useEffect(() => {
     if (!enabled) {
-      pullDistanceRef.current = 0;
-      setPullDistance(0);
-      pulling.current = false;
+      if (!refreshingRef.current) {
+        pulling.current = false;
+        pullDistanceRef.current = 0;
+        setPullDistance(0);
+      }
       return undefined;
     }
 
     const resetPull = () => {
+      if (refreshingRef.current) return;
       pulling.current = false;
       pullDistanceRef.current = 0;
       setPullDistance(0);
     };
 
     const onTouchStart = (e) => {
-      if (refreshing || getScrollTop() > 4) return;
+      if (refreshingRef.current || getScrollTop() > 4) return;
       if (e.touches.length !== 1) return;
       const target = e.target;
       if (target?.closest?.(".modal-backdrop, .modal, input, textarea, select, [data-no-ptr]")) return;
@@ -39,7 +52,7 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
     };
 
     const onTouchMove = (e) => {
-      if (!pulling.current || refreshing) return;
+      if (!pulling.current || refreshingRef.current) return;
       if (getScrollTop() > 4) {
         resetPull();
         return;
@@ -57,17 +70,33 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
     };
 
     const finishPull = async () => {
-      if (!pulling.current) return;
+      if (!pulling.current || refreshingRef.current) return;
+      pulling.current = false;
       const dist = pullDistanceRef.current;
-      resetPull();
-      if (dist < threshold || !onRefreshRef.current) return;
+      if (dist < threshold || !onRefreshRef.current) {
+        resetPull();
+        return;
+      }
+
+      pullDistanceRef.current = REFRESH_HOLD_PX;
+      setPullDistance(REFRESH_HOLD_PX);
+      refreshingRef.current = true;
       setRefreshing(true);
+
+      const startedAt = Date.now();
       try {
         await onRefreshRef.current();
       } catch (err) {
         console.error("pull-to-refresh:", err);
       } finally {
+        const elapsed = Date.now() - startedAt;
+        if (elapsed < MIN_REFRESH_MS) {
+          await wait(MIN_REFRESH_MS - elapsed);
+        }
+        refreshingRef.current = false;
         setRefreshing(false);
+        pullDistanceRef.current = 0;
+        setPullDistance(0);
       }
     };
 
@@ -82,21 +111,23 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
       document.removeEventListener("touchend", finishPull);
       document.removeEventListener("touchcancel", finishPull);
     };
-  }, [enabled, refreshing, threshold]);
+  }, [enabled, threshold]);
 
-  return { pullDistance, refreshing };
+  return { pullDistance, refreshing, contentOffset, refreshHoldPx: REFRESH_HOLD_PX };
 }
 
-export function PullToRefreshIndicator({ pullDistance, refreshing, threshold = 76 }) {
+export function PullToRefreshIndicator({ pullDistance, refreshing, threshold = 76, refreshHoldPx = REFRESH_HOLD_PX }) {
   const progress = Math.min(1, pullDistance / threshold);
   const visible = pullDistance > 0 || refreshing;
   if (!visible) return null;
+
+  const y = refreshing ? Math.max(0, refreshHoldPx - 28) : Math.max(0, pullDistance - 28);
 
   return (
     <div
       className="ptr-indicator"
       style={{
-        transform: `translateY(${refreshing ? 10 : Math.max(0, pullDistance - 28)}px)`,
+        transform: `translateY(${y}px)`,
         opacity: refreshing ? 1 : 0.45 + progress * 0.55,
       }}
       aria-hidden="true"
