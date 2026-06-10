@@ -36,6 +36,7 @@ import {
 import { apiFetch, apiJson, apiUrl, parseApiJson, wakeApiServer } from "./apiClient.js";
 import { GT_BANKS, isListedBank, normalizeBankName } from "./gtBanks.js";
 import { BankLogo } from "./BankLogo.jsx";
+import { VideoThumbnail, getVideoThumbnail } from "./VideoThumbnail.jsx";
 
 const VIEWS = {
   PHOTOGRAPHERS: "photographers",
@@ -3241,8 +3242,7 @@ useEffect(() => {
     const durationLabel = formatVideoDuration(video.duration_seconds || videoDurationCache[video.id]);
     const isPreviewing = Boolean(videoPreviewActive[video.id]);
     const previewProgress = videoPreviewProgress[video.id] || 0;
-    const posterSrc = video.thumbnail_url || null;
-    const mediaReady = Boolean(videoMediaReady[video.id]);
+    const posterSrc = getVideoThumbnail(video);
     const previewLimit = video.duration_seconds || videoDurationCache[video.id];
 
     return (
@@ -3267,11 +3267,12 @@ useEffect(() => {
         >
           <video
             ref={(el) => { videoRefs.current[video.id] = el; }}
-            className={`video-card-preview${isPreviewing ? " is-playing" : ""}${mediaReady ? " is-ready" : ""}`}
+            className={`video-card-preview${isPreviewing ? " is-playing" : ""}`}
             src={video.preview_url}
+            poster={posterSrc || undefined}
             muted={videoPreviewMuted}
             playsInline
-            preload="auto"
+            preload={posterSrc ? "none" : "metadata"}
             controls={false}
             controlsList="nodownload noplaybackrate nofullscreen noremoteplayback"
             disablePictureInPicture
@@ -3284,9 +3285,8 @@ useEffect(() => {
               }
             }}
             onLoadedData={(e) => {
-              const el = e.currentTarget;
               if (!posterSrc) {
-                pauseVideoOnFirstFrame(el);
+                pauseVideoOnFirstFrame(e.currentTarget);
                 markVideoMediaReady(video.id);
               }
             }}
@@ -3294,12 +3294,11 @@ useEffect(() => {
               if (!posterSrc) markVideoMediaReady(video.id);
             }}
           />
-          {posterSrc && !isPreviewing && (
-            <img
-              src={posterSrc}
-              alt=""
-              decoding="async"
-              className={`video-card-poster-cover${mediaReady ? " is-visible" : ""}`}
+          {!isPreviewing && (
+            <VideoThumbnail
+              video={video}
+              className="video-card-poster-cover"
+              loading="eager"
               onLoad={() => markVideoMediaReady(video.id)}
             />
           )}
@@ -6081,39 +6080,34 @@ const renderPhotographerProfile = () => {
         }
       };
 
-      const hasThumb = Boolean(video.thumbnail_url);
+      const hasThumb = Boolean(getVideoThumbnail(video));
       const photographerHandle = video.photographer?.handle || video.photographer?.name || "MOTOSHOT";
       const watermarkText = `@${String(photographerHandle).replace(/^@/, "")} • MotoShot GT`;
 
       return (
         <div style={{ position: "relative", background: "var(--surface)", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
           <div style={{ position: "relative", height: 180, background: "#0a0a0a" }}>
-            {hasThumb && (
-              <img
-                src={video.thumbnail_url}
-                alt=""
-                style={{
-                  width: "100%",
-                  height: 180,
-                  objectFit: "cover",
-                  display: "block",
-                  opacity: playing ? 0 : 1,
-                }}
+            {!playing && (
+              <VideoThumbnail
+                video={video}
+                style={{ width: "100%", height: 180, objectFit: "cover" }}
+                loading="eager"
               />
             )}
             <video
               ref={videoRef}
               src={video.preview_url}
+              poster={getVideoThumbnail(video) || undefined}
               muted
               playsInline
-              preload="metadata"
+              preload={hasThumb ? "none" : "metadata"}
               style={{
                 width: "100%",
                 height: 180,
                 objectFit: "cover",
                 display: "block",
                 ...(hasThumb
-                  ? { position: "absolute", top: 0, left: 0, opacity: playing ? 1 : 0 }
+                  ? { position: "absolute", top: 0, left: 0, opacity: playing ? 1 : 0, pointerEvents: playing ? "auto" : "none" }
                   : {}),
               }}
               onLoadedMetadata={(e) => {
@@ -6476,9 +6470,12 @@ const renderPhotographerProfile = () => {
                 <div key={`${item.media_type}-${item.id}`} className="pending-delivery-card">
                   <div className="pending-delivery-top">
                     {isVideo ? (
-                      <div className="pending-delivery-thumb">
-                        <video src={item.preview_url} muted playsInline />
-                      </div>
+                      <VideoThumbnail
+                        video={item}
+                        className="pending-delivery-thumb"
+                        loading="eager"
+                        fallbackIconSize={22}
+                      />
                     ) : (
                       <img src={item.watermark_url} alt="" className="pending-delivery-thumb" />
                     )}
@@ -7024,39 +7021,12 @@ const renderPhotographerProfile = () => {
         }}
       >
         <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#0a0a0a", overflow: "hidden" }}>
-          {video.thumbnail_url && (
-            <img
-              src={video.thumbnail_url}
-              alt=""
-              decoding="async"
-              className={`video-card-poster-cover gallery-video-poster${videoMediaReady[video.id] ? " is-visible" : ""}`}
-              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
-              onLoad={() => markVideoMediaReady(video.id)}
-            />
-          )}
-          <video
-            src={video.preview_url}
-            muted
-            playsInline
-            preload="metadata"
-            className={`gallery-video-preview${videoMediaReady[video.id] ? " is-ready" : ""}`}
-            onLoadedData={(e) => {
-              if (!video.thumbnail_url) {
-                const el = e.currentTarget;
-                el.currentTime = Math.min(0.5, (el.duration || 1) * 0.05);
-                el.pause();
-                markVideoMediaReady(video.id);
-              }
-            }}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-              opacity: videoMediaReady[video.id] && !video.thumbnail_url ? 1 : 0,
-              transition: "opacity 0.35s ease",
-            }}
+          <VideoThumbnail
+            video={video}
+            className="video-card-poster-cover gallery-video-poster"
+            style={{ position: "absolute", inset: 0 }}
+            loading="eager"
+            onLoad={() => markVideoMediaReady(video.id)}
           />
           {video.duration_seconds ? (
             <div style={{
@@ -7687,7 +7657,7 @@ const renderPhotographerProfile = () => {
             {buyerGalleryItems.map((item, idx) => {
               const thumb = item.type === "photo"
                 ? item.purchase.photo?.watermark_url
-                : item.purchase.video?.thumbnail_url;
+                : getVideoThumbnail(item.purchase.video);
               return (
                 <button
                   key={item.key}
@@ -7706,16 +7676,18 @@ const renderPhotographerProfile = () => {
                     width: "100%",
                   }}
                 >
-                  {thumb ? (
-                    <img
-                      src={thumb}
-                      alt=""
-                      loading="lazy"
-                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                    />
-                  ) : item.type === "video" ? (
-                    <div style={{ width: "100%", height: "100%", background: "linear-gradient(135deg, #1a1a1a, #0a0a0a)" }} />
-                  ) : null}
+                  {item.type === "photo" ? (
+                    thumb ? (
+                      <img
+                        src={thumb}
+                        alt=""
+                        loading="lazy"
+                        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                      />
+                    ) : null
+                  ) : (
+                    <VideoThumbnail video={item.purchase.video} loading="lazy" />
+                  )}
                   {item.type === "video" && (
                     <span
                       style={{
@@ -7816,13 +7788,10 @@ const renderPhotographerProfile = () => {
                   style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
                 />
               ) : (
-                <video
-                  key={modalItem.purchase.video?.id}
-                  src={modalItem.purchase.video?.preview_url}
-                  controls
-                  playsInline
-                  autoPlay
+                <VideoThumbnail
+                  video={modalItem.purchase.video}
                   style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+                  loading="eager"
                 />
               )}
             </div>
@@ -7995,8 +7964,8 @@ const renderPhotographerProfile = () => {
                 opacity: hqDownloaded ? 0.85 : 1,
               }}
             >
-              <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", background: "#000", flexShrink: 0 }}>
-                <video src={v.video?.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", background: "#0a0a0a", flexShrink: 0 }}>
+                <VideoThumbnail video={v.video} loading="lazy" fallbackIconSize={20} />
               </div>
               <div style={{ flex: 1, fontSize: 13 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
@@ -9110,14 +9079,8 @@ const renderVendorRequest = () => {
                       border: "1px solid var(--border)",
                     }}
                   >
-                    <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#000" }}>
-                      <video
-                        src={video.preview_url}
-                        muted
-                        playsInline
-                        preload="metadata"
-                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                      />
+                    <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#0a0a0a", overflow: "hidden" }}>
+                      <VideoThumbnail video={video} loading="lazy" />
                       {video.duration_seconds ? (
                         <div style={{
                           position: "absolute", bottom: 8, right: 8,
@@ -9502,12 +9465,7 @@ const renderVendorRequest = () => {
       border-radius: 8px;
       overflow: hidden;
       flex-shrink: 0;
-      background: #000;
-      object-fit: cover;
-    }
-    .pending-delivery-thumb video {
-      width: 100%;
-      height: 100%;
+      background: #0a0a0a;
       object-fit: cover;
       display: block;
     }
@@ -9854,12 +9812,11 @@ const renderVendorRequest = () => {
     .video-card-media { overflow: hidden; }
     .video-card-preview {
       position: absolute; inset: 0; width: 100%; height: 100%;
-      object-fit: cover; background: #0a0a0a; z-index: 2;
+      object-fit: cover; background: transparent; z-index: 2;
       opacity: 0; pointer-events: none;
-      transition: opacity 0.35s ease;
+      transition: opacity 0.25s ease;
       -webkit-tap-highlight-color: transparent;
     }
-    .video-card-preview.is-ready { opacity: 1; }
     .video-card-preview.is-playing { opacity: 1; z-index: 8; pointer-events: auto; }
     .video-card-preview::-webkit-media-controls { display: none !important; }
     .video-card-preview::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
@@ -9868,12 +9825,12 @@ const renderVendorRequest = () => {
     .video-card-poster-cover {
       position: absolute; inset: 0; width: 100%; height: 100%;
       object-fit: cover; z-index: 4; pointer-events: none;
-      opacity: 0; transition: opacity 0.35s ease;
+      opacity: 1;
     }
-    .video-card-poster-cover.is-visible { opacity: 1; }
-    .gallery-video-poster { opacity: 0; transition: opacity 0.35s ease; }
-    .gallery-video-preview.is-ready { opacity: 1 !important; }
-    .gallery-video-poster.is-visible { opacity: 1; }
+    .gallery-video-poster { opacity: 1; }
+    .modal-photo img, .modal-photo .video-thumbnail-fallback, .success-page-photo img, .success-page-photo .video-thumbnail-fallback {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+    }
     .search-bar { display: flex; gap: 10px; margin: 20px; }
     .search-input { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 12px 16px;
       border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color 0.2s; }
@@ -10238,10 +10195,10 @@ const renderVendorRequest = () => {
           <p className="success-page-sub">
             Tu compra de <strong>{label}</strong> fue confirmada. El fotógrafo tiene hasta <strong>24 horas</strong> para subir la versión final editada. Aparecerá en <strong>Mis Compras</strong> cuando esté lista para descargar.
           </p>
-          {selectedVideo?.preview_url && (
+          {(selectedVideo?.thumbnail_url || selectedVideo?.preview_url) && (
             <div className="success-page-card">
-              <div className="success-page-photo" style={{ position: "relative" }}>
-                <video src={selectedVideo.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              <div className="success-page-photo" style={{ position: "relative", background: "#0a0a0a" }}>
+                <VideoThumbnail video={selectedVideo} loading="eager" />
               </div>
               <div className="success-page-info">
                 <div><strong>Video:</strong> {label}</div>
@@ -11255,8 +11212,8 @@ const renderVendorRequest = () => {
           </div>
         )}
         {selectedVideo && (
-          <div className="modal-photo" style={{ position: "relative" }}>
-            <video src={selectedVideo.preview_url} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <div className="modal-photo" style={{ position: "relative", background: "#0a0a0a" }}>
+            <VideoThumbnail video={selectedVideo} loading="eager" />
           </div>
         )}
         <div className="modal-body">
