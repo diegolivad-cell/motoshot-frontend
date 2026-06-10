@@ -809,6 +809,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [purchases, setPurchases] = useState([]);
   const [videoPurchases, setVideoPurchases] = useState([]);
   const [purchasesLoading, setPurchasesLoading] = useState(false);
+  const [hqResendLoadingId, setHqResendLoadingId] = useState(null);
   const [vendorStats, setVendorStats] = useState(null);
   const [vendorStatsLoading, setVendorStatsLoading] = useState(false);
   const [vendorStatsError, setVendorStatsError] = useState(false);
@@ -2522,21 +2523,28 @@ const exportPayrollCsv = () => {
     fetchAllSubscriptions();
   }, [view, isLoggedIn, session]);
 
-  // Deep link desde emails: motoshot.pro/abrir?goto=compras → sección Compras
+  // Deep link desde emails: motoshot.pro/abrir?goto=compras|entregas
   useEffect(() => {
     if (!authReady) return;
     const params = new URLSearchParams(window.location.search);
     const isAbrirPath = window.location.pathname === "/abrir";
-    if (params.get("goto") === "compras" || isAbrirPath) {
+    const goto = params.get("goto");
+    if (goto === "compras" || (isAbrirPath && !goto)) {
       if (isLoggedIn) {
         setActiveTab("purchases");
         setView(VIEWS.MY_PURCHASES);
       }
       window.history.replaceState({}, document.title, "/");
+    } else if (goto === "entregas") {
+      if (isLoggedIn) {
+        setActiveTab("deliveries");
+        setView(VIEWS.PENDING_DELIVERIES);
+      }
+      window.history.replaceState({}, document.title, "/");
     }
   }, [authReady, isLoggedIn]);
 
-  // APK: si el link del email abre la app nativa, navegar a Compras
+  // APK: si el link del email abre la app nativa, navegar a Compras o Entregas
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
     let removeListener = null;
@@ -2544,9 +2552,13 @@ const exportPayrollCsv = () => {
       try {
         const { App } = await import("@capacitor/app");
         const listener = await App.addListener("appUrlOpen", ({ url }) => {
-          if (String(url || "").includes("goto=compras")) {
+          const urlStr = String(url || "");
+          if (urlStr.includes("goto=compras")) {
             setActiveTab("purchases");
             setView(VIEWS.MY_PURCHASES);
+          } else if (urlStr.includes("goto=entregas")) {
+            setActiveTab("deliveries");
+            setView(VIEWS.PENDING_DELIVERIES);
           }
         });
         removeListener = () => listener.remove();
@@ -7815,16 +7827,60 @@ const renderPhotographerProfile = () => {
   };
 
   const renderMyPurchases = () => {
+    const HQ_WAIT_MS = 24 * 60 * 60 * 1000;
+    const canShowHqResend = (pending, completedAt) =>
+      pending
+      && completedAt
+      && Date.now() - new Date(completedAt).getTime() >= HQ_WAIT_MS;
+
+    const handleResendHqRequest = async (type, purchaseId) => {
+      const key = `${type}-${purchaseId}`;
+      if (hqResendLoadingId === key) return;
+      setHqResendLoadingId(key);
+      try {
+        const { res, data } = await apiJson("/api/payments/resend-hq-request", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ type, purchase_id: purchaseId }),
+        });
+        if (!res.ok) throw new Error(data.error || "No se pudo reenviar la solicitud");
+        showToast(data.message || "Recordatorio enviado al fotógrafo.");
+        fetchPurchases({ silent: true });
+      } catch (err) {
+        showToast(err.message || "Error al reenviar la solicitud.");
+      } finally {
+        setHqResendLoadingId(null);
+      }
+    };
+
     const purchaseBtnDisabled = {
       background: "var(--surface)",
       color: "var(--muted)",
       border: "1px solid var(--border)",
-      opacity: 0.6,
+      opacity: 0.85,
       cursor: "not-allowed",
     };
     const purchaseBtnActive = {
       background: "linear-gradient(135deg, var(--orange-light), var(--orange))",
       color: "#000",
+      border: "1px solid transparent",
+    };
+    const purchaseActionStyle = {
+      flexShrink: 0,
+      width: 112,
+      minHeight: 36,
+      padding: "8px 6px",
+      boxSizing: "border-box",
+      alignSelf: "center",
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      textAlign: "center",
+      lineHeight: 1.2,
+      whiteSpace: "normal",
     };
 
     const purchaseItems = [
@@ -7860,25 +7916,19 @@ const renderPhotographerProfile = () => {
             const photoDownloaded = Boolean(p.hq_downloaded_at) || p.photo?.hq_status === "downloaded";
             const photoPending = !photoDownloaded && (p.photo?.hq_status === "pending" || !p.photo?.hq_path);
             const photoClaimable = !photoDownloaded && !photoPending;
+            const showPhotoResend = canShowHqResend(photoPending, p.completed_at);
+            const photoResendKey = `photo-${p.id}`;
 
             return (
               <div
                 key={`photo-${p.id}`}
-                style={{
-                  display: "flex",
-                  gap: 12,
-                  padding: 12,
-                  borderRadius: 10,
-                  background: "var(--surface)",
-                  border: "1px solid var(--border)",
-                  alignItems: "center",
-                  opacity: photoDownloaded ? 0.85 : 1,
-                }}
+                className="purchase-row"
+                style={{ opacity: photoDownloaded ? 0.85 : 1 }}
               >
-                <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", background: "var(--card)", flexShrink: 0 }}>
+                <div className="purchase-row-thumb" style={{ background: "var(--card)" }}>
                   <img src={p.photo?.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 </div>
-                <div style={{ flex: 1, fontSize: 13 }}>
+                <div className="purchase-row-body">
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
                     <span className="tag" style={{ fontSize: 10, padding: "2px 8px" }}>Foto</span>
                     <span style={{ fontWeight: 600 }}>{p.photo?.photographer?.name || "Fotógrafo"}</span>
@@ -7901,11 +7951,31 @@ const renderPhotographerProfile = () => {
                       <span style={{ color: "var(--success)", marginLeft: 6 }}>· Descargado</span>
                     )}
                   </div>
+                  {showPhotoResend && (
+                    <button
+                      type="button"
+                      className="purchase-row-resend"
+                      disabled={hqResendLoadingId === photoResendKey}
+                      onClick={() => handleResendHqRequest("photo", p.id)}
+                      style={{
+                        color: hqResendLoadingId === photoResendKey ? "var(--muted)" : "var(--orange)",
+                        cursor: hqResendLoadingId === photoResendKey ? "wait" : "pointer",
+                        textDecoration: hqResendLoadingId === photoResendKey ? "none" : "underline",
+                      }}
+                    >
+                      {hqResendLoadingId === photoResendKey
+                        ? "Enviando recordatorio..."
+                        : "¿No has recibido tu foto o video? Haz click aquí para reenviar la solicitud."}
+                    </button>
+                  )}
                 </div>
                 <AppButton
-                  className="card-buy"
+                  className={`card-buy purchase-row-action${photoDownloaded || photoPending ? "" : " card-buy-download"}`}
                   disabled={photoDownloaded || photoPending}
-                  style={photoDownloaded || photoPending ? purchaseBtnDisabled : purchaseBtnActive}
+                  style={{
+                    ...purchaseActionStyle,
+                    ...(photoDownloaded || photoPending ? purchaseBtnDisabled : purchaseBtnActive),
+                  }}
                   onClick={async () => {
                     if (photoDownloaded || photoPending) return;
                     try {
@@ -7932,9 +8002,9 @@ const renderPhotographerProfile = () => {
                     }
                   }}
                 >
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                    <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} />
-                    {photoDownloaded ? "Descargado" : photoPending ? "Esperando HQ" : "Descargar"}
+                  <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
+                    <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)", flexShrink: 0 }} />
+                    <span>{photoDownloaded ? "Descargado" : photoPending ? "Esperando HQ" : "Descargar"}</span>
                   </span>
                 </AppButton>
               </div>
@@ -7949,25 +8019,19 @@ const renderPhotographerProfile = () => {
           const hqPending = v.video?.hq_status === "pending";
           const hqDownloaded = Boolean(v.hq_downloaded_at) || v.video?.hq_status === "downloaded";
           const hqClaimable = v.video?.hq_status === "ready" && !v.hq_downloaded_at;
+          const showVideoResend = canShowHqResend(hqPending, v.completed_at);
+          const videoResendKey = `video-${v.id}`;
 
           return (
             <div
               key={`video-${v.id}`}
-              style={{
-                display: "flex",
-                gap: 12,
-                padding: 12,
-                borderRadius: 10,
-                background: "var(--surface)",
-                border: "1px solid var(--border)",
-                alignItems: "center",
-                opacity: hqDownloaded ? 0.85 : 1,
-              }}
+              className="purchase-row"
+              style={{ opacity: hqDownloaded ? 0.85 : 1 }}
             >
-              <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", background: "#0a0a0a", flexShrink: 0 }}>
+              <div className="purchase-row-thumb" style={{ background: "#0a0a0a" }}>
                 <VideoThumbnail video={v.video} loading="lazy" fallbackIconSize={20} />
               </div>
-              <div style={{ flex: 1, fontSize: 13 }}>
+              <div className="purchase-row-body">
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
                   <span className="tag" style={{ fontSize: 10, padding: "2px 8px" }}>Video</span>
                   <span style={{ fontWeight: 600 }}>{v.video?.photographer?.name || "Fotógrafo"}</span>
@@ -7990,11 +8054,31 @@ const renderPhotographerProfile = () => {
                     <span style={{ color: "var(--success)", marginLeft: 6 }}>· Descargado</span>
                   )}
                 </div>
+                {showVideoResend && (
+                  <button
+                    type="button"
+                    className="purchase-row-resend"
+                    disabled={hqResendLoadingId === videoResendKey}
+                    onClick={() => handleResendHqRequest("video", v.id)}
+                    style={{
+                      color: hqResendLoadingId === videoResendKey ? "var(--muted)" : "var(--orange)",
+                      cursor: hqResendLoadingId === videoResendKey ? "wait" : "pointer",
+                      textDecoration: hqResendLoadingId === videoResendKey ? "none" : "underline",
+                    }}
+                  >
+                    {hqResendLoadingId === videoResendKey
+                      ? "Enviando recordatorio..."
+                      : "¿No has recibido tu foto o video? Haz click aquí para reenviar la solicitud."}
+                  </button>
+                )}
               </div>
               <AppButton
-                className="card-buy"
+                className={`card-buy purchase-row-action${hqDownloaded || hqPending ? "" : " card-buy-download"}`}
                 disabled={hqDownloaded || hqPending}
-                style={hqDownloaded || hqPending ? purchaseBtnDisabled : purchaseBtnActive}
+                style={{
+                  ...purchaseActionStyle,
+                  ...(hqDownloaded || hqPending ? purchaseBtnDisabled : purchaseBtnActive),
+                }}
                 onClick={async () => {
                   if (hqDownloaded || hqPending) return;
                   try {
@@ -8021,9 +8105,9 @@ const renderPhotographerProfile = () => {
                   }
                 }}
               >
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                  <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} />
-                  {hqDownloaded ? "Descargado" : hqPending ? "Esperando HQ" : "Descargar"}
+                <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
+                  <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)", flexShrink: 0 }} />
+                  <span>{hqDownloaded ? "Descargado" : hqPending ? "Esperando HQ" : "Descargar"}</span>
                 </span>
               </AppButton>
             </div>
@@ -9878,6 +9962,11 @@ const renderVendorRequest = () => {
     .card-buy:hover { background: #e55e00; }
     .card-bought-badge, .card-ceo-badge { position: absolute; top: 10px; right: 10px; background: linear-gradient(135deg, var(--orange-light), var(--orange)); color: #000; font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 20px; z-index: 5; box-shadow: 0 0 12px var(--success-glow); }
     .card-buy-download { background: linear-gradient(135deg, var(--orange-light), var(--orange)) !important; color: #000 !important; }
+    .purchase-row { display: flex; gap: 12px; padding: 12px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); align-items: flex-start; }
+    .purchase-row-thumb { width: 80px; height: 60px; border-radius: 8px; overflow: hidden; flex-shrink: 0; }
+    .purchase-row-body { flex: 1; min-width: 0; font-size: 13px; }
+    .purchase-row-resend { margin-top: 6px; padding: 0; border: none; background: none; font-size: 12px; line-height: 1.4; text-align: left; width: 100%; }
+    .purchase-row-action { font-size: 11px !important; }
     .card-photo-badge { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.65); color: var(--orange); font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; z-index: 5; border: 1px solid rgba(255,107,0,0.3); }
     .modal-backdrop { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.88); backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; padding: 16px; }
     .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; width: 100%; max-width: 460px; max-height: 90vh; overflow-y: auto; animation: slideUp 0.3s ease-out; }
