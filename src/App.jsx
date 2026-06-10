@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
 import { dismissAppSplash, SPLASH_MIN_MS } from "./splash.js";
+import { usePullToRefresh, PullToRefreshIndicator } from "./PullToRefresh";
 import { Capacitor } from "@capacitor/core";
 import { signInWithGoogleNative } from "./googleNativeAuth.js";
 import {
@@ -2830,6 +2831,103 @@ useEffect(() => {
       setVideosLoading(false);
     }
   };
+
+  const refreshCurrentView = useCallback(async () => {
+    await wakeApiServer();
+    const isApproved = profile?.verification_status === "approved";
+    switch (view) {
+      case VIEWS.PHOTOGRAPHERS:
+        await Promise.all([fetchPhotos(), fetchPhotographers(), fetchAnnouncements()]);
+        break;
+      case VIEWS.VIDEO_SEARCH:
+        await handleVideoSearch(videoSearchQuery);
+        break;
+      case VIEWS.MY_PURCHASES:
+        if (user && session) await fetchPurchases();
+        break;
+      case VIEWS.MY_GALLERY:
+        if (isApproved && profile?.id) await fetchMyVideos(profile.id);
+        else if (user && session?.access_token) await fetchPurchases();
+        break;
+      case VIEWS.PENDING_DELIVERIES:
+        await fetchPendingDeliveries();
+        break;
+      case VIEWS.DASHBOARD:
+        if (session?.access_token && user) await fetchVendorDashboard({ reconcile: true, silent: false });
+        break;
+      case VIEWS.VENDOR_REQUEST:
+        if (isApproved && session?.access_token && user) {
+          await Promise.all([
+            fetchVendorDashboard({ reconcile: false, silent: true }),
+            fetchMyWithdrawals(),
+          ]);
+          if (profile?.id) {
+            await Promise.all([
+              fetchPhotographerProfile(profile.id),
+              fetchPosts(profile.id),
+              fetchMyVideos(profile.id),
+            ]);
+          }
+        }
+        if (isLoggedIn && session) await fetchAllSubscriptions();
+        break;
+      case VIEWS.NOTIFICATIONS:
+        await fetchNotifications();
+        break;
+      case VIEWS.PHOTOGRAPHER_PROFILE:
+        if (selectedPhotographer?.id) await fetchPhotographerProfile(selectedPhotographer.id);
+        break;
+      case VIEWS.ADMIN:
+        if (isStaff && session) {
+          await fetchVendorRequests();
+          await fetchAdminWithdrawals();
+          if (isCEO) await fetchAdminPhotographers();
+        }
+        break;
+      case VIEWS.CEO_PAYROLL:
+        if (isCEO && session) {
+          await fetchCeoPayroll();
+          await fetchCeoAdmins();
+        }
+        break;
+      case VIEWS.UPLOAD:
+      case VIEWS.UPLOAD_VIDEO:
+        if (profile?.id) await fetchMyVideos(profile.id);
+        await fetchPendingDeliveryCount();
+        break;
+      case VIEWS.GALLERY:
+      case VIEWS.DETAIL:
+        await fetchPhotos();
+        break;
+      default:
+        await Promise.all([fetchPhotos(), fetchPhotographers()]);
+        break;
+    }
+  }, [
+    view,
+    videoSearchQuery,
+    user,
+    session,
+    profile,
+    isLoggedIn,
+    isStaff,
+    isCEO,
+    selectedPhotographer?.id,
+    fetchPendingDeliveries,
+    fetchPendingDeliveryCount,
+  ]);
+
+  const pullToRefreshEnabled =
+    !showPasswordReset &&
+    payStep === 0 &&
+    !confirmDialog &&
+    !globalLoading.active &&
+    ![VIEWS.AUTH, VIEWS.SUCCESS, VIEWS.RESET_PASSWORD].includes(view);
+
+  const { pullDistance, refreshing: pullRefreshing } = usePullToRefresh({
+    onRefresh: refreshCurrentView,
+    enabled: pullToRefreshEnabled,
+  });
 
   useEffect(() => {
     if (view === VIEWS.UPLOAD_VIDEO) setUploadMediaTab("video");
@@ -8621,6 +8719,25 @@ const renderVendorRequest = () => {
     body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
     button, a { -webkit-tap-highlight-color: transparent; tap-highlight-color: transparent; }
     .app { min-height: 100vh; display: flex; flex-direction: column; }
+    .ptr-indicator {
+      position: fixed; top: 58px; left: 0; right: 0; z-index: 99;
+      display: flex; justify-content: center; pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.15s ease;
+    }
+    .ptr-indicator-bubble {
+      width: 46px; height: 46px; border-radius: 50%;
+      background: rgba(16,16,16,0.94);
+      border: 1px solid rgba(255,107,0,0.42);
+      box-shadow: 0 6px 24px rgba(0,0,0,0.45), 0 0 18px rgba(255,107,0,0.12);
+      display: grid; place-items: center;
+      transition: transform 0.12s ease;
+    }
+    .ptr-indicator-bubble--spin { animation: ptrSpin 0.85s linear infinite; }
+    @keyframes ptrSpin { to { transform: rotate(360deg); } }
+    .app-content-shift {
+      will-change: transform;
+      transition: transform 0.18s ease;
+    }
     .nav { position: sticky; top: 0; z-index: 100; background: rgba(12,12,12,0.94); backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: sp
       ace-between; padding: 0 20px; height: 58px; }
@@ -10406,7 +10523,16 @@ const renderVendorRequest = () => {
   </div>
 </nav>
 
-<div style={{ flex: 1 }}>
+<PullToRefreshIndicator pullDistance={pullDistance} refreshing={pullRefreshing} />
+
+<div
+  className="app-content-shift"
+  style={{
+    flex: 1,
+    transform: pullDistance > 0 ? `translateY(${pullDistance}px)` : undefined,
+    transition: pullRefreshing || pullDistance === 0 ? "transform 0.22s ease" : "none",
+  }}
+>
   <AnimatePresence mode="wait">
     <motion.div
       key={showPasswordReset ? "reset" : view}
