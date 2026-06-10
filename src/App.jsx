@@ -37,6 +37,13 @@ import { apiFetch, apiJson, apiUrl, parseApiJson, wakeApiServer } from "./apiCli
 import { GT_BANKS, isListedBank, normalizeBankName } from "./gtBanks.js";
 import { BankLogo } from "./BankLogo.jsx";
 import { VideoThumbnail, getVideoThumbnail } from "./VideoThumbnail.jsx";
+import {
+  buildVideoPurchaseStatusMap,
+  mergePurchaseStatusIntoVideos,
+  purchaseVideoId,
+  resolveVideoPurchaseState,
+} from "./videoPurchaseState.js";
+import { VideoPurchaseButton } from "./VideoPurchaseButton.jsx";
 
 const VIEWS = {
   PHOTOGRAPHERS: "photographers",
@@ -63,37 +70,6 @@ const VIEWS = {
 const VIDEO_PREVIEW_MAX_SEC = 7;
 const VIDEO_PREVIEW_SHORT_SEC = 3;
 const RECURRENTE_MIN_GTQ = 5;
-
-const normalizeVideoId = (id) => String(id).toLowerCase();
-
-const purchaseVideoMeta = (row) => {
-  const video = row?.video;
-  return Array.isArray(video) ? video[0] : video;
-};
-
-const purchaseVideoId = (row) => row?.video_id ?? purchaseVideoMeta(row)?.id;
-
-const computeVideoPurchaseStatus = (row) => {
-  const videoMeta = purchaseVideoMeta(row);
-  const hqPending = videoMeta?.hq_status === "pending";
-  const hqDownloaded = Boolean(row?.hq_downloaded_at) || videoMeta?.hq_status === "downloaded";
-  const hqReady = videoMeta?.hq_status === "ready";
-  if (hqReady || hqDownloaded) return "entregado";
-  return "comprado";
-};
-
-const mergePurchaseStatusIntoVideos = (list, videoRows) => {
-  if (!list?.length || !videoRows?.length) return list;
-  const statusById = {};
-  for (const row of videoRows) {
-    const id = purchaseVideoId(row);
-    if (id) statusById[normalizeVideoId(id)] = computeVideoPurchaseStatus(row);
-  }
-  return list.map((v) => {
-    const status = statusById[normalizeVideoId(v.id)];
-    return status ? { ...v, buyer_purchase_status: status } : v;
-  });
-};
 
 const getVideoPreviewLimitSec = (knownDuration, videoEl) => {
   const fromMeta = videoEl?.duration;
@@ -883,36 +859,19 @@ function WatermarkedImage({ src, photographer, purchased }) {
     },
     [isCEO, user, purchased]
   );
-  const videoPurchaseStatusById = useMemo(() => {
-    const map = {};
-    for (const row of videoPurchases) {
-      const id = purchaseVideoId(row);
-      if (id) map[normalizeVideoId(id)] = computeVideoPurchaseStatus(row);
-    }
-    return map;
-  }, [videoPurchases]);
+  const videoPurchaseStatusById = useMemo(
+    () => buildVideoPurchaseStatusMap(videoPurchases),
+    [videoPurchases]
+  );
   const getVideoPurchaseState = useCallback(
     (videoOrId) => {
-      if (!user) return null;
       const videoObj = typeof videoOrId === "object" && videoOrId ? videoOrId : null;
-      const videoId = videoObj?.id ?? videoOrId;
-      if (!videoId) return null;
-
-      if (videoObj?.buyer_purchase_status) {
-        return videoObj.buyer_purchase_status;
-      }
-
-      return videoPurchaseStatusById[normalizeVideoId(videoId)] || null;
+      if (videoObj) return resolveVideoPurchaseState(videoObj, videoPurchaseStatusById);
+      if (videoOrId) return videoPurchaseStatusById[String(videoOrId).toLowerCase()] || null;
+      return null;
     },
-    [user, videoPurchaseStatusById]
+    [videoPurchaseStatusById]
   );
-  const videoPurchaseBtnDisabled = {
-    background: "var(--surface)",
-    color: "var(--muted)",
-    border: "1px solid var(--border)",
-    opacity: 0.85,
-    cursor: "not-allowed",
-  };
   const isOwnPhoto = useCallback(
     (photo) => Boolean(photo && user && photo.photographer?.user_id === user.id),
     [user]
@@ -1109,6 +1068,11 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const videoRefs = useRef({});
   const playingVideos = useRef([]);
   const videoPreviewHandlers = useRef({});
+  const videoPurchasesRef = useRef([]);
+
+  useEffect(() => {
+    videoPurchasesRef.current = videoPurchases;
+  }, [videoPurchases]);
 
   const handleBuyVideo = (video) => {
     if (!user) { setMessage(""); setView(VIEWS.AUTH); return; }
@@ -1119,29 +1083,6 @@ function WatermarkedImage({ src, photographer, purchased }) {
     setSelected(null);
     setSelectedVideo(video);
     setPayStep(1);
-  };
-
-  const renderVideoBuyButton = (video) => {
-    const purchaseState = getVideoPurchaseState(video);
-    if (purchaseState === "entregado") {
-      return (
-        <AppButton className="card-buy" disabled style={videoPurchaseBtnDisabled}>
-          Entregado
-        </AppButton>
-      );
-    }
-    if (purchaseState === "comprado") {
-      return (
-        <AppButton className="card-buy" disabled style={videoPurchaseBtnDisabled}>
-          Comprado
-        </AppButton>
-      );
-    }
-    return (
-      <AppButton className="card-buy" onClick={(e) => { e.stopPropagation(); handleBuyVideo(video); }}>
-        Comprar
-      </AppButton>
-    );
   };
 
   const showEmailConfirmedPage = useCallback((s) => {
@@ -1990,16 +1931,13 @@ const fetchAnnouncements = async () => {
 
 // ── Fetch purchases ────────────────────────────────────────
 const fetchPurchases = async ({ silent = false } = {}) => {
-  if (!session) return;
+  if (!session?.access_token) return { photoRows: [], videoRows: [] };
   try {
     if (!silent) setPurchasesLoading(true);
-    const res = await fetch("/api/payments/my-purchases", {
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-      },
+    const { res, data } = await apiJson("/api/payments/my-purchases", {
+      headers: { Authorization: `Bearer ${session.access_token}` },
     });
-    if (!res.ok) throw new Error("Error cargando compras");
-    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Error cargando compras");
     const photoRows = data.purchases || [];
     const videoRows = data.video_purchases || [];
     setPurchases(photoRows);
@@ -2008,9 +1946,11 @@ const fetchPurchases = async ({ silent = false } = {}) => {
     setPurchasedVideos(videoRows.map((v) => purchaseVideoId(v)).filter(Boolean));
     setVideos((prev) => mergePurchaseStatusIntoVideos(prev, videoRows));
     setPhotographerVideos((prev) => mergePurchaseStatusIntoVideos(prev, videoRows));
+    return { photoRows, videoRows };
   } catch (err) {
     console.error(err);
     if (!silent) showToast("No se pudieron cargar tus compras.");
+    return { photoRows: [], videoRows: [] };
   } finally {
     if (!silent) setPurchasesLoading(false);
   }
@@ -3131,29 +3071,29 @@ useEffect(() => {
     if (profile?.id) fetchMyVideos(profile.id);
   };
 
-  const handleVideoSearch = async (query = videoSearchQuery) => {
+  const handleVideoSearch = async (query = videoSearchQuery, purchaseRows = null) => {
     const q = String(query ?? "").trim();
     setVideoSearchRan(q.length > 0);
     setVideosLoading(true);
+    const purchaseSource = purchaseRows ?? videoPurchasesRef.current ?? [];
     try {
       const params = new URLSearchParams();
       if (q) params.set("q", q);
-      const url = params.toString() ? `/api/videos/search?${params}` : "/api/videos/search";
+      const path = params.toString() ? `/api/videos/search?${params}` : "/api/videos/search";
       const headers = session?.access_token
         ? { Authorization: `Bearer ${session.access_token}` }
-        : undefined;
-      const fetchOpts = headers ? { headers } : undefined;
-      const res = await fetch(url, fetchOpts);
-      const data = await res.json();
+        : {};
+      const { res, data } = await apiJson(path, { headers });
       if (!res.ok) throw new Error(data.error || "Error al buscar videos");
-      const list = Array.isArray(data) ? data : [];
+      const list = mergePurchaseStatusIntoVideos(Array.isArray(data) ? data : [], purchaseSource);
       setVideos(list);
       if (list.some((v) => !v.thumbnail_url)) {
         const refreshSearchThumbnails = async () => {
           try {
-            const retryRes = await fetch(url, fetchOpts);
-            const retryData = await retryRes.json();
-            if (retryRes.ok && Array.isArray(retryData)) setVideos(retryData);
+            const { res: retryRes, data: retryData } = await apiJson(path, { headers });
+            if (retryRes.ok && Array.isArray(retryData)) {
+              setVideos(mergePurchaseStatusIntoVideos(retryData, videoPurchasesRef.current));
+            }
           } catch (_) {}
         };
         window.setTimeout(refreshSearchThumbnails, 8000);
@@ -3175,10 +3115,15 @@ useEffect(() => {
       case VIEWS.PHOTOGRAPHERS:
         await Promise.all([fetchPhotos(), fetchPhotographers(), fetchAnnouncements()]);
         break;
-      case VIEWS.VIDEO_SEARCH:
-        if (user && session?.access_token) await fetchPurchases({ silent: true });
-        await handleVideoSearch(videoSearchQuery);
+      case VIEWS.VIDEO_SEARCH: {
+        let purchaseRows = videoPurchasesRef.current;
+        if (user && session?.access_token) {
+          const result = await fetchPurchases({ silent: true });
+          purchaseRows = result?.videoRows || videoPurchasesRef.current;
+        }
+        await handleVideoSearch(videoSearchQuery, purchaseRows);
         break;
+      }
       case VIEWS.MY_PURCHASES:
         if (user && session) await fetchPurchases();
         break;
@@ -3280,10 +3225,12 @@ useEffect(() => {
     setVideoSearchQuery("");
     let cancelled = false;
     (async () => {
+      let purchaseRows = videoPurchasesRef.current;
       if (user && session?.access_token) {
-        await fetchPurchases({ silent: true });
+        const result = await fetchPurchases({ silent: true });
+        purchaseRows = result?.videoRows || videoPurchasesRef.current;
       }
-      if (!cancelled) await handleVideoSearch("");
+      if (!cancelled) await handleVideoSearch("", purchaseRows);
     })();
     return () => { cancelled = true; };
   }, [view, user, session?.access_token]);
@@ -3547,7 +3494,11 @@ useEffect(() => {
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-            {renderVideoBuyButton(video)}
+            <VideoPurchaseButton
+              video={video}
+              purchaseState={resolveVideoPurchaseState(video, videoPurchaseStatusById)}
+              onBuy={handleBuyVideo}
+            />
           </div>
         </div>
       </div>
@@ -3677,6 +3628,12 @@ useEffect(() => {
 
   const handleVideoPayment = async () => {
     if (!selectedVideo) return;
+    if (getVideoPurchaseState(selectedVideo)) {
+      showToast("Ya compraste este video.");
+      setPayStep(0);
+      setSelectedVideo(null);
+      return;
+    }
     if (Number(selectedVideo.price) < RECURRENTE_MIN_GTQ) {
       showToast(`Recurrente requiere un mínimo de Q${RECURRENTE_MIN_GTQ}. Usá PayPal para este video.`);
       await handleVideoPayPalPayment();
@@ -3714,6 +3671,12 @@ useEffect(() => {
 
   const handleVideoPayPalPayment = async () => {
     if (!selectedVideo) return;
+    if (getVideoPurchaseState(selectedVideo)) {
+      showToast("Ya compraste este video.");
+      setPayStep(0);
+      setSelectedVideo(null);
+      return;
+    }
     setPayStep(2);
     try {
       const res = await fetch("/api/payments/create-video-paypal-order", {
@@ -6200,7 +6163,7 @@ const renderPhotographerProfile = () => {
       return duration <= 7 ? 3 : 7;
     };
 
-    const SearchVideoCard = ({ video }) => {
+    const SearchVideoCard = ({ video, purchaseState }) => {
       const [playing, setPlaying] = useState(false);
       const [progress, setProgress] = useState(0);
       const [durationSec, setDurationSec] = useState(video.duration_seconds || null);
@@ -6411,7 +6374,7 @@ const renderPhotographerProfile = () => {
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-              {renderVideoBuyButton(video)}
+              <VideoPurchaseButton video={video} purchaseState={purchaseState} onBuy={handleBuyVideo} />
             </div>
           </div>
         </div>
@@ -6448,7 +6411,13 @@ const renderPhotographerProfile = () => {
             <div>Cargando videos...</div>
           </div>
         ) : videos.length > 0 ? (
-          videos.map((video) => <SearchVideoCard key={video.id} video={video} />)
+          videos.map((video) => (
+            <SearchVideoCard
+              key={video.id}
+              video={video}
+              purchaseState={resolveVideoPurchaseState(video, videoPurchaseStatusById)}
+            />
+          ))
         ) : (
           <div className="empty" style={{ gridColumn: "1 / -1" }}>
             <EmptyIcon name="video" />
