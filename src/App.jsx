@@ -725,7 +725,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [profileMediaTab, setProfileMediaTab] = useState("photos");
   const [myProfileMediaTab, setMyProfileMediaTab] = useState("photos");
   const [myGalleryMediaTab, setMyGalleryMediaTab] = useState("photos");
-  const [uploadMediaTab, setUploadMediaTab] = useState("photo");
+  const [uploadMediaTab, setUploadMediaTab] = useState("video");
   const [profileSearchInput, setProfileSearchInput] = useState("");
   const [profileSearchQuery, setProfileSearchQuery] = useState("");
   const [profileSearchRan, setProfileSearchRan] = useState(false);
@@ -2930,7 +2930,7 @@ useEffect(() => {
   });
 
   useEffect(() => {
-    if (view === VIEWS.UPLOAD_VIDEO) setUploadMediaTab("video");
+    if (view === VIEWS.UPLOAD || view === VIEWS.UPLOAD_VIDEO) setUploadMediaTab("video");
   }, [view]);
 
   useEffect(() => {
@@ -7208,6 +7208,18 @@ const renderPhotographerProfile = () => {
   };
 
   const renderMyPurchases = () => {
+    const purchaseBtnDisabled = {
+      background: "var(--surface)",
+      color: "var(--muted)",
+      border: "1px solid var(--border)",
+      opacity: 0.6,
+      cursor: "not-allowed",
+    };
+    const purchaseBtnActive = {
+      background: "linear-gradient(135deg, var(--orange-light), var(--orange))",
+      color: "#000",
+    };
+
     const purchaseItems = [
       ...purchases.map((p) => ({ type: "photo", data: p, completed_at: p.completed_at })),
       ...videoPurchases.map((v) => ({ type: "video", data: v, completed_at: v.completed_at })),
@@ -7238,6 +7250,10 @@ const renderPhotographerProfile = () => {
         {purchaseItems.map((item) => {
           if (item.type === "photo") {
             const p = item.data;
+            const photoPending = p.photo?.hq_status === "pending";
+            const photoDownloaded = Boolean(p.hq_downloaded_at) || p.photo?.hq_status === "downloaded";
+            const photoClaimable = p.photo?.hq_status === "ready" && !p.hq_downloaded_at;
+
             return (
               <div
                 key={`photo-${p.id}`}
@@ -7249,6 +7265,7 @@ const renderPhotographerProfile = () => {
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
                   alignItems: "center",
+                  opacity: photoDownloaded ? 0.85 : 1,
                 }}
               >
                 <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", background: "var(--card)", flexShrink: 0 }}>
@@ -7258,6 +7275,11 @@ const renderPhotographerProfile = () => {
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
                     <span className="tag" style={{ fontSize: 10, padding: "2px 8px" }}>Foto</span>
                     <span style={{ fontWeight: 600 }}>{p.photo?.photographer?.name || "Fotógrafo"}</span>
+                    {photoClaimable && (
+                      <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 6, background: "var(--orange)", color: "#000", fontWeight: 700 }}>
+                        NUEVO
+                      </span>
+                    )}
                   </div>
                   <div style={{ color: "var(--muted)", marginTop: 2 }}>
                     <IconText icon="pin" size={12}>{p.photo?.location}</IconText>
@@ -7265,33 +7287,48 @@ const renderPhotographerProfile = () => {
                   <div style={{ color: "var(--muted)", marginTop: 2 }}>
                     <IconText icon="money" size={12}>Q{p.amount}</IconText> ·{" "}
                     {p.completed_at ? new Date(p.completed_at).toLocaleString() : "Completado"}
+                    {photoPending && (
+                      <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Preparando HQ</span>
+                    )}
+                    {photoDownloaded && (
+                      <span style={{ color: "var(--success)", marginLeft: 6 }}>· Descargado</span>
+                    )}
                   </div>
                 </div>
                 <AppButton
                   className="card-buy"
-                  style={{ background: "linear-gradient(135deg, var(--orange-light), var(--orange))", color: "#000" }}
+                  disabled={photoDownloaded || photoPending}
+                  style={photoDownloaded || photoPending ? purchaseBtnDisabled : purchaseBtnActive}
                   onClick={async () => {
+                    if (photoDownloaded || photoPending) return;
                     try {
                       const res = await fetch(`/api/downloads/${p.photo.id}`, {
                         headers: { Authorization: `Bearer ${session.access_token}` },
                       });
-                      if (!res.ok) throw new Error("Error al descargar");
                       const data = await res.json();
+                      if (!res.ok) throw new Error(data.error || "Error al descargar");
+                      if (data.status === "pending") {
+                        showToast(data.message || "El fotógrafo está preparando tu foto.");
+                        fetchPurchases({ silent: true });
+                        return;
+                      }
+                      if (data.status === "downloaded") {
+                        showToast(data.message || "Ya descargaste esta foto.");
+                        fetchPurchases({ silent: true });
+                        return;
+                      }
                       window.open(data.download_url, "_blank");
-                      setPurchases((prev) =>
-                        prev.map((it) =>
-                          it.id === p.id && !it.hq_downloaded_at
-                            ? { ...it, hq_downloaded_at: new Date().toISOString() }
-                            : it
-                        )
-                      );
+                      fetchPurchases({ silent: true });
                     } catch (err) {
                       console.error(err);
                       showToast("Error al descargar.");
                     }
                   }}
                 >
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} /> Descargar</span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} />
+                    {photoDownloaded ? "Descargado" : photoPending ? "Esperando HQ" : "Descargar"}
+                  </span>
                 </AppButton>
               </div>
             );
@@ -7303,7 +7340,7 @@ const renderPhotographerProfile = () => {
             v.video?.sector ||
             "Video";
           const hqPending = v.video?.hq_status === "pending";
-          const hqDownloaded = v.video?.hq_status === "downloaded";
+          const hqDownloaded = Boolean(v.hq_downloaded_at) || v.video?.hq_status === "downloaded";
           const hqClaimable = v.video?.hq_status === "ready" && !v.hq_downloaded_at;
 
           return (
@@ -7317,6 +7354,7 @@ const renderPhotographerProfile = () => {
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
                 alignItems: "center",
+                opacity: hqDownloaded ? 0.85 : 1,
               }}
             >
               <div style={{ width: 80, height: 60, borderRadius: 8, overflow: "hidden", background: "#000", flexShrink: 0 }}>
@@ -7346,63 +7384,41 @@ const renderPhotographerProfile = () => {
                   )}
                 </div>
               </div>
-              {hqDownloaded ? (
-                <span style={{
-                  display: "inline-flex", alignItems: "center", gap: 4,
-                  fontSize: 12, color: "var(--success)", fontWeight: 700,
-                  padding: "8px 12px", borderRadius: 8,
-                  border: "1px solid var(--border)", background: "var(--card)",
-                  flexShrink: 0,
-                }}>
-                  <AppIcon name="check" size={12} color="var(--success)" /> Historial
-                </span>
-              ) : (
-                <AppButton
-                  className="card-buy"
-                  style={{
-                    background: hqPending
-                      ? "var(--surface)"
-                      : "linear-gradient(135deg, var(--orange-light), var(--orange))",
-                    color: hqPending ? "var(--muted)" : "#000",
-                    border: hqPending ? "1px solid var(--border)" : undefined,
-                  }}
-                  onClick={async () => {
-                    try {
-                      const res = await fetch(`/api/videos/${v.video.id}/download`, {
-                        headers: { Authorization: `Bearer ${session.access_token}` },
-                      });
-                      const data = await res.json();
-                      if (!res.ok) throw new Error(data.error || "Error al descargar");
-                      if (data.status === "pending") {
-                        showToast(data.message || "El fotógrafo está preparando tu video.");
-                        return;
-                      }
-                      if (data.status === "downloaded") {
-                        showToast(data.message || "Ya descargaste este video.");
-                        fetchPurchases({ silent: true });
-                        return;
-                      }
-                      window.open(data.download_url, "_blank");
-                      // Marcar como reclamado localmente (badge + estado)
-                      setVideoPurchases((prev) =>
-                        prev.map((p) =>
-                          p.id === v.id && !p.hq_downloaded_at
-                            ? { ...p, hq_downloaded_at: new Date().toISOString() }
-                            : p
-                        )
-                      );
-                    } catch (err) {
-                      console.error(err);
-                      showToast("Error al descargar el video.");
+              <AppButton
+                className="card-buy"
+                disabled={hqDownloaded || hqPending}
+                style={hqDownloaded || hqPending ? purchaseBtnDisabled : purchaseBtnActive}
+                onClick={async () => {
+                  if (hqDownloaded || hqPending) return;
+                  try {
+                    const res = await fetch(`/api/videos/${v.video.id}/download`, {
+                      headers: { Authorization: `Bearer ${session.access_token}` },
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || "Error al descargar");
+                    if (data.status === "pending") {
+                      showToast(data.message || "El fotógrafo está preparando tu video.");
+                      fetchPurchases({ silent: true });
+                      return;
                     }
-                  }}
-                >
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                    <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} />
-                    {hqPending ? "Esperando HQ" : v.hq_downloaded_at ? "Descargar de nuevo" : "Descargar"}
-                  </span>
-                </AppButton>
-              )}
+                    if (data.status === "downloaded") {
+                      showToast(data.message || "Ya descargaste este video.");
+                      fetchPurchases({ silent: true });
+                      return;
+                    }
+                    window.open(data.download_url, "_blank");
+                    fetchPurchases({ silent: true });
+                  } catch (err) {
+                    console.error(err);
+                    showToast("Error al descargar el video.");
+                  }
+                }}
+              >
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} />
+                  {hqDownloaded ? "Descargado" : hqPending ? "Esperando HQ" : "Descargar"}
+                </span>
+              </AppButton>
             </div>
           );
         })}
@@ -10711,6 +10727,7 @@ const renderVendorRequest = () => {
         activeTab={activeTab}
         onSelect={(item) => {
           setActiveTab(item.id);
+          if (item.id === "upload") setUploadMediaTab("video");
           setView(item.v);
         }}
       />
