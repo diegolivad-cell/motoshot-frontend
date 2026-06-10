@@ -62,6 +62,7 @@ const VIEWS = {
 
 const VIDEO_PREVIEW_MAX_SEC = 7;
 const VIDEO_PREVIEW_SHORT_SEC = 3;
+const RECURRENTE_MIN_GTQ = 5;
 
 const getVideoPreviewLimitSec = (knownDuration, videoEl) => {
   const fromMeta = videoEl?.duration;
@@ -3508,6 +3509,10 @@ useEffect(() => {
 
   const handlePayment = async () => {
     if (!selected) return;
+    if (Number(selected.price) < RECURRENTE_MIN_GTQ) {
+      showToast(`Recurrente requiere un mínimo de Q${RECURRENTE_MIN_GTQ}. Ajustá el precio de la foto.`);
+      return;
+    }
     setPayStep(2);
     try {
       const res = await fetch("/api/payments/create-order", {
@@ -3537,6 +3542,11 @@ useEffect(() => {
 
   const handleVideoPayment = async () => {
     if (!selectedVideo) return;
+    if (Number(selectedVideo.price) < RECURRENTE_MIN_GTQ) {
+      showToast(`Recurrente requiere un mínimo de Q${RECURRENTE_MIN_GTQ}. Usá PayPal para este video.`);
+      await handleVideoPayPalPayment();
+      return;
+    }
     setPayStep(2);
     try {
       const res = await fetch("/api/payments/create-video-order", {
@@ -11340,29 +11350,52 @@ const renderVendorRequest = () => {
             <>
               <div className="pay-label">Método de pago</div>
               {selectedVideo ? (
-                <>
-                  <AppButton className="pay-btn" onClick={handleVideoPayment} style={{ marginBottom: 10 }}>
-                    PAGAR Q{selectedVideo.price} CON RECURRENTE
-                  </AppButton>
-                  <AppButton
-                    className="close-btn-secondary"
-                    onClick={handleVideoPayPalPayment}
-                    style={{ width: "100%" }}
-                  >
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                      <AppIcon name="creditCard" size={14} /> Pagar con PayPal
-                    </span>
-                  </AppButton>
-                </>
+                Number(selectedVideo.price) < RECURRENTE_MIN_GTQ ? (
+                  <>
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+                      Recurrente acepta pagos desde Q{RECURRENTE_MIN_GTQ}. Para Q{selectedVideo.price} usá PayPal.
+                    </div>
+                    <AppButton className="pay-btn" onClick={handleVideoPayPalPayment}>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        <AppIcon name="creditCard" size={14} /> PAGAR Q{selectedVideo.price} CON PAYPAL
+                      </span>
+                    </AppButton>
+                  </>
+                ) : (
+                  <>
+                    <AppButton className="pay-btn" onClick={handleVideoPayment} style={{ marginBottom: 10 }}>
+                      PAGAR Q{selectedVideo.price} CON RECURRENTE
+                    </AppButton>
+                    <AppButton
+                      className="close-btn-secondary"
+                      onClick={handleVideoPayPalPayment}
+                      style={{ width: "100%" }}
+                    >
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        <AppIcon name="creditCard" size={14} /> Pagar con PayPal
+                      </span>
+                    </AppButton>
+                  </>
+                )
               ) : (
                 <>
+                  {Number(selected?.price) < RECURRENTE_MIN_GTQ && (
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+                      Recurrente acepta pagos desde Q{RECURRENTE_MIN_GTQ}. Ajustá el precio de la foto para cobrar con Recurrente.
+                    </div>
+                  )}
                   <div className="pay-methods">
                     <div className="pay-method">
                       <div className="pay-method-dot"></div>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="creditCard" size={14} /> Recurrente</span>
                     </div>
                   </div>
-                  <AppButton className="pay-btn" onClick={handlePayment}>
+                  <AppButton
+                    className="pay-btn"
+                    onClick={handlePayment}
+                    disabled={Number(selected?.price) < RECURRENTE_MIN_GTQ}
+                    style={Number(selected?.price) < RECURRENTE_MIN_GTQ ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
+                  >
                     PAGAR Q{selected?.price} CON RECURRENTE
                   </AppButton>
                 </>
