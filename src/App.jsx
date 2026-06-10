@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef, useCallback } from "react";
+﻿import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { flushSync, createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile, imageMimeForFile } from "./storageUpload";
@@ -63,6 +63,37 @@ const VIEWS = {
 const VIDEO_PREVIEW_MAX_SEC = 7;
 const VIDEO_PREVIEW_SHORT_SEC = 3;
 const RECURRENTE_MIN_GTQ = 5;
+
+const normalizeVideoId = (id) => String(id).toLowerCase();
+
+const purchaseVideoMeta = (row) => {
+  const video = row?.video;
+  return Array.isArray(video) ? video[0] : video;
+};
+
+const purchaseVideoId = (row) => row?.video_id ?? purchaseVideoMeta(row)?.id;
+
+const computeVideoPurchaseStatus = (row) => {
+  const videoMeta = purchaseVideoMeta(row);
+  const hqPending = videoMeta?.hq_status === "pending";
+  const hqDownloaded = Boolean(row?.hq_downloaded_at) || videoMeta?.hq_status === "downloaded";
+  const hqReady = videoMeta?.hq_status === "ready";
+  if (hqReady || hqDownloaded) return "entregado";
+  return "comprado";
+};
+
+const mergePurchaseStatusIntoVideos = (list, videoRows) => {
+  if (!list?.length || !videoRows?.length) return list;
+  const statusById = {};
+  for (const row of videoRows) {
+    const id = purchaseVideoId(row);
+    if (id) statusById[normalizeVideoId(id)] = computeVideoPurchaseStatus(row);
+  }
+  return list.map((v) => {
+    const status = statusById[normalizeVideoId(v.id)];
+    return status ? { ...v, buyer_purchase_status: status } : v;
+  });
+};
 
 const getVideoPreviewLimitSec = (knownDuration, videoEl) => {
   const fromMeta = videoEl?.duration;
@@ -852,6 +883,14 @@ function WatermarkedImage({ src, photographer, purchased }) {
     },
     [isCEO, user, purchased]
   );
+  const videoPurchaseStatusById = useMemo(() => {
+    const map = {};
+    for (const row of videoPurchases) {
+      const id = purchaseVideoId(row);
+      if (id) map[normalizeVideoId(id)] = computeVideoPurchaseStatus(row);
+    }
+    return map;
+  }, [videoPurchases]);
   const getVideoPurchaseState = useCallback(
     (videoOrId) => {
       if (!user) return null;
@@ -863,20 +902,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
         return videoObj.buyer_purchase_status;
       }
 
-      const normId = String(videoId).toLowerCase();
-      const purchase = videoPurchases.find((v) => {
-        const pid = v.video?.id ?? v.video_id;
-        return pid && String(pid).toLowerCase() === normId;
-      });
-      if (!purchase) return null;
-      const hqPending = purchase.video?.hq_status === "pending";
-      const hqDownloaded = Boolean(purchase.hq_downloaded_at) || purchase.video?.hq_status === "downloaded";
-      const hqReady = purchase.video?.hq_status === "ready";
-      if (hqReady || hqDownloaded) return "entregado";
-      if (hqPending) return "comprado";
-      return "comprado";
+      return videoPurchaseStatusById[normalizeVideoId(videoId)] || null;
     },
-    [user, videoPurchases]
+    [user, videoPurchaseStatusById]
   );
   const videoPurchaseBtnDisabled = {
     background: "var(--surface)",
@@ -1081,6 +1109,40 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const videoRefs = useRef({});
   const playingVideos = useRef([]);
   const videoPreviewHandlers = useRef({});
+
+  const handleBuyVideo = (video) => {
+    if (!user) { setMessage(""); setView(VIEWS.AUTH); return; }
+    if (getVideoPurchaseState(video)) {
+      showToast("Ya compraste este video.");
+      return;
+    }
+    setSelected(null);
+    setSelectedVideo(video);
+    setPayStep(1);
+  };
+
+  const renderVideoBuyButton = (video) => {
+    const purchaseState = getVideoPurchaseState(video);
+    if (purchaseState === "entregado") {
+      return (
+        <AppButton className="card-buy" disabled style={videoPurchaseBtnDisabled}>
+          Entregado
+        </AppButton>
+      );
+    }
+    if (purchaseState === "comprado") {
+      return (
+        <AppButton className="card-buy" disabled style={videoPurchaseBtnDisabled}>
+          Comprado
+        </AppButton>
+      );
+    }
+    return (
+      <AppButton className="card-buy" onClick={(e) => { e.stopPropagation(); handleBuyVideo(video); }}>
+        Comprar
+      </AppButton>
+    );
+  };
 
   const showEmailConfirmedPage = useCallback((s) => {
     if (!s?.user?.email_confirmed_at) return;
@@ -1943,7 +2005,9 @@ const fetchPurchases = async ({ silent = false } = {}) => {
     setPurchases(photoRows);
     setVideoPurchases(videoRows);
     setPurchased(photoRows.map((p) => p.photo?.id).filter(Boolean));
-    setPurchasedVideos(videoRows.map((v) => v.video?.id).filter(Boolean));
+    setPurchasedVideos(videoRows.map((v) => purchaseVideoId(v)).filter(Boolean));
+    setVideos((prev) => mergePurchaseStatusIntoVideos(prev, videoRows));
+    setPhotographerVideos((prev) => mergePurchaseStatusIntoVideos(prev, videoRows));
   } catch (err) {
     console.error(err);
     if (!silent) showToast("No se pudieron cargar tus compras.");
@@ -2742,10 +2806,10 @@ useEffect(() => {
   }, [user, session?.access_token]);
 
   useEffect(() => {
-    if (view === VIEWS.VIDEO_SEARCH && user && session?.access_token) {
-      fetchPurchases({ silent: true });
-    }
-  }, [view, user, session?.access_token]);
+    if (!videoPurchases.length) return;
+    setVideos((prev) => mergePurchaseStatusIntoVideos(prev, videoPurchases));
+    setPhotographerVideos((prev) => mergePurchaseStatusIntoVideos(prev, videoPurchases));
+  }, [videoPurchases]);
 
   useEffect(() => {
     if (view !== VIEWS.ADMIN || !isStaff || !session) return;
@@ -3210,12 +3274,18 @@ useEffect(() => {
   }, [view]);
 
   useEffect(() => {
-    if (view === VIEWS.VIDEO_SEARCH) {
-      setVideoSearchRan(false);
-      setVideoSearchQuery("");
-      handleVideoSearch("");
-    }
-  }, [view, session?.access_token]);
+    if (view !== VIEWS.VIDEO_SEARCH) return;
+    setVideoSearchRan(false);
+    setVideoSearchQuery("");
+    let cancelled = false;
+    (async () => {
+      if (user && session?.access_token) {
+        await fetchPurchases({ silent: true });
+      }
+      if (!cancelled) await handleVideoSearch("");
+    })();
+    return () => { cancelled = true; };
+  }, [view, user, session?.access_token]);
 
   useEffect(() => {
     Object.values(videoRefs.current).forEach((el) => {
@@ -3569,38 +3639,6 @@ useEffect(() => {
     if (!user) { setPendingPurchase(photo); setMessage(""); setView(VIEWS.AUTH); return; }
     setSelectedVideo(null);
     setSelected(photo); setPayStep(1);
-  };
-
-  const handleBuyVideo = (video) => {
-    if (!user) { setMessage(""); setView(VIEWS.AUTH); return; }
-    if (getVideoPurchaseState(video)) {
-      showToast("Ya compraste este video.");
-      return;
-    }
-    setSelected(null);
-    setSelectedVideo(video);
-    setPayStep(1);
-  };
-
-  const renderVideoBuyButton = (video) => {
-    const purchaseState = getVideoPurchaseState(video);
-    if (purchaseState === "entregado") {
-      return (
-        <AppButton className="card-buy" disabled style={videoPurchaseBtnDisabled}>
-          Entregado
-        </AppButton>
-      );
-    }
-    if (purchaseState === "comprado") {
-      return (
-        <AppButton className="card-buy" disabled style={videoPurchaseBtnDisabled}>
-          Comprado
-        </AppButton>
-      );
-    }
-    return (
-      <AppButton className="card-buy" onClick={() => handleBuyVideo(video)}>Comprar</AppButton>
-    );
   };
 
   const handlePayment = async () => {
