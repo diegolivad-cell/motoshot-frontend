@@ -3203,10 +3203,9 @@ useEffect(() => {
     !showPasswordReset &&
     payStep === 0 &&
     !confirmDialog &&
-    !globalLoading.active &&
     ![VIEWS.AUTH, VIEWS.SUCCESS, VIEWS.RESET_PASSWORD].includes(view);
 
-  const { pullDistance, refreshing: pullRefreshing, contentOffset, refreshHoldPx } = usePullToRefresh({
+  const { pullDistance, refreshing: pullRefreshing, contentOffset, shouldTransition } = usePullToRefresh({
     onRefresh: refreshCurrentView,
     enabled: pullToRefreshEnabled,
   });
@@ -9640,9 +9639,9 @@ const renderVendorRequest = () => {
     button, a { -webkit-tap-highlight-color: transparent; tap-highlight-color: transparent; }
     .app { min-height: 100vh; display: flex; flex-direction: column; }
     .ptr-indicator {
-      position: fixed; top: 58px; left: 0; right: 0; z-index: 99;
+      position: absolute; top: 0; left: 0; right: 0; z-index: 6;
       display: flex; justify-content: center; pointer-events: none;
-      transition: opacity 0.2s ease, transform 0.15s ease;
+      padding-top: 8px;
     }
     .ptr-indicator-bubble {
       width: 46px; height: 46px; border-radius: 50%;
@@ -9654,9 +9653,17 @@ const renderVendorRequest = () => {
     }
     .ptr-indicator-bubble--spin { animation: ptrSpin 0.85s linear infinite; }
     @keyframes ptrSpin { to { transform: rotate(360deg); } }
-    .app-content-shift {
+    .ptr-shell {
+      position: relative;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
       will-change: transform;
-      transition: transform 0.18s ease;
+    }
+    .app-content-shift {
+      flex: 1;
+      min-height: 0;
     }
     .nav { position: sticky; top: 0; z-index: 100; background: rgba(12,12,12,0.94); backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: sp
@@ -11387,6 +11394,13 @@ const renderVendorRequest = () => {
 
 {renderAdminDocPreviewModal()}
 
+<div
+  className="ptr-shell"
+  style={{
+    transform: contentOffset > 0 ? `translateY(${contentOffset}px)` : undefined,
+    transition: shouldTransition ? "transform 0.32s cubic-bezier(0.22, 1, 0.36, 1)" : "none",
+  }}
+>
 <nav className="nav">
 <div className="nav-logo" onClick={() => { 
   setView(VIEWS.PHOTOGRAPHERS); 
@@ -11449,16 +11463,9 @@ const renderVendorRequest = () => {
   </div>
 </nav>
 
-<PullToRefreshIndicator pullDistance={pullDistance} refreshing={pullRefreshing} refreshHoldPx={refreshHoldPx} />
+<PullToRefreshIndicator pullDistance={pullDistance} refreshing={pullRefreshing} />
 
-<div
-  className="app-content-shift"
-  style={{
-    flex: 1,
-    transform: contentOffset > 0 ? `translateY(${contentOffset}px)` : undefined,
-    transition: pullRefreshing || contentOffset === 0 ? "transform 0.28s ease" : "none",
-  }}
->
+<div className="app-content-shift">
   <AnimatePresence mode="wait">
     <motion.div
       key={showPasswordReset ? "reset" : view}
@@ -11490,6 +11497,7 @@ const renderVendorRequest = () => {
       )}
     </motion.div>
   </AnimatePresence>
+</div>
 </div>
 
 <AnimatePresence>

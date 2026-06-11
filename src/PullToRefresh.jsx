@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { AppIcon } from "./icons";
 
-const REFRESH_HOLD_PX = 56;
-const MIN_REFRESH_MS = 450;
+const REFRESH_HOLD_PX = 80;
+const MIN_REFRESH_MS = 750;
 
 function getScrollTop() {
   return window.scrollY || document.documentElement.scrollTop || 0;
@@ -12,9 +12,30 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Pull-to-refresh estilo Facebook: el indicador y el contenido se mantienen hasta que termina el refresh. */
+function waitForPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+}
+
+function lockPageScroll(lock) {
+  const root = document.documentElement;
+  const body = document.body;
+  if (lock) {
+    root.style.overflow = "hidden";
+    root.style.overscrollBehavior = "none";
+    body.style.overscrollBehavior = "none";
+  } else {
+    root.style.overflow = "";
+    root.style.overscrollBehavior = "";
+    body.style.overscrollBehavior = "";
+  }
+}
+
+/** Pull-to-refresh estilo Facebook: todo el bloque se mantiene abajo hasta que termina el refresh. */
 export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) {
   const [pullDistance, setPullDistance] = useState(0);
+  const [holdDistance, setHoldDistance] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const startY = useRef(0);
   const pulling = useRef(false);
@@ -23,15 +44,18 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
   const onRefreshRef = useRef(onRefresh);
   onRefreshRef.current = onRefresh;
 
-  const contentOffset = refreshing ? REFRESH_HOLD_PX : pullDistance;
+  const contentOffset = refreshing ? holdDistance : pullDistance;
+  const shouldTransition = refreshing || contentOffset === 0;
 
   useEffect(() => {
-    if (!enabled) {
-      if (!refreshingRef.current) {
-        pulling.current = false;
-        pullDistanceRef.current = 0;
-        setPullDistance(0);
-      }
+    if (!enabled && !refreshingRef.current) {
+      pulling.current = false;
+      pullDistanceRef.current = 0;
+      setPullDistance(0);
+      setHoldDistance(0);
+      return undefined;
+    }
+    if (!enabled && refreshingRef.current) {
       return undefined;
     }
 
@@ -40,6 +64,7 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
       pulling.current = false;
       pullDistanceRef.current = 0;
       setPullDistance(0);
+      setHoldDistance(0);
     };
 
     const onTouchStart = (e) => {
@@ -63,10 +88,10 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
         setPullDistance(0);
         return;
       }
-      const dist = Math.min(dy * 0.55, threshold * 1.35);
+      const dist = Math.min(dy * 0.5, threshold * 1.5);
       pullDistanceRef.current = dist;
       setPullDistance(dist);
-      if (dy > 8) e.preventDefault();
+      if (dy > 6) e.preventDefault();
     };
 
     const finishPull = async () => {
@@ -78,14 +103,18 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
         return;
       }
 
-      pullDistanceRef.current = REFRESH_HOLD_PX;
-      setPullDistance(REFRESH_HOLD_PX);
+      const hold = Math.max(REFRESH_HOLD_PX, Math.round(dist));
+      pullDistanceRef.current = hold;
+      setHoldDistance(hold);
+      setPullDistance(hold);
       refreshingRef.current = true;
       setRefreshing(true);
+      lockPageScroll(true);
 
       const startedAt = Date.now();
       try {
         await onRefreshRef.current();
+        await waitForPaint();
       } catch (err) {
         console.error("pull-to-refresh:", err);
       } finally {
@@ -93,8 +122,11 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
         if (elapsed < MIN_REFRESH_MS) {
           await wait(MIN_REFRESH_MS - elapsed);
         }
+        await waitForPaint();
+        lockPageScroll(false);
         refreshingRef.current = false;
         setRefreshing(false);
+        setHoldDistance(0);
         pullDistanceRef.current = 0;
         setPullDistance(0);
       }
@@ -113,7 +145,9 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
     };
   }, [enabled, threshold]);
 
-  return { pullDistance, refreshing, contentOffset, refreshHoldPx: REFRESH_HOLD_PX };
+  useEffect(() => () => lockPageScroll(false), []);
+
+  return { pullDistance, refreshing, contentOffset, refreshHoldPx: REFRESH_HOLD_PX, shouldTransition };
 }
 
 export function PullToRefreshIndicator({ pullDistance, refreshing, threshold = 76, refreshHoldPx = REFRESH_HOLD_PX }) {
@@ -121,17 +155,8 @@ export function PullToRefreshIndicator({ pullDistance, refreshing, threshold = 7
   const visible = pullDistance > 0 || refreshing;
   if (!visible) return null;
 
-  const y = refreshing ? Math.max(0, refreshHoldPx - 28) : Math.max(0, pullDistance - 28);
-
   return (
-    <div
-      className="ptr-indicator"
-      style={{
-        transform: `translateY(${y}px)`,
-        opacity: refreshing ? 1 : 0.45 + progress * 0.55,
-      }}
-      aria-hidden="true"
-    >
+    <div className="ptr-indicator" aria-hidden="true">
       <div
         className={`ptr-indicator-bubble${refreshing ? " ptr-indicator-bubble--spin" : ""}`}
         style={{
