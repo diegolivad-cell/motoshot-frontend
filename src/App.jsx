@@ -838,6 +838,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [videoPurchases, setVideoPurchases] = useState([]);
   const [purchasesLoading, setPurchasesLoading] = useState(false);
   const [hqResendLoadingId, setHqResendLoadingId] = useState(null);
+  const [downloading, setDownloading] = useState(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
   const [purchasesCountdownTick, setPurchasesCountdownTick] = useState(0);
   const [vendorStats, setVendorStats] = useState(null);
   const [vendorStatsLoading, setVendorStatsLoading] = useState(false);
@@ -8523,6 +8525,103 @@ const renderPhotographerProfile = () => {
       whiteSpace: "normal",
     };
 
+    const handleDownloadVideo = async (purchase) => {
+      const videoId = purchase.video_id || purchase.video?.id;
+      if (!videoId || !session?.access_token) return;
+      setDownloading(purchase.id);
+      setDownloadProgress(0);
+      try {
+        const res = await fetch(apiUrl(`/api/videos/${videoId}/download`), {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Error al descargar");
+        if (data.status === "pending") {
+          showToast(data.message || "El fotógrafo está preparando tu video.");
+          fetchPurchases({ silent: true });
+          return;
+        }
+        if (data.status === "downloaded") {
+          showToast(data.message || "Ya descargaste este video.");
+          fetchPurchases({ silent: true });
+          return;
+        }
+
+        const url = data.download_url || data.url;
+        if (!url) throw new Error("No se recibió la URL de descarga");
+
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error("El archivo ya no está disponible. Pedile al fotógrafo que lo vuelva a subir.");
+        }
+
+        const contentLength = response.headers.get("content-length");
+        const total = parseInt(contentLength, 10);
+        let loaded = 0;
+        const chunks = [];
+
+        if (response.body) {
+          const reader = response.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            loaded += value.length;
+            if (Number.isFinite(total) && total > 0) {
+              setDownloadProgress(Math.min(100, Math.round((loaded / total) * 100)));
+            }
+          }
+        } else {
+          const fallbackBlob = await response.blob();
+          chunks.push(new Uint8Array(await fallbackBlob.arrayBuffer()));
+          loaded = fallbackBlob.size;
+        }
+
+        if (!Number.isFinite(total) || total <= 0) {
+          setDownloadProgress(100);
+        }
+
+        const blob = new Blob(chunks, { type: "video/mp4" });
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = blobUrl;
+        a.download = data.filename || `motoshot-${videoId}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+
+        const deleteRes = await fetch(apiUrl(`/api/videos/${videoId}/delete-hq`), {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        const deleteData = await deleteRes.json().catch(() => ({}));
+        if (!deleteRes.ok) {
+          throw new Error(deleteData.error || "No se pudo finalizar la descarga en el servidor");
+        }
+
+        setDownloadProgress(100);
+        setVideoPurchases((prev) => prev.map((row) => (
+          row.id === purchase.id
+            ? {
+              ...row,
+              hq_downloaded_at: row.hq_downloaded_at || new Date().toISOString(),
+              video: row.video
+                ? { ...row.video, hq_status: "deleted", hq_url: null }
+                : row.video,
+            }
+            : row
+        )));
+        fetchPurchases({ silent: true });
+      } catch (err) {
+        console.error("Error descargando video:", err);
+        showToast(err.message || "Error al descargar el video.");
+      } finally {
+        setDownloading(null);
+        setDownloadProgress(0);
+      }
+    };
+
     const purchaseItems = [
       ...purchases.map((p) => ({ type: "photo", data: p, completed_at: p.completed_at })),
       ...videoPurchases.map((v) => ({ type: "video", data: v, completed_at: v.completed_at })),
@@ -8641,10 +8740,13 @@ const renderPhotographerProfile = () => {
             v.video?.sector ||
             "Video";
           const hqPending = v.video?.hq_status === "pending";
-          const hqDownloaded = Boolean(v.hq_downloaded_at) || v.video?.hq_status === "downloaded";
+          const hqDownloaded = Boolean(v.hq_downloaded_at)
+            || v.video?.hq_status === "downloaded"
+            || v.video?.hq_status === "deleted";
           const hqClaimable = v.video?.hq_status === "ready" && !v.hq_downloaded_at;
           const showVideoResend = canShowHqResend(hqPending, v.completed_at);
           const videoResendKey = `video-${v.id}`;
+          const isVideoDownloading = downloading === v.id;
 
           return (
             <div
@@ -8677,6 +8779,31 @@ const renderPhotographerProfile = () => {
                 </div>
                 {renderHqResendAction("video", v.id, v, showVideoResend, videoResendKey)}
               </div>
+              {isVideoDownloading ? (
+                <div
+                  style={{
+                    ...purchaseActionStyle,
+                    flexDirection: "column",
+                    alignItems: "stretch",
+                    width: 112,
+                  }}
+                >
+                  <div style={{ width: "100%", height: 6, borderRadius: 3, background: "#333", overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: `${downloadProgress}%`,
+                        height: "100%",
+                        borderRadius: 3,
+                        background: "#FF6B00",
+                        transition: "width 0.2s ease",
+                      }}
+                    />
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, textAlign: "center" }}>
+                    Descargando... {downloadProgress}%
+                  </div>
+                </div>
+              ) : (
               <AppButton
                 className={`card-buy purchase-row-action${hqDownloaded || hqPending ? "" : " card-buy-download"}`}
                 disabled={hqDownloaded || hqPending}
@@ -8684,37 +8811,23 @@ const renderPhotographerProfile = () => {
                   ...purchaseActionStyle,
                   ...(hqDownloaded || hqPending ? purchaseBtnDisabled : purchaseBtnActive),
                 }}
-                onClick={async () => {
+                onClick={() => {
                   if (hqDownloaded || hqPending) return;
-                  try {
-                    const res = await fetch(`/api/videos/${v.video.id}/download`, {
-                      headers: { Authorization: `Bearer ${session.access_token}` },
-                    });
-                    const data = await res.json();
-                    if (!res.ok) throw new Error(data.error || "Error al descargar");
-                    if (data.status === "pending") {
-                      showToast(data.message || "El fotógrafo está preparando tu video.");
-                      fetchPurchases({ silent: true });
-                      return;
-                    }
-                    if (data.status === "downloaded") {
-                      showToast(data.message || "Ya descargaste este video.");
-                      fetchPurchases({ silent: true });
-                      return;
-                    }
-                    await downloadFromSignedUrl(data.download_url, data.filename);
-                    fetchPurchases({ silent: true });
-                  } catch (err) {
-                    console.error(err);
-                    showToast("Error al descargar el video.");
-                  }
+                  handleDownloadVideo(v);
                 }}
               >
                 <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
-                  <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)", flexShrink: 0 }} />
-                  <span>{hqDownloaded ? "Descargado" : hqPending ? "Esperando HQ" : "Descargar"}</span>
+                  {hqDownloaded ? (
+                    <span>✓ Descargado</span>
+                  ) : (
+                    <>
+                      <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)", flexShrink: 0 }} />
+                      <span>{hqPending ? "Esperando HQ" : "Descargar"}</span>
+                    </>
+                  )}
                 </span>
               </AppButton>
+              )}
             </div>
           );
         })}
