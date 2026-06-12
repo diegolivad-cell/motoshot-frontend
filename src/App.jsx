@@ -6348,7 +6348,8 @@ const renderPhotographerProfile = () => {
         }
       };
 
-      const hasThumb = Boolean(getVideoThumbnail(video));
+      const posterUrl = video.thumbnail_url?.trim() || null;
+      const hasPoster = Boolean(posterUrl);
       const photographerHandle = video.photographer?.handle || video.photographer?.name || "MOTOSHOT";
       const watermarkText = `@${String(photographerHandle).replace(/^@/, "")} • MotoShot GT`;
 
@@ -6356,27 +6357,49 @@ const renderPhotographerProfile = () => {
         <div style={{ position: "relative", background: "var(--surface)", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
           <div style={{ position: "relative", height: 180, background: "#0a0a0a" }}>
             {!playing && (
-              <VideoThumbnail
-                video={video}
-                style={{ width: "100%", height: 180, objectFit: "cover" }}
-                loading="eager"
-              />
+              hasPoster ? (
+                <img
+                  src={posterUrl}
+                  alt=""
+                  loading="eager"
+                  decoding="async"
+                  draggable={false}
+                  style={{ width: "100%", height: 180, objectFit: "cover", display: "block" }}
+                />
+              ) : (
+                <div
+                  style={{
+                    width: "100%",
+                    height: 180,
+                    background: "#1a1a1a",
+                    display: "grid",
+                    placeItems: "center",
+                  }}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#333" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M15 10l4.553-2.276A1 1 0 0 1 21 8.618v6.764a1 1 0 0 1-1.447.894L15 14" />
+                    <rect x="3" y="6" width="12" height="12" rx="2" ry="2" />
+                  </svg>
+                </div>
+              )
             )}
             <video
               ref={videoRef}
               src={video.preview_url}
-              poster={getVideoThumbnail(video) || undefined}
+              poster={posterUrl || undefined}
               muted
               playsInline
-              preload={hasThumb ? "none" : "metadata"}
+              preload="none"
               style={{
                 width: "100%",
                 height: 180,
                 objectFit: "cover",
                 display: "block",
-                ...(hasThumb
-                  ? { position: "absolute", top: 0, left: 0, opacity: playing ? 1 : 0, pointerEvents: playing ? "auto" : "none" }
-                  : {}),
+                position: "absolute",
+                top: 0,
+                left: 0,
+                opacity: playing ? 1 : 0,
+                pointerEvents: playing ? "auto" : "none",
               }}
               onLoadedMetadata={(e) => {
                 const dur = Math.round(e.currentTarget.duration);
