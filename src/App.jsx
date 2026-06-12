@@ -115,6 +115,55 @@ const formatFileSize = (bytes) => {
   return `${mb.toFixed(1)} MB`;
 };
 
+function parseSocialHandle(value, platform) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  try {
+    if (/^https?:\/\//i.test(raw)) {
+      const url = new URL(raw);
+      const segments = url.pathname.split("/").filter(Boolean);
+      if (platform === "instagram") return (segments[0] || "").replace(/^@/, "");
+      if (platform === "tiktok") {
+        const segment = segments.find((part) => part.startsWith("@")) || segments[0] || "";
+        return segment.replace(/^@/, "");
+      }
+      if (platform === "facebook") {
+        if (segments[0] === "profile.php" && url.searchParams.get("id")) {
+          return url.searchParams.get("id");
+        }
+        return (segments[0] || "").replace(/^@/, "");
+      }
+      if (platform === "telegram") return (segments[0] || "").replace(/^@/, "");
+    }
+  } catch {
+    /* plain handle */
+  }
+
+  let handle = raw.replace(/^@/, "");
+  handle = handle.replace(/^https?:\/\/(www\.)?(instagram\.com|tiktok\.com|facebook\.com|t\.me)\/?/i, "");
+  return handle.split(/[/?#]/)[0].replace(/^@/, "");
+}
+
+function buildSocialHref(platform, value) {
+  const handle = parseSocialHandle(value, platform);
+  if (!handle) return null;
+  if (platform === "instagram") return `https://instagram.com/${handle}`;
+  if (platform === "tiktok") return `https://www.tiktok.com/@${handle}`;
+  if (platform === "facebook") return `https://facebook.com/${handle}`;
+  if (platform === "telegram") return `https://t.me/${handle}`;
+  if (platform === "whatsapp") return `https://wa.me/${handle.replace(/\D/g, "")}`;
+  return null;
+}
+
+function formatSocialLabel(platform, value) {
+  if (platform === "whatsapp") return "WhatsApp";
+  if (platform === "facebook") return "Facebook";
+  const handle = parseSocialHandle(value, platform);
+  if (!handle) return String(value || "");
+  return `@${handle.replace(/^@/, "")}`;
+}
+
 const extractVideoFrameBase64 = async (file) => {
   const video = document.createElement("video");
   video.src = URL.createObjectURL(file);
@@ -2951,22 +3000,31 @@ useEffect(() => {
   }, [view, profile, session, user]);
 
   const fetchPendingDeliveryCount = useCallback(async () => {
-    if (!profile?.id || profile.verification_status !== "approved" || !session?.access_token) return;
+    if (!profile?.id || profile.verification_status !== "approved") return;
     try {
+      const { data: { session: liveSession } } = await supabase.auth.getSession();
+      const token = liveSession?.access_token;
+      if (!token) return;
+
       const { res, data } = await apiJson(`/api/videos/pending-delivery-count/${profile.id}`, {
-        headers: { Authorization: `Bearer ${session.access_token}` },
+        headers: { Authorization: `Bearer ${token}` },
       });
+      if (res.status === 401) return;
       if (res.ok) setPendingDeliveryCount(Number(data.count) || 0);
     } catch (err) {
       console.error("fetchPendingDeliveryCount:", err);
     }
-  }, [profile?.id, profile?.verification_status, session?.access_token]);
+  }, [profile?.id, profile?.verification_status]);
 
   const fetchPendingDeliveries = useCallback(async () => {
-    if (!profile?.id || profile.verification_status !== "approved" || !session?.access_token) return;
+    if (!profile?.id || profile.verification_status !== "approved") return;
     setPendingDeliveriesLoading(true);
     try {
-      const headers = { Authorization: `Bearer ${session.access_token}` };
+      const { data: { session: liveSession } } = await supabase.auth.getSession();
+      const token = liveSession?.access_token;
+      if (!token) return;
+
+      const headers = { Authorization: `Bearer ${token}` };
       const [photosResult, videosResult] = await Promise.all([
         apiJson(`/api/photos/pending-delivery/${profile.id}`, { headers }),
         apiJson(`/api/videos/pending-delivery/${profile.id}`, { headers }),
@@ -2984,7 +3042,7 @@ useEffect(() => {
     } finally {
       setPendingDeliveriesLoading(false);
     }
-  }, [profile?.id, profile?.verification_status, session?.access_token]);
+  }, [profile?.id, profile?.verification_status]);
 
   useEffect(() => {
     if (view === VIEWS.PENDING_DELIVERIES) {
@@ -5236,31 +5294,31 @@ const renderPhotographerSocialLinks = (person) => {
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 20, justifyContent: "center" }}>
       {person.instagram && (
-        <a href={`https://instagram.com/${person.instagram.replace("@", "")}`} target="_blank" rel="noreferrer" style={linkStyle}>
+        <a href={buildSocialHref("instagram", person.instagram)} target="_blank" rel="noreferrer" style={linkStyle}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" /></svg>
-          {person.instagram}
+          {formatSocialLabel("instagram", person.instagram)}
         </a>
       )}
       {person.tiktok && (
-        <a href={`https://tiktok.com/${person.tiktok.replace("@", "")}`} target="_blank" rel="noreferrer" style={linkStyle}>
+        <a href={buildSocialHref("tiktok", person.tiktok)} target="_blank" rel="noreferrer" style={linkStyle}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M19.59 6.69a4.83 4.83 0 01-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 01-2.88 2.5 2.89 2.89 0 01-2.89-2.89 2.89 2.89 0 012.89-2.89c.28 0 .54.04.79.1V9.01a6.33 6.33 0 00-.79-.05 6.34 6.34 0 00-6.34 6.34 6.34 6.34 0 006.34 6.34 6.34 6.34 0 006.33-6.34V8.69a8.18 8.18 0 004.78 1.52V6.79a4.85 4.85 0 01-1.01-.1z" /></svg>
-          {person.tiktok}
+          {formatSocialLabel("tiktok", person.tiktok)}
         </a>
       )}
       {person.facebook && (
-        <a href={`https://facebook.com/${person.facebook}`} target="_blank" rel="noreferrer" style={linkStyle}>
+        <a href={buildSocialHref("facebook", person.facebook)} target="_blank" rel="noreferrer" style={linkStyle}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
-          Facebook
+          {formatSocialLabel("facebook", person.facebook)}
         </a>
       )}
       {person.telegram && (
-        <a href={`https://t.me/${person.telegram.replace("@", "")}`} target="_blank" rel="noreferrer" style={linkStyle}>
+        <a href={buildSocialHref("telegram", person.telegram)} target="_blank" rel="noreferrer" style={linkStyle}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" /></svg>
-          {person.telegram}
+          {formatSocialLabel("telegram", person.telegram)}
         </a>
       )}
       {person.whatsapp && (
-        <a href={`https://wa.me/${person.whatsapp.replace(/\D/g, "")}`} target="_blank" rel="noreferrer" style={linkStyle}>
+        <a href={buildSocialHref("whatsapp", person.whatsapp)} target="_blank" rel="noreferrer" style={linkStyle}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" /></svg>
           WhatsApp
         </a>
@@ -8613,27 +8671,27 @@ const renderPhotographerProfile = () => {
 
         if (Capacitor.isNativePlatform()) {
           const base64 = await new Promise((resolve, reject) => {
-            const fileReader = new FileReader();
-            fileReader.onloadend = () => {
-              const result = fileReader.result;
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const result = reader.result;
               if (typeof result !== "string") {
                 reject(new Error("No se pudo leer el archivo del video"));
                 return;
               }
               resolve(result.split(",")[1]);
             };
-            fileReader.onerror = () => reject(fileReader.error || new Error("Error al leer el video"));
-            fileReader.readAsDataURL(blob);
+            reader.onerror = () => reject(reader.error || new Error("Error al leer el video"));
+            reader.readAsDataURL(blob);
           });
 
           await Filesystem.writeFile({
-            path: `Download/${fileName}`,
+            path: `MotoShot/${fileName}`,
             data: base64,
-            directory: Directory.ExternalStorage,
+            directory: Directory.Documents,
             recursive: true,
           });
 
-          showToast(`Video guardado en Descargas como ${fileName}`);
+          alert(`Video guardado en Documentos/MotoShot/${fileName}`);
         } else {
           const blobUrl = URL.createObjectURL(blob);
           const a = document.createElement("a");
