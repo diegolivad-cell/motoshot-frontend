@@ -7,6 +7,10 @@
     {
       "source": "/abrir",
       "destination": "/index.html"
+    },
+    {
+      "source": "/compras",
+      "destination": "/index.html"
     }
   ],
   "headers": [

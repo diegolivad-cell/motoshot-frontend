@@ -5,6 +5,11 @@
   "server": {
     "url": "https://motoshot.pro",
     "cleartext": true,
-    "androidScheme": "https"
+    "androidScheme": "https",
+    "allowNavigation": [
+      "*.recurrente.com",
+      "app.recurrente.com",
+      "motoshot.pro"
+    ]
   }
 }

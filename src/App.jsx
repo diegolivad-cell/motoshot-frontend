@@ -2703,13 +2703,15 @@ const exportPayrollCsv = () => {
     fetchAllSubscriptions();
   }, [view, isLoggedIn, session]);
 
-  // Deep link desde emails: motoshot.pro/abrir?goto=compras|entregas
+  // Deep link: motoshot.pro/compras o motoshot.pro/abrir?goto=compras|entregas
   useEffect(() => {
     if (!authReady) return;
     const params = new URLSearchParams(window.location.search);
-    const isAbrirPath = window.location.pathname === "/abrir";
+    const pathname = window.location.pathname.replace(/\/$/, "") || "/";
+    const isComprasPath = pathname === "/compras";
+    const isAbrirPath = pathname === "/abrir";
     const goto = params.get("goto");
-    if (goto === "compras" || (isAbrirPath && !goto)) {
+    if (goto === "compras" || isComprasPath || (isAbrirPath && !goto)) {
       if (isLoggedIn) {
         setActiveTab("purchases");
         setView(VIEWS.MY_PURCHASES);
@@ -2733,7 +2735,7 @@ const exportPayrollCsv = () => {
         const { App } = await import("@capacitor/app");
         const listener = await App.addListener("appUrlOpen", ({ url }) => {
           const urlStr = String(url || "");
-          if (urlStr.includes("goto=compras")) {
+          if (urlStr.includes("goto=compras") || urlStr.includes("/compras")) {
             setActiveTab("purchases");
             setView(VIEWS.MY_PURCHASES);
           } else if (urlStr.includes("goto=entregas")) {
