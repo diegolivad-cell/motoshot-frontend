@@ -8,6 +8,7 @@ import { isCeo, isAdmin as isAdminEmail } from "./roles";
 import { dismissAppSplash, SPLASH_MIN_MS } from "./splash.js";
 import { usePullToRefresh, PullToRefreshIndicator } from "./PullToRefresh";
 import { Capacitor } from "@capacitor/core";
+import { Filesystem, Directory } from "@capacitor/filesystem";
 import { signInWithGoogleNative } from "./googleNativeAuth.js";
 import {
   writePendingPayment,
@@ -8530,6 +8531,7 @@ const renderPhotographerProfile = () => {
       if (!videoId || !session?.access_token) return;
       setDownloading(purchase.id);
       setDownloadProgress(0);
+
       try {
         const res = await fetch(apiUrl(`/api/videos/${videoId}/download`), {
           headers: { Authorization: `Bearer ${session.access_token}` },
@@ -8582,14 +8584,41 @@ const renderPhotographerProfile = () => {
         }
 
         const blob = new Blob(chunks, { type: "video/mp4" });
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = blobUrl;
-        a.download = data.filename || `motoshot-${videoId}.mp4`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(blobUrl);
+        const fileName = data.filename || `MotoShot_${videoId}.mp4`;
+
+        if (Capacitor.isNativePlatform()) {
+          const base64 = await new Promise((resolve, reject) => {
+            const fileReader = new FileReader();
+            fileReader.onloadend = () => {
+              const result = fileReader.result;
+              if (typeof result !== "string") {
+                reject(new Error("No se pudo leer el archivo del video"));
+                return;
+              }
+              resolve(result.split(",")[1]);
+            };
+            fileReader.onerror = () => reject(fileReader.error || new Error("Error al leer el video"));
+            fileReader.readAsDataURL(blob);
+          });
+
+          await Filesystem.writeFile({
+            path: `Download/${fileName}`,
+            data: base64,
+            directory: Directory.ExternalStorage,
+            recursive: true,
+          });
+
+          showToast(`Video guardado en Descargas como ${fileName}`);
+        } else {
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = blobUrl;
+          a.download = fileName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(blobUrl);
+        }
 
         const deleteRes = await fetch(apiUrl(`/api/videos/${videoId}/delete-hq`), {
           method: "DELETE",
@@ -8615,7 +8644,7 @@ const renderPhotographerProfile = () => {
         fetchPurchases({ silent: true });
       } catch (err) {
         console.error("Error descargando video:", err);
-        showToast(err.message || "Error al descargar el video.");
+        showToast(err.message || "Error al descargar el video. Intentá de nuevo.");
       } finally {
         setDownloading(null);
         setDownloadProgress(0);
@@ -8818,10 +8847,14 @@ const renderPhotographerProfile = () => {
               >
                 <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
                   {hqDownloaded ? (
-                    <span>✓ Descargado</span>
+                    <span>Descargado</span>
                   ) : (
                     <>
-                      <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)", flexShrink: 0 }} />
+                      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
                       <span>{hqPending ? "Esperando HQ" : "Descargar"}</span>
                     </>
                   )}
