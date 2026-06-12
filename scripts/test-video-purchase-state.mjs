@@ -37,4 +37,11 @@ assert.equal(resolveVideoPurchaseState(merged[0], map), "comprado");
 assert.equal(resolveVideoPurchaseState({ id: VIDEO_ID_UPPER }, map), "comprado");
 assert.equal(resolveVideoPurchaseState({ id: VIDEO_ID_UPPER, buyer_purchase_status: "entregado" }, map), "comprado");
 
+const apiOnly = mergePurchaseStatusIntoVideos(
+  [{ id: VIDEO_ID, buyer_purchase_status: "comprado" }],
+  []
+);
+assert.equal(apiOnly[0].buyer_purchase_status, "comprado");
+assert.equal(resolveVideoPurchaseState(apiOnly[0], {}), "comprado");
+
 console.log("videoPurchaseState tests passed");

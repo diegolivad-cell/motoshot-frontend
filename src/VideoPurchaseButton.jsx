@@ -8,15 +8,25 @@ const BTN_DISABLED = {
   cursor: "not-allowed",
 };
 
-export function VideoPurchaseButton({ purchaseState, onBuy, video }) {
-  if (purchaseState === "entregado") {
+export function VideoPurchaseButton({ purchaseState, onBuy, video, isOwn = false }) {
+  const state = purchaseState ?? video?.buyer_purchase_status ?? null;
+
+  if (isOwn) {
+    return (
+      <AppButton className="card-buy" disabled style={BTN_DISABLED}>
+        Tu video
+      </AppButton>
+    );
+  }
+
+  if (state === "entregado") {
     return (
       <AppButton className="card-buy" disabled style={BTN_DISABLED}>
         Entregado
       </AppButton>
     );
   }
-  if (purchaseState === "comprado") {
+  if (state === "comprado") {
     return (
       <AppButton className="card-buy" disabled style={BTN_DISABLED}>
         Comprado

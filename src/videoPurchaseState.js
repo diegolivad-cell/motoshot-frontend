@@ -40,11 +40,13 @@ export const resolveVideoPurchaseState = (video, statusMap = {}) => {
 
 export const mergePurchaseStatusIntoVideos = (list, videoRows = []) => {
   if (!list?.length) return list || [];
-  if (!videoRows?.length) return list;
   const statusById = buildVideoPurchaseStatusMap(videoRows);
   return list.map((video) => {
-    const status = statusById[normalizeVideoId(video.id)];
+    const fromPurchases = statusById[normalizeVideoId(video.id)];
+    const fromApi = video?.buyer_purchase_status || null;
+    const status = fromPurchases || fromApi;
     if (!status) return video;
+    if (status === video.buyer_purchase_status) return video;
     return { ...video, buyer_purchase_status: status };
   });
 };

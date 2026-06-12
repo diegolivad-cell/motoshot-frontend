@@ -33,7 +33,7 @@ import {
   clearOAuthRedirectUrl,
   isOAuthBrowserOpen,
 } from "./authFlow.js";
-import { apiFetch, apiJson, apiUrl, parseApiJson, wakeApiServer } from "./apiClient.js";
+import { apiFetch, apiJson, apiUrl, parseApiJson, sleep, wakeApiServer } from "./apiClient.js";
 import { GT_BANKS, isListedBank, normalizeBankName } from "./gtBanks.js";
 import { BankLogo } from "./BankLogo.jsx";
 import { VideoThumbnail, getVideoThumbnail } from "./VideoThumbnail.jsx";
@@ -599,6 +599,26 @@ const formatNavBadge = (count) => {
   return count > 9 ? "9+" : String(count);
 };
 
+const formatTimeAgo = (iso) => {
+  if (!iso) return "";
+  const diff = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(diff) || diff < 0) return "";
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "hace un momento";
+  if (mins < 60) return `hace ${mins} min`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `hace ${hours} hora${hours === 1 ? "" : "s"}`;
+  const days = Math.floor(hours / 24);
+  return `hace ${days} día${days === 1 ? "" : "s"}`;
+};
+
+const NavBellIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+    <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+  </svg>
+);
+
 const CAN_HOVER_VIDEO_PREVIEW =
   typeof window !== "undefined" &&
   window.matchMedia("(hover: hover) and (pointer: fine)").matches;
@@ -818,6 +838,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [videoPurchases, setVideoPurchases] = useState([]);
   const [purchasesLoading, setPurchasesLoading] = useState(false);
   const [hqResendLoadingId, setHqResendLoadingId] = useState(null);
+  const [purchasesCountdownTick, setPurchasesCountdownTick] = useState(0);
   const [vendorStats, setVendorStats] = useState(null);
   const [vendorStatsLoading, setVendorStatsLoading] = useState(false);
   const [vendorStatsError, setVendorStatsError] = useState(false);
@@ -874,6 +895,10 @@ function WatermarkedImage({ src, photographer, purchased }) {
   );
   const isOwnPhoto = useCallback(
     (photo) => Boolean(photo && user && photo.photographer?.user_id === user.id),
+    [user]
+  );
+  const isOwnVideo = useCallback(
+    (video) => Boolean(video && user && video.photographer?.user_id === user.id),
     [user]
   );
   const isLoggedIn = authReady && Boolean(user && session?.access_token);
@@ -1062,6 +1087,10 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [videoEditPayPalDisclosureAccepted, setVideoEditPayPalDisclosureAccepted] = useState(false);
   const [videoEditOriginal, setVideoEditOriginal] = useState(null);
   const [selectedVideo, setSelectedVideo] = useState(null);
+  const [videoEditingNotesDraft, setVideoEditingNotesDraft] = useState("");
+  const [videoEditingNotesSaving, setVideoEditingNotesSaving] = useState(false);
+  const [videoEditingNotesSentOk, setVideoEditingNotesSentOk] = useState(false);
+  const [videoEditingNotesEditing, setVideoEditingNotesEditing] = useState(false);
   const [purchasedVideos, setPurchasedVideos] = useState([]);
   const [buyerGalleryModalIdx, setBuyerGalleryModalIdx] = useState(null);
   const buyerGallerySwipeRef = useRef(0);
@@ -1076,6 +1105,10 @@ function WatermarkedImage({ src, photographer, purchased }) {
 
   const handleBuyVideo = (video) => {
     if (!user) { setMessage(""); setView(VIEWS.AUTH); return; }
+    if (isOwnVideo(video)) {
+      showToast("No podés comprar tu propio video.");
+      return;
+    }
     if (getVideoPurchaseState(video)) {
       showToast("Ya compraste este video.");
       return;
@@ -1330,6 +1363,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
     clearPendingPayment();
     setSelectedVideo(video);
     setSelected(null);
+    setVideoEditingNotesDraft("");
+    setVideoEditingNotesSentOk(false);
+    setVideoEditingNotesEditing(false);
     setPurchasedVideos((prev) => [...new Set([...prev, videoId])]);
     setSuccessMode("video");
     setView(VIEWS.SUCCESS);
@@ -1977,19 +2013,61 @@ const unclaimedPurchasesCount =
   purchases.filter((p) => p.photo?.hq_status === "ready" && !p.hq_downloaded_at).length +
   videoPurchases.filter((v) => v.video?.hq_status === "ready" && !v.hq_downloaded_at).length;
 const fetchNotifications = async () => {
-  if (!session) return;
+  if (!session?.access_token || !profile?.id) return;
   try {
     setNotifLoading(true);
     const res = await fetch("/api/auth/notifications", {
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Error cargando notificaciones");
     setNotifications(data.notifications || []);
   } catch (err) {
     console.error(err);
   } finally {
     setNotifLoading(false);
   }
+};
+
+const markNotificationRead = async (id) => {
+  if (!session?.access_token) return;
+  try {
+    const res = await fetch(`/api/auth/notifications/${id}/read`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!res.ok) return;
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+  } catch (err) {
+    console.error(err);
+  }
+};
+
+const markAllNotificationsRead = async () => {
+  const unread = notifications.filter((n) => !n.read);
+  if (!unread.length || !session?.access_token) return;
+  try {
+    await Promise.all(
+      unread.map((n) =>
+        fetch(`/api/auth/notifications/${n.id}/read`, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        })
+      )
+    );
+    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+  } catch (err) {
+    console.error(err);
+    showToast("No se pudieron marcar las notificaciones.");
+  }
+};
+
+const toggleNotificationsPanel = () => {
+  setShowNotifications((open) => {
+    const next = !open;
+    if (next) fetchNotifications();
+    return next;
+  });
 };
 const fetchVendorDashboard = async ({ reconcile = false, silent = false } = {}) => {
   if (!session?.access_token || !user) return;
@@ -2134,41 +2212,79 @@ const fetchMyVideos = async (photographerId) => {
     setMyVideosLoading(false);
   }
 };
-const renderNotifications = () => (
-  <div className="upload-view">
-    <SectionTitleIcon icon="bell">NOTIFICACIONES</SectionTitleIcon>
-    <div className="section-sub">Tus ventas y actividad reciente.</div>
+const renderNotificationPanel = () => {
+  const unreadCount = notifications.filter((n) => !n.read).length;
+  const notifDescription = (n) => {
+    if (n.message) return n.message;
+    const parts = [];
+    if (n.amount != null) parts.push(`Q${n.amount}`);
+    if (n.photo_location) parts.push(n.photo_location);
+    if (n.buyer_email) parts.push(n.buyer_email);
+    return parts.length ? parts.join(" · ") : "Nueva actividad";
+  };
 
-    {notifLoading ? (
-      <div className="empty"><LoaderIcon size={44} /><div>Cargando...</div></div>
-    ) : notifications.length === 0 ? (
-      <div className="empty"><EmptyIcon name="bellOff" /><div>No tenés notificaciones aún.</div></div>
-    ) : (
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {notifications.map(n => (
-          <div key={n.id} style={{
-            padding: 14, borderRadius: 10,
-            background: n.read ? "var(--surface)" : "rgba(255,107,0,0.08)",
-            border: `1px solid ${n.read ? "var(--border)" : "var(--orange)"}`,
-          }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
-              <IconText icon="money" size={14}>Nueva venta — Q{n.amount}</IconText>
+  return (
+    <AnimatePresence>
+      {showNotifications && (
+        <>
+          <motion.button
+            type="button"
+            className="notif-backdrop"
+            aria-label="Cerrar notificaciones"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setShowNotifications(false)}
+          />
+          <motion.div
+            className="notif-panel"
+            role="dialog"
+            aria-label="Notificaciones"
+            initial={{ y: "-100%", opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: "-100%", opacity: 0 }}
+            transition={{ type: "spring", stiffness: 340, damping: 32 }}
+          >
+            <div className="notif-panel-header">
+              <span className="notif-panel-title">Notificaciones</span>
+              {unreadCount > 0 && (
+                <button type="button" className="notif-mark-all" onClick={markAllNotificationsRead}>
+                  Marcar todas como leídas
+                </button>
+              )}
             </div>
-            <div style={{ fontSize: 12, color: "var(--muted)" }}>
-              <IconText icon="pin" size={12}>{n.photo_location}</IconText>
+            <div className="notif-panel-list">
+              {notifLoading ? (
+                <div className="notif-panel-empty">
+                  <LoaderIcon size={32} />
+                  <span>Cargando...</span>
+                </div>
+              ) : notifications.length === 0 ? (
+                <div className="notif-panel-empty">
+                  <EmptyIcon name="bellOff" size={36} />
+                  <span>No tenés notificaciones aún.</span>
+                </div>
+              ) : (
+                notifications.map((n) => (
+                  <button
+                    key={n.id}
+                    type="button"
+                    className="notif-item"
+                    style={{ background: n.read ? "#111" : "#1a1a1a" }}
+                    onClick={() => { if (!n.read) markNotificationRead(n.id); }}
+                  >
+                    <div className="notif-item-text">{notifDescription(n)}</div>
+                    <div className="notif-item-time">{formatTimeAgo(n.created_at)}</div>
+                  </button>
+                ))
+              )}
             </div>
-            <div style={{ fontSize: 12, color: "var(--muted)" }}>
-              <IconText icon="user" size={12}>{n.buyer_email}</IconText>
-            </div>
-            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-              {new Date(n.created_at).toLocaleString()}
-            </div>
-          </div>
-        ))}
-      </div>
-    )}
-  </div>
-);
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+};
 const handleEditProfile = async () => {
   setEditLoading(true);
   setGlobalLoading({ active: true, message: "Guardando perfil..." });
@@ -2740,10 +2856,27 @@ useEffect(() => {
   }
   }, [view, user, session]);
 
+  useEffect(() => {
+    const galleryModalOpen = view === VIEWS.MY_GALLERY && buyerGalleryModalIdx !== null;
+    if (view !== VIEWS.MY_PURCHASES && !galleryModalOpen) return undefined;
+    const id = window.setInterval(() => {
+      setPurchasesCountdownTick((t) => t + 1);
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [view, buyerGalleryModalIdx]);
+
   // Cargar compras al iniciar para el badge de "compras sin reclamar"
   useEffect(() => {
     if (user && session?.access_token) fetchPurchases({ silent: true });
   }, [user, session?.access_token]);
+
+  useEffect(() => {
+    if (!user || !session?.access_token || !profile?.id) {
+      setNotifications([]);
+      return;
+    }
+    fetchNotifications();
+  }, [user, session?.access_token, profile?.id]);
 
   useEffect(() => {
     if (!videoPurchases.length) return;
@@ -3109,7 +3242,10 @@ useEffect(() => {
   };
 
   const refreshCurrentView = useCallback(async () => {
-    await wakeApiServer();
+    await Promise.race([
+      wakeApiServer({ maxAttempts: 3, delayMs: 800 }),
+      sleep(6000),
+    ]);
     const isApproved = profile?.verification_status === "approved";
     switch (view) {
       case VIEWS.PHOTOGRAPHERS:
@@ -3152,9 +3288,6 @@ useEffect(() => {
           }
         }
         if (isLoggedIn && session) await fetchAllSubscriptions();
-        break;
-      case VIEWS.NOTIFICATIONS:
-        await fetchNotifications();
         break;
       case VIEWS.PHOTOGRAPHER_PROFILE:
         if (selectedPhotographer?.id) await fetchPhotographerProfile(selectedPhotographer.id);
@@ -3205,7 +3338,7 @@ useEffect(() => {
     !confirmDialog &&
     ![VIEWS.AUTH, VIEWS.SUCCESS, VIEWS.RESET_PASSWORD].includes(view);
 
-  const { pullDistance, refreshing: pullRefreshing, contentOffset, shouldTransition } = usePullToRefresh({
+  const { pullDistance, refreshing: pullRefreshing, contentOffset, refreshHoldPx, shouldTransition } = usePullToRefresh({
     onRefresh: refreshCurrentView,
     enabled: pullToRefreshEnabled,
   });
@@ -3495,6 +3628,7 @@ useEffect(() => {
             <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
             <VideoPurchaseButton
               video={video}
+              isOwn={isOwnVideo(video)}
               purchaseState={resolveVideoPurchaseState(video, videoPurchaseStatusById)}
               onBuy={handleBuyVideo}
             />
@@ -3627,6 +3761,12 @@ useEffect(() => {
 
   const handleVideoPayment = async () => {
     if (!selectedVideo) return;
+    if (isOwnVideo(selectedVideo)) {
+      showToast("No podés comprar tu propio video.");
+      setPayStep(0);
+      setSelectedVideo(null);
+      return;
+    }
     if (getVideoPurchaseState(selectedVideo)) {
       showToast("Ya compraste este video.");
       setPayStep(0);
@@ -3670,6 +3810,12 @@ useEffect(() => {
 
   const handleVideoPayPalPayment = async () => {
     if (!selectedVideo) return;
+    if (isOwnVideo(selectedVideo)) {
+      showToast("No podés comprar tu propio video.");
+      setPayStep(0);
+      setSelectedVideo(null);
+      return;
+    }
     if (getVideoPurchaseState(selectedVideo)) {
       showToast("Ya compraste este video.");
       setPayStep(0);
@@ -6373,7 +6519,12 @@ const renderPhotographerProfile = () => {
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-              <VideoPurchaseButton video={video} purchaseState={purchaseState} onBuy={handleBuyVideo} />
+              <VideoPurchaseButton
+                video={video}
+                isOwn={isOwnVideo(video)}
+                purchaseState={purchaseState}
+                onBuy={handleBuyVideo}
+              />
             </div>
           </div>
         </div>
@@ -6404,7 +6555,7 @@ const renderPhotographerProfile = () => {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 20 }}>
-        {videosLoading ? (
+        {videosLoading && !pullRefreshing ? (
           <div className="empty" style={{ gridColumn: "1 / -1" }}>
             <LoaderIcon size={44} />
             <div>Cargando videos...</div>
@@ -6611,6 +6762,32 @@ const renderPhotographerProfile = () => {
                       </div>
                       <div className="pending-delivery-meta">Comprador: {item.buyer_email || "—"}</div>
                       <div className="pending-delivery-time">Vendido {getTimeSince(item.completed_at)}</div>
+                      {isVideo && (
+                        item.editing_notes?.trim() ? (
+                          <div style={{ marginTop: 10 }}>
+                            <div style={{ color: "#FF6B00", fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
+                              Instrucciones del comprador:
+                            </div>
+                            <div
+                              style={{
+                                background: "#2a2a2a",
+                                borderRadius: 8,
+                                padding: 10,
+                                fontSize: 13,
+                                color: "#fff",
+                                lineHeight: 1.5,
+                                whiteSpace: "pre-wrap",
+                              }}
+                            >
+                              {item.editing_notes.trim()}
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 12 }}>
+                            Sin instrucciones de edición
+                          </div>
+                        )
+                      )}
                     </div>
                   </div>
                   {upload ? (
@@ -7857,6 +8034,179 @@ const renderPhotographerProfile = () => {
 
     const modalItem = buyerGalleryModalIdx !== null ? buyerGalleryItems[buyerGalleryModalIdx] : null;
 
+    const HQ_GALLERY_WAIT_MS = 24 * 60 * 60 * 1000;
+    const HQ_GALLERY_REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+    const formatGalleryCountdown = (sentAt) => {
+      if (!sentAt) return null;
+      const diff = Date.now() - new Date(sentAt).getTime();
+      if (!Number.isFinite(diff)) return null;
+      const msLeft = HQ_GALLERY_REMINDER_COOLDOWN_MS - diff;
+      if (msLeft <= 0) return null;
+      const horas = Math.floor(msLeft / 3600000);
+      const minutos = Math.floor((msLeft % 3600000) / 60000);
+      return `Disponible en ${horas}h ${minutos}m`;
+    };
+
+    const getBuyerGalleryItemState = (item) => {
+      const purchase = item.purchase;
+      if (item.type === "photo") {
+        const downloaded = Boolean(purchase.hq_downloaded_at) || purchase.photo?.hq_status === "downloaded";
+        const pending = !downloaded && (purchase.photo?.hq_status === "pending" || !purchase.photo?.hq_path);
+        return {
+          purchaseId: purchase.id,
+          downloaded,
+          pending,
+          ready: !downloaded && !pending,
+        };
+      }
+      const downloaded = Boolean(purchase.hq_downloaded_at) || purchase.video?.hq_status === "downloaded";
+      const pending = purchase.video?.hq_status === "pending";
+      return {
+        purchaseId: purchase.id,
+        downloaded,
+        pending,
+        ready: purchase.video?.hq_status === "ready" && !purchase.hq_downloaded_at,
+      };
+    };
+
+    const canGalleryRequestHq = (purchase, completedAt) =>
+      completedAt && Date.now() - new Date(completedAt).getTime() >= HQ_GALLERY_WAIT_MS;
+
+    const canGalleryResendHq = (purchase) => {
+      if (!purchase?.hq_reminder_sent_at) return true;
+      const last = new Date(purchase.hq_reminder_sent_at).getTime();
+      if (!Number.isFinite(last)) return true;
+      return Date.now() - last >= HQ_GALLERY_REMINDER_COOLDOWN_MS;
+    };
+
+    const handleGalleryHqRequest = async (item) => {
+      const { purchaseId } = getBuyerGalleryItemState(item);
+      const type = item.type;
+      const key = `${type}-${purchaseId}`;
+      if (hqResendLoadingId === key) return;
+      setHqResendLoadingId(key);
+      try {
+        const { res, data } = await apiJson("/api/payments/resend-hq-request", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ type, purchase_id: purchaseId }),
+        });
+        if (!res.ok) {
+          if (res.status === 429) {
+            showToast(data.error || "Ya enviaste un recordatorio. Podés reenviar otro en 24 horas.");
+            fetchPurchases({ silent: true });
+            return;
+          }
+          throw new Error(data.error || "No se pudo enviar la solicitud");
+        }
+        const sentAt = data.hq_reminder_sent_at || new Date().toISOString();
+        if (type === "photo") {
+          setPurchases((prev) => prev.map((p) => (
+            p.id === purchaseId ? { ...p, hq_reminder_sent_at: sentAt } : p
+          )));
+        } else {
+          setVideoPurchases((prev) => prev.map((v) => (
+            v.id === purchaseId ? { ...v, hq_reminder_sent_at: sentAt } : v
+          )));
+        }
+        showToast(data.message || "Solicitud enviada al fotógrafo.");
+        fetchPurchases({ silent: true });
+      } catch (err) {
+        showToast(err.message || "Error al enviar la solicitud.");
+      } finally {
+        setHqResendLoadingId(null);
+      }
+    };
+
+    const renderBuyerGalleryModalAction = (item) => {
+      void purchasesCountdownTick;
+      const purchase = item.purchase;
+      const { purchaseId, downloaded, pending, ready } = getBuyerGalleryItemState(item);
+      const resendKey = `${item.type}-${purchaseId}`;
+      const loading = hqResendLoadingId === resendKey;
+      const requestLabel = item.type === "video" ? "Solicitar Video" : "Solicitar Foto";
+      const canRequest = canGalleryRequestHq(purchase, item.completed_at);
+      const canResend = canGalleryResendHq(purchase);
+      const hasReminder = Boolean(purchase.hq_reminder_sent_at);
+      const countdown = formatGalleryCountdown(purchase.hq_reminder_sent_at);
+
+      if (downloaded) {
+        return (
+          <AppButton
+            className="pay-btn"
+            disabled
+            style={{ maxWidth: 320, width: "100%", opacity: 0.85, cursor: "not-allowed" }}
+          >
+            Descargado
+          </AppButton>
+        );
+      }
+
+      if (ready) {
+        return (
+          <AppButton
+            className="pay-btn"
+            style={{ maxWidth: 320, width: "100%" }}
+            onClick={() => downloadBuyerGalleryItem(item)}
+          >
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <AppIcon name="arrowRight" size={14} style={{ transform: "rotate(90deg)" }} />
+              Descargar
+            </span>
+          </AppButton>
+        );
+      }
+
+      if (pending) {
+        if (hasReminder && !canResend) {
+          return (
+            <div style={{ maxWidth: 320, width: "100%", textAlign: "center" }}>
+              <AppButton
+                className="pay-btn"
+                disabled
+                style={{ width: "100%", opacity: 0.85, cursor: "default" }}
+              >
+                Solicitud enviada
+              </AppButton>
+              {countdown && (
+                <div style={{ color: "var(--orange)", fontSize: 13, marginTop: 10, fontWeight: 600 }}>
+                  {countdown}
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        return (
+          <AppButton
+            className="pay-btn"
+            style={{ maxWidth: 320, width: "100%" }}
+            disabled={loading || !canRequest}
+            onClick={() => handleGalleryHqRequest(item)}
+          >
+            {loading ? "Enviando solicitud..." : requestLabel}
+          </AppButton>
+        );
+      }
+
+      return (
+        <AppButton
+          className="pay-btn"
+          style={{ maxWidth: 320, width: "100%" }}
+          onClick={() => downloadBuyerGalleryItem(item)}
+        >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <AppIcon name="arrowRight" size={14} style={{ transform: "rotate(90deg)" }} />
+            Descargar
+          </span>
+        </AppButton>
+      );
+    };
+
     return (
       <div style={{ paddingBottom: 100 }}>
         <div className="upload-view" style={{ paddingBottom: 12 }}>
@@ -8026,16 +8376,7 @@ const renderPhotographerProfile = () => {
               )}
             </div>
             <div style={{ flexShrink: 0, padding: "12px 16px calc(20px + env(safe-area-inset-bottom, 0px))", display: "flex", justifyContent: "center" }}>
-              <AppButton
-                className="pay-btn"
-                style={{ maxWidth: 320, width: "100%" }}
-                onClick={() => downloadBuyerGalleryItem(modalItem)}
-              >
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <AppIcon name="arrowRight" size={14} style={{ transform: "rotate(90deg)" }} />
-                  Descargar
-                </span>
-              </AppButton>
+              {renderBuyerGalleryModalAction(modalItem)}
             </div>
           </div>,
           document.body,
@@ -8045,11 +8386,75 @@ const renderPhotographerProfile = () => {
   };
 
   const renderMyPurchases = () => {
+    void purchasesCountdownTick;
+
     const HQ_WAIT_MS = 24 * 60 * 60 * 1000;
+    const HQ_REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+    const formatDisponibleEnCountdown = (sentAt) => {
+      if (!sentAt) return null;
+      const diff = Date.now() - new Date(sentAt).getTime();
+      if (!Number.isFinite(diff)) return null;
+      const msLeft = HQ_REMINDER_COOLDOWN_MS - diff;
+      if (msLeft <= 0) return null;
+      const horas = Math.floor(msLeft / 3600000);
+      const minutos = Math.floor((msLeft % 3600000) / 60000);
+      return `Disponible en ${horas}h ${minutos}m`;
+    };
+
     const canShowHqResend = (pending, completedAt) =>
       pending
       && completedAt
       && Date.now() - new Date(completedAt).getTime() >= HQ_WAIT_MS;
+
+    const canClickHqResend = (item) => {
+      if (!item?.hq_reminder_sent_at) return true;
+      const last = new Date(item.hq_reminder_sent_at).getTime();
+      if (!Number.isFinite(last)) return true;
+      return Date.now() - last >= HQ_REMINDER_COOLDOWN_MS;
+    };
+
+    const renderHqResendAction = (type, purchaseId, item, showResend, resendKey) => {
+      if (!showResend) return null;
+      const loading = hqResendLoadingId === resendKey;
+      const hasReminder = Boolean(item?.hq_reminder_sent_at);
+      const canResend = canClickHqResend(item);
+      const reminderCountdown = formatDisponibleEnCountdown(item?.hq_reminder_sent_at);
+
+      if (hasReminder && !canResend) {
+        return (
+          <p
+            className="purchase-row-resend purchase-row-resend--cooldown"
+            style={{ color: "var(--muted)", cursor: "default", margin: 0 }}
+          >
+            Recordatorio enviado
+            {reminderCountdown && (
+              <span style={{ color: "var(--orange)", marginLeft: 6 }}>· {reminderCountdown}</span>
+            )}
+          </p>
+        );
+      }
+
+      return (
+        <button
+          type="button"
+          className="purchase-row-resend"
+          disabled={loading}
+          onClick={() => handleResendHqRequest(type, purchaseId)}
+          style={{
+            color: loading ? "var(--muted)" : "var(--orange)",
+            cursor: loading ? "wait" : "pointer",
+            textDecoration: loading ? "none" : "underline",
+          }}
+        >
+          {loading
+            ? "Enviando recordatorio..."
+            : hasReminder && canResend
+              ? "Reenviar recordatorio"
+              : "¿No has recibido tu foto o video? Haz click aquí para reenviar la solicitud."}
+        </button>
+      );
+    };
 
     const handleResendHqRequest = async (type, purchaseId) => {
       const key = `${type}-${purchaseId}`;
@@ -8064,7 +8469,24 @@ const renderPhotographerProfile = () => {
           },
           body: JSON.stringify({ type, purchase_id: purchaseId }),
         });
-        if (!res.ok) throw new Error(data.error || "No se pudo reenviar la solicitud");
+        if (!res.ok) {
+          if (res.status === 429) {
+            showToast(data.error || "Ya enviaste un recordatorio. Podés reenviar otro en 24 horas.");
+            fetchPurchases({ silent: true });
+            return;
+          }
+          throw new Error(data.error || "No se pudo reenviar la solicitud");
+        }
+        const sentAt = data.hq_reminder_sent_at || new Date().toISOString();
+        if (type === "photo") {
+          setPurchases((prev) => prev.map((p) => (
+            p.id === purchaseId ? { ...p, hq_reminder_sent_at: sentAt } : p
+          )));
+        } else {
+          setVideoPurchases((prev) => prev.map((v) => (
+            v.id === purchaseId ? { ...v, hq_reminder_sent_at: sentAt } : v
+          )));
+        }
         showToast(data.message || "Recordatorio enviado al fotógrafo.");
         fetchPurchases({ silent: true });
       } catch (err) {
@@ -8169,23 +8591,7 @@ const renderPhotographerProfile = () => {
                       <span style={{ color: "var(--success)", marginLeft: 6 }}>· Descargado</span>
                     )}
                   </div>
-                  {showPhotoResend && (
-                    <button
-                      type="button"
-                      className="purchase-row-resend"
-                      disabled={hqResendLoadingId === photoResendKey}
-                      onClick={() => handleResendHqRequest("photo", p.id)}
-                      style={{
-                        color: hqResendLoadingId === photoResendKey ? "var(--muted)" : "var(--orange)",
-                        cursor: hqResendLoadingId === photoResendKey ? "wait" : "pointer",
-                        textDecoration: hqResendLoadingId === photoResendKey ? "none" : "underline",
-                      }}
-                    >
-                      {hqResendLoadingId === photoResendKey
-                        ? "Enviando recordatorio..."
-                        : "¿No has recibido tu foto o video? Haz click aquí para reenviar la solicitud."}
-                    </button>
-                  )}
+                  {renderHqResendAction("photo", p.id, p, showPhotoResend, photoResendKey)}
                 </div>
                 <AppButton
                   className={`card-buy purchase-row-action${photoDownloaded || photoPending ? "" : " card-buy-download"}`}
@@ -8265,30 +8671,11 @@ const renderPhotographerProfile = () => {
                 <div style={{ color: "var(--muted)", marginTop: 2 }}>
                   <IconText icon="money" size={12}>Q{v.amount}</IconText> ·{" "}
                   {v.completed_at ? new Date(v.completed_at).toLocaleString() : "Completado"}
-                  {hqPending && (
-                    <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Disponible en ~24 h</span>
-                  )}
                   {hqDownloaded && (
                     <span style={{ color: "var(--success)", marginLeft: 6 }}>· Descargado</span>
                   )}
                 </div>
-                {showVideoResend && (
-                  <button
-                    type="button"
-                    className="purchase-row-resend"
-                    disabled={hqResendLoadingId === videoResendKey}
-                    onClick={() => handleResendHqRequest("video", v.id)}
-                    style={{
-                      color: hqResendLoadingId === videoResendKey ? "var(--muted)" : "var(--orange)",
-                      cursor: hqResendLoadingId === videoResendKey ? "wait" : "pointer",
-                      textDecoration: hqResendLoadingId === videoResendKey ? "none" : "underline",
-                    }}
-                  >
-                    {hqResendLoadingId === videoResendKey
-                      ? "Enviando recordatorio..."
-                      : "¿No has recibido tu foto o video? Haz click aquí para reenviar la solicitud."}
-                  </button>
-                )}
+                {renderHqResendAction("video", v.id, v, showVideoResend, videoResendKey)}
               </div>
               <AppButton
                 className={`card-buy purchase-row-action${hqDownloaded || hqPending ? "" : " card-buy-download"}`}
@@ -9639,9 +10026,10 @@ const renderVendorRequest = () => {
     button, a { -webkit-tap-highlight-color: transparent; tap-highlight-color: transparent; }
     .app { min-height: 100vh; display: flex; flex-direction: column; }
     .ptr-indicator {
-      position: absolute; top: 0; left: 0; right: 0; z-index: 6;
+      position: fixed; top: 58px; left: 0; right: 0; z-index: 99;
       display: flex; justify-content: center; pointer-events: none;
-      padding-top: 8px;
+      padding-top: 4px;
+      transition: opacity 0.2s ease, transform 0.15s ease;
     }
     .ptr-indicator-bubble {
       width: 46px; height: 46px; border-radius: 50%;
@@ -9659,11 +10047,11 @@ const renderVendorRequest = () => {
       display: flex;
       flex-direction: column;
       min-height: 0;
-      will-change: transform;
     }
     .app-content-shift {
       flex: 1;
       min-height: 0;
+      will-change: transform;
     }
     .nav { position: sticky; top: 0; z-index: 100; background: rgba(12,12,12,0.94); backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: sp
@@ -9695,14 +10083,60 @@ const renderVendorRequest = () => {
       color: var(--orange); font-size: 0.55em; margin-left: 0.05em; margin-bottom: 0.14em;
       letter-spacing: 0.06em; text-shadow: 0 0 12px rgba(255,107,0,0.35);
     }
-    .brand-mark--nav { font-size: 1.28rem; transform: skewX(-7deg); }
-    .brand-mark--nav .brand-mark-word::after { min-height: 2px; height: 0.12em; }
+    .brand-mark--nav { font-size: 1.05rem; transform: skewX(-7deg); }
+    .brand-mark--nav .brand-mark-word::after { min-height: 2px; height: 0.1em; }
     .brand-mark--hero, .brand-mark--hero-video { font-size: clamp(2.65rem, 9.5vw, 4.6rem); transform: skewX(-9deg); }
     .brand-mark--hero-video { opacity: 0.78; }
     .brand-mark--hero-video .brand-mark-moto { color: #fff; }
     .brand-mark--hero-video .brand-mark-shot, .brand-mark--hero-video .brand-mark-gt { color: var(--orange); }
     .brand-mark--hero-video .brand-mark-word::after { min-height: 4px; }
     .nav-actions { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-shrink: 0; }
+    .nav-bell-btn {
+      position: relative; background: none; border: none; color: var(--text);
+      padding: 6px; cursor: pointer; display: grid; place-items: center;
+      border-radius: 8px; flex-shrink: 0;
+    }
+    .nav-bell-btn:hover { color: var(--orange); }
+    .nav-bell-badge {
+      position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px;
+      background: #FF6B00; color: #000; font-size: 10px; font-weight: 700;
+      border-radius: 999px; display: grid; place-items: center; padding: 0 4px; line-height: 1;
+    }
+    .notif-backdrop {
+      position: fixed; inset: 0; top: 58px; z-index: 110;
+      background: rgba(0,0,0,0.45); border: none; padding: 0; cursor: default;
+    }
+    .notif-panel {
+      position: fixed; top: 58px; left: 0; right: 0; z-index: 111;
+      max-height: min(70vh, 520px); background: #0c0c0c;
+      border-bottom: 1px solid var(--border);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .notif-panel-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 14px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .notif-panel-title { font-size: 15px; font-weight: 700; color: var(--text); }
+    .notif-mark-all {
+      background: none; border: none; color: var(--orange); font-size: 12px; font-weight: 600;
+      cursor: pointer; padding: 0; text-decoration: underline; white-space: nowrap;
+    }
+    .notif-panel-list {
+      overflow-y: auto; overscroll-behavior: contain;
+      display: flex; flex-direction: column; gap: 1px;
+    }
+    .notif-item {
+      width: 100%; text-align: left; border: none; border-bottom: 1px solid #222;
+      padding: 14px 16px; cursor: pointer; color: var(--text);
+    }
+    .notif-item:last-child { border-bottom: none; }
+    .notif-item-text { font-size: 13px; line-height: 1.45; margin-bottom: 6px; }
+    .notif-item-time { font-size: 11px; color: var(--muted); }
+    .notif-panel-empty {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 10px; padding: 40px 20px; color: var(--muted); font-size: 13px;
+    }
     .nav-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 8px 14px; border-radius: 8px;
       font-family: 'DM Sans', sans-serif; font-size: 13px; cursor: pointer; transition: border-color 0.2s, color 0.2s, background 0.2s; }
     .nav-btn-sm { padding: 5px 10px; font-size: 11px; border-radius: 7px; white-space: nowrap; line-height: 1.15; letter-spacing: 0.2px; }
@@ -10492,6 +10926,42 @@ const renderVendorRequest = () => {
         [selectedVideo?.moto_brand, selectedVideo?.moto_model].filter(Boolean).join(" ") ||
         selectedVideo?.sector ||
         "tu video";
+      const videoPurchaseRow = videoPurchases.find((v) => purchaseVideoId(v) === selectedVideo?.id);
+      const savedEditingNotes = String(videoPurchaseRow?.editing_notes || "").trim();
+      const hqPending =
+        (selectedVideo?.hq_status ?? videoPurchaseRow?.video?.hq_status) === "pending";
+      const showEditingNotesSection = hqPending;
+      const hasSavedEditingNotes = savedEditingNotes.length > 0;
+      const showEditingForm = showEditingNotesSection && (!hasSavedEditingNotes || videoEditingNotesEditing);
+
+      const handleSendEditingNotes = async () => {
+        const notes = videoEditingNotesDraft.trim();
+        if (!notes || !selectedVideo?.id || !user?.id || videoEditingNotesSaving) return;
+        setVideoEditingNotesSaving(true);
+        try {
+          const { res, data } = await apiJson(`/api/videos/${selectedVideo.id}/editing-notes`, {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${session?.access_token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ editing_notes: notes, buyer_id: user.id }),
+          });
+          if (!res.ok) throw new Error(data?.error || "No se pudieron enviar las instrucciones");
+          setVideoPurchases((prev) => prev.map((row) => (
+            purchaseVideoId(row) === selectedVideo.id
+              ? { ...row, editing_notes: notes, editing_notes_sent_at: new Date().toISOString() }
+              : row
+          )));
+          setVideoEditingNotesSentOk(true);
+          setVideoEditingNotesEditing(false);
+        } catch (err) {
+          showToast(err.message || "Error al enviar instrucciones.");
+        } finally {
+          setVideoEditingNotesSaving(false);
+        }
+      };
+
       return (
         <motion.div
           className="success-page payment-success-page"
@@ -10519,6 +10989,93 @@ const renderVendorRequest = () => {
                 <div><strong>Video:</strong> {label}</div>
                 <div><strong>Precio:</strong> Q{selectedVideo.price}</div>
               </div>
+            </div>
+          )}
+          {showEditingNotesSection && (
+            <div
+              style={{
+                width: "100%",
+                maxWidth: 320,
+                marginBottom: 20,
+                textAlign: "left",
+              }}
+            >
+              <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1, marginBottom: 6 }}>
+                ¿Cómo querés tu video editado?
+              </div>
+              <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5, marginBottom: 12 }}>
+                El fotógrafo verá estas instrucciones antes de editar y entregar tu video.
+              </div>
+
+              {videoEditingNotesSentOk && (
+                <div style={{ color: "var(--success)", fontSize: 14, fontWeight: 700, marginBottom: 12 }}>
+                  Instrucciones enviadas al fotógrafo ✓
+                </div>
+              )}
+
+              {hasSavedEditingNotes && !videoEditingNotesEditing ? (
+                <div
+                  style={{
+                    background: "#2a2a2a",
+                    borderRadius: 8,
+                    padding: 12,
+                    fontSize: 13,
+                    color: "#fff",
+                    lineHeight: 1.5,
+                    whiteSpace: "pre-wrap",
+                    marginBottom: 12,
+                  }}
+                >
+                  {savedEditingNotes}
+                </div>
+              ) : null}
+
+              {showEditingForm ? (
+                <>
+                  <textarea
+                    value={videoEditingNotesDraft}
+                    onChange={(e) => setVideoEditingNotesDraft(e.target.value)}
+                    placeholder="Ej: Quiero música de fondo, cortes en las curvas, slow motion en la recta, colores contrastados..."
+                    rows={4}
+                    style={{
+                      width: "100%",
+                      boxSizing: "border-box",
+                      background: "var(--surface)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 10,
+                      padding: 12,
+                      color: "var(--text)",
+                      fontSize: 14,
+                      lineHeight: 1.5,
+                      resize: "vertical",
+                      marginBottom: 12,
+                    }}
+                  />
+                  <AppButton
+                    className="upload-btn"
+                    style={{ width: "100%", marginBottom: 8 }}
+                    disabled={videoEditingNotesSaving || !videoEditingNotesDraft.trim()}
+                    onClick={handleSendEditingNotes}
+                  >
+                    {videoEditingNotesSaving ? "Enviando..." : "Enviar instrucciones"}
+                  </AppButton>
+                  <div style={{ color: "var(--muted)", fontSize: 11, lineHeight: 1.4 }}>
+                    Podés enviar instrucciones hasta que el fotógrafo comience la edición.
+                  </div>
+                </>
+              ) : hasSavedEditingNotes && hqPending ? (
+                <AppButton
+                  className="nav-btn"
+                  style={{ width: "100%" }}
+                  onClick={() => {
+                    setVideoEditingNotesDraft(savedEditingNotes);
+                    setVideoEditingNotesEditing(true);
+                    setVideoEditingNotesSentOk(false);
+                  }}
+                >
+                  Editar instrucciones
+                </AppButton>
+              ) : null}
             </div>
           )}
           <AppButton
@@ -11180,6 +11737,7 @@ const renderVendorRequest = () => {
     );
   };
   //ULTIMO RETURN
+  const unreadNotifCount = notifications.filter((n) => !n.read).length;
   return (
     <>
       <style>{css}</style>
@@ -11394,13 +11952,7 @@ const renderVendorRequest = () => {
 
 {renderAdminDocPreviewModal()}
 
-<div
-  className="ptr-shell"
-  style={{
-    transform: contentOffset > 0 ? `translateY(${contentOffset}px)` : undefined,
-    transition: shouldTransition ? "transform 0.32s cubic-bezier(0.22, 1, 0.36, 1)" : "none",
-  }}
->
+<div className="ptr-shell">
 <nav className="nav">
 <div className="nav-logo" onClick={() => { 
   setView(VIEWS.PHOTOGRAPHERS); 
@@ -11447,6 +11999,20 @@ const renderVendorRequest = () => {
           <VerifiedBadge size={14} />
         </motion.span>
         ) : null}
+        <button
+          type="button"
+          className="nav-bell-btn"
+          aria-label={unreadNotifCount ? `${unreadNotifCount} notificaciones sin leer` : "Notificaciones"}
+          aria-expanded={showNotifications}
+          onClick={toggleNotificationsPanel}
+        >
+          <NavBellIcon />
+          {unreadNotifCount > 0 && (
+            <span className="nav-bell-badge">
+              {unreadNotifCount > 9 ? "9+" : unreadNotifCount}
+            </span>
+          )}
+        </button>
         <AppButton className="nav-btn nav-btn-sm primary" onClick={handleLogout}>Cerrar sesión</AppButton>
       </>
     ) : (
@@ -11463,9 +12029,17 @@ const renderVendorRequest = () => {
   </div>
 </nav>
 
-<PullToRefreshIndicator pullDistance={pullDistance} refreshing={pullRefreshing} />
+{renderNotificationPanel()}
 
-<div className="app-content-shift">
+<PullToRefreshIndicator pullDistance={pullDistance} refreshing={pullRefreshing} refreshHoldPx={refreshHoldPx} />
+
+<div
+  className="app-content-shift"
+  style={{
+    transform: contentOffset > 0 ? `translateY(${contentOffset}px)` : undefined,
+    transition: shouldTransition ? "transform 0.32s cubic-bezier(0.22, 1, 0.36, 1)" : "none",
+  }}
+>
   <AnimatePresence mode="wait">
     <motion.div
       key={showPasswordReset ? "reset" : view}
@@ -11485,7 +12059,6 @@ const renderVendorRequest = () => {
           {view === VIEWS.VENDOR_REQUEST && renderVendorRequest()}
           {view === VIEWS.SUCCESS && renderSuccessPage()}
           {view === VIEWS.MY_PURCHASES && renderMyPurchases()}
-          {view === VIEWS.NOTIFICATIONS && renderNotifications()}
           {view === VIEWS.PHOTOGRAPHERS && renderPhotographers()}
           {view === VIEWS.PHOTOGRAPHER_PROFILE && renderPhotographerProfile()}
           {view === VIEWS.ADMIN && isStaff && renderAdmin()}

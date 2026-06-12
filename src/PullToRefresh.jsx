@@ -3,6 +3,7 @@ import { AppIcon } from "./icons";
 
 const REFRESH_HOLD_PX = 80;
 const MIN_REFRESH_MS = 750;
+const MAX_REFRESH_MS = 15000;
 
 function getScrollTop() {
   return window.scrollY || document.documentElement.scrollTop || 0;
@@ -113,7 +114,12 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
 
       const startedAt = Date.now();
       try {
-        await onRefreshRef.current();
+        await Promise.race([
+          Promise.resolve(onRefreshRef.current?.()),
+          wait(MAX_REFRESH_MS).then(() => {
+            console.warn("pull-to-refresh: timeout after", MAX_REFRESH_MS, "ms");
+          }),
+        ]);
         await waitForPaint();
       } catch (err) {
         console.error("pull-to-refresh:", err);
@@ -155,8 +161,17 @@ export function PullToRefreshIndicator({ pullDistance, refreshing, threshold = 7
   const visible = pullDistance > 0 || refreshing;
   if (!visible) return null;
 
+  const y = refreshing ? Math.max(0, refreshHoldPx - 32) : Math.max(0, pullDistance - 32);
+
   return (
-    <div className="ptr-indicator" aria-hidden="true">
+    <div
+      className="ptr-indicator"
+      style={{
+        transform: `translateY(${y}px)`,
+        opacity: refreshing ? 1 : 0.45 + progress * 0.55,
+      }}
+      aria-hidden="true"
+    >
       <div
         className={`ptr-indicator-bubble${refreshing ? " ptr-indicator-bubble--spin" : ""}`}
         style={{

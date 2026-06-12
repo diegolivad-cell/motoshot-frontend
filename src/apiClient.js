@@ -11,6 +11,8 @@ let wakeValidUntil = 0;
 export function apiUrl(path) {
   if (!path || path.startsWith("http")) return path;
   const normalized = path.startsWith("/") ? path : `/${path}`;
+  // En browser/APK WebView usar same-origin (/api → proxy Vercel) para auth y CORS consistentes.
+  if (typeof window !== "undefined") return normalized;
   if (!API_BASE) return normalized;
   return `${API_BASE}${normalized}`;
 }
