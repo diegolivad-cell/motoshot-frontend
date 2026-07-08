@@ -9854,7 +9854,7 @@ const renderPhotographerProfile = () => {
                       <div className="pending-delivery-progress-label">
                         {upload.phase === "processing"
                           ? "Procesando en el servidor..."
-                          : `Subiendo HQ... ${upload.progress}%`}
+                          : `Subiendo archivo... ${upload.progress}%`}
                       </div>
                     </div>
                   ) : (
@@ -9863,7 +9863,7 @@ const renderPhotographerProfile = () => {
                       className="pending-delivery-btn"
                       onClick={() => handleDeliverHQ(item.media_type, item.id)}
                     >
-                      <AppIcon name="upload" size={14} /> Entregar HQ
+                      <AppIcon name="upload" size={14} /> Subir Archivo
                     </AppButton>
                   )}
                 </div>
