@@ -34,6 +34,13 @@ const ICONS = {
       <rect x="13" y="13" width="7" height="7" rx="1.5" strokeWidth="1.8" />
     </>
   ),
+  list: (
+    <>
+      <path d="M5 7h14" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M5 12h14" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M5 17h14" strokeWidth="1.8" strokeLinecap="round" />
+    </>
+  ),
   profile: (
     <>
       <circle cx="12" cy="8" r="3.5" strokeWidth="1.8" />
@@ -389,6 +396,8 @@ export function AppButton({ className = "", style, disabled, children, onClick, 
       style={{
         WebkitTapHighlightColor: "transparent",
         tapHighlightColor: "transparent",
+        WebkitAppearance: "none",
+        appearance: "none",
         ...style,
       }}
       disabled={disabled}

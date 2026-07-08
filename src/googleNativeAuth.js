@@ -3,6 +3,32 @@ import { SocialLogin } from "@capgo/capacitor-social-login";
 import { supabase } from "./supabaseClient";
 
 const WEB_CLIENT_ID = import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID || "";
+const IOS_CLIENT_ID = import.meta.env.VITE_GOOGLE_IOS_CLIENT_ID || "";
+
+function getGoogleInitConfig() {
+  const config = {
+    webClientId: WEB_CLIENT_ID,
+    mode: "online",
+  };
+  if (Capacitor.getPlatform() === "ios") {
+    config.iOSClientId = IOS_CLIENT_ID;
+    config.iOSServerClientId = WEB_CLIENT_ID;
+  }
+  return config;
+}
+
+function assertGoogleConfigReady() {
+  if (!WEB_CLIENT_ID) {
+    throw new Error(
+      "Falta VITE_GOOGLE_WEB_CLIENT_ID en la configuración de la app (Client ID Web de Google Cloud)."
+    );
+  }
+  if (Capacitor.getPlatform() === "ios" && !IOS_CLIENT_ID) {
+    throw new Error(
+      "Falta VITE_GOOGLE_IOS_CLIENT_ID para iOS (OAuth client iOS en Google Cloud, bundle com.motoshotgt.app)."
+    );
+  }
+}
 
 let socialLoginReady = false;
 
@@ -42,22 +68,17 @@ function decodeJwtPayload(token) {
 
 async function ensureSocialLoginReady() {
   if (socialLoginReady) return;
-  if (!WEB_CLIENT_ID) {
-    throw new Error(
-      "Falta VITE_GOOGLE_WEB_CLIENT_ID en la configuración de la app (Client ID Web de Google Cloud)."
-    );
-  }
+  assertGoogleConfigReady();
   await SocialLogin.initialize({
-    google: {
-      webClientId: WEB_CLIENT_ID,
-      mode: "online",
-    },
+    google: getGoogleInitConfig(),
   });
   socialLoginReady = true;
 }
 
 export function isNativeGoogleAuthConfigured() {
-  return Capacitor.isNativePlatform() && !!WEB_CLIENT_ID;
+  if (!Capacitor.isNativePlatform() || !WEB_CLIENT_ID) return false;
+  if (Capacitor.getPlatform() === "ios") return !!IOS_CLIENT_ID;
+  return true;
 }
 
 export async function signInWithGoogleNative() {

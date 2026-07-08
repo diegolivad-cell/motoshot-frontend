@@ -9,6 +9,23 @@ function getScrollTop() {
   return window.scrollY || document.documentElement.scrollTop || 0;
 }
 
+function findNestedScrollContainer(el) {
+  let node = el;
+  while (node && node !== document.documentElement) {
+    if (node.matches?.("[data-no-ptr]")) return node;
+    const style = window.getComputedStyle(node);
+    const overflowY = style.overflowY;
+    if (
+      (overflowY === "auto" || overflowY === "scroll")
+      && node.scrollHeight > node.clientHeight + 1
+    ) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -69,16 +86,24 @@ export function usePullToRefresh({ onRefresh, enabled = true, threshold = 76 }) 
     };
 
     const onTouchStart = (e) => {
-      if (refreshingRef.current || getScrollTop() > 4) return;
+      if (refreshingRef.current) return;
       if (e.touches.length !== 1) return;
       const target = e.target;
       if (target?.closest?.(".modal-backdrop, .modal, input, textarea, select, [data-no-ptr]")) return;
+      const nested = findNestedScrollContainer(target);
+      if (nested) return;
+      if (getScrollTop() > 4) return;
       startY.current = e.touches[0].clientY;
       pulling.current = true;
     };
 
     const onTouchMove = (e) => {
       if (!pulling.current || refreshingRef.current) return;
+      const target = e.target;
+      if (target?.closest?.("[data-no-ptr]") || findNestedScrollContainer(target)) {
+        resetPull();
+        return;
+      }
       if (getScrollTop() > 4) {
         resetPull();
         return;

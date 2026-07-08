@@ -1,0 +1,29 @@
+.motoshot-protected-media,
+[data-content-protected] {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.motoshot-protected-media img,
+.motoshot-protected-media video,
+[data-content-protected] img,
+[data-content-protected] video {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+.motoshot-content-protected img,
+.motoshot-content-protected video {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+body.motoshot-obscured::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  background: #0c0c0c;
+  pointer-events: none;
+}

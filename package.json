@@ -10,15 +10,21 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "smoke": "node scripts/smoke-api.mjs"
+    "smoke": "node scripts/smoke-api.mjs",
+    "cap:ios": "npm run build && npx cap sync ios",
+    "cap:ios:open": "npx cap open ios",
+    "cap:ios:icons": "npx @capacitor/assets generate --ios --iconBackgroundColor '#FFFFFF' --splashBackgroundColor '#0c0c0c'"
   },
   "dependencies": {
     "@capacitor/android": "^8.4.0",
     "@capacitor/app": "^8.1.0",
     "@capacitor/browser": "^8.0.3",
+    "@capacitor/camera": "^8.2.0",
     "@capacitor/cli": "^8.4.0",
     "@capacitor/core": "^8.4.0",
     "@capacitor/filesystem": "^8.1.2",
+    "@capacitor/ios": "^8.4.1",
+    "@capacitor/privacy-screen": "^2.0.1",
     "@capgo/capacitor-social-login": "^8.3.22",
     "@supabase/supabase-js": "^2.105.1",
     "framer-motion": "^12.38.0",

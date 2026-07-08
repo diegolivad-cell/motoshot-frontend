@@ -11,6 +11,18 @@
     {
       "source": "/compras",
       "destination": "/index.html"
+    },
+    {
+      "source": "/v/:videoId",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/@id/:photographerId",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/@:handle",
+      "destination": "/index.html"
     }
   ],
   "headers": [

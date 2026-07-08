@@ -2,6 +2,27 @@ import { Capacitor } from "@capacitor/core";
 
 export const PENDING_PAYMENT_KEY = "motoshot_pending_payment";
 
+/** writePendingPayment guarda el mismo JSON en sessionStorage y localStorage. */
+export const PENDING_PAYMENT_STORAGE_ENTRIES = [
+  { area: "sessionStorage", key: PENDING_PAYMENT_KEY },
+  { area: "localStorage", key: PENDING_PAYMENT_KEY },
+];
+
+function removePendingPaymentEntry({ area, key }) {
+  try {
+    const storage = area === "sessionStorage" ? sessionStorage : localStorage;
+    storage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearPendingPaymentStorageItems() {
+  for (const entry of PENDING_PAYMENT_STORAGE_ENTRIES) {
+    removePendingPaymentEntry(entry);
+  }
+}
+
 let pollTimer = null;
 let browserBridgeReady = null;
 let paymentResumeHandler = null;
@@ -53,12 +74,7 @@ export function readPendingPayment() {
 }
 
 export function clearPendingPayment() {
-  try {
-    sessionStorage.removeItem(PENDING_PAYMENT_KEY);
-    localStorage.removeItem(PENDING_PAYMENT_KEY);
-  } catch {
-    /* ignore */
-  }
+  clearPendingPaymentStorageItems();
 }
 
 export async function closePaymentBrowser() {
@@ -82,12 +98,9 @@ function isPaymentCancelUrl(url) {
   if (!url) return false;
   try {
     const parsed = new URL(url);
-    return (
-      parsed.searchParams.get("payment_cancel") === "true" ||
-      parsed.searchParams.get("paypal_cancel") === "true"
-    );
+    return parsed.searchParams.get("payment_cancel") === "true";
   } catch {
-    return url.includes("payment_cancel=true") || url.includes("paypal_cancel=true");
+    return url.includes("payment_cancel=true");
   }
 }
 
@@ -96,18 +109,14 @@ function isPaymentReturnUrl(url) {
   if (isPaymentCancelUrl(url)) return false;
   try {
     const parsed = new URL(url);
-    if (
-      parsed.searchParams.get("payment_return") === "true" ||
-      parsed.searchParams.get("paypal_return") === "true"
-    ) {
+    if (parsed.searchParams.get("payment_return") === "true") {
       return true;
     }
     return parsed.pathname.includes("payment-complete");
   } catch {
     return (
       (url.includes("payment-complete") && !url.includes("payment_cancel=true")) ||
-      url.includes("payment_return=true") ||
-      url.includes("paypal_return=true")
+      url.includes("payment_return=true")
     );
   }
 }

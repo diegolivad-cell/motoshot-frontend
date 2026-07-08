@@ -5,6 +5,14 @@ export function getVideoThumbnail(video) {
   return video.thumbnail_url || null;
 }
 
+function withThumbnailCacheBust(src) {
+  if (!src) return src;
+  const match = String(src).match(/thumbnail_(\d+)\./);
+  if (!match) return src;
+  const sep = src.includes("?") ? "&" : "?";
+  return `${src}${sep}v=${match[1]}`;
+}
+
 /** Siempre muestra thumbnail_url como imagen. Nunca usa <video> para la vista estática (Android-safe). */
 export function VideoThumbnail({
   video,
@@ -18,7 +26,7 @@ export function VideoThumbnail({
   fallbackIconSize = 28,
   onLoad,
 }) {
-  const thumbSrc = src || getVideoThumbnail(video);
+  const thumbSrc = withThumbnailCacheBust(src || getVideoThumbnail(video));
   const mergedStyle = {
     width: "100%",
     height: "100%",

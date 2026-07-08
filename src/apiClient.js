@@ -88,6 +88,7 @@ export async function apiFetch(input, init = {}, options = {}) {
     retries = DEFAULT_RETRIES,
     retryDelayMs = DEFAULT_RETRY_MS,
     wake = false,
+    timeoutMs = 0,
   } = options;
 
   if (wake) await wakeApiServer();
@@ -97,15 +98,36 @@ export async function apiFetch(input, init = {}, options = {}) {
   let lastError = null;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timer = timeoutMs > 0
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
+    const extSignal = init.signal;
+    const onExternalAbort = () => controller.abort();
+    if (extSignal) {
+      if (extSignal.aborted) {
+        if (timer) clearTimeout(timer);
+        throw new DOMException("Aborted", "AbortError");
+      }
+      extSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
     try {
-      const res = await fetch(url, init);
+      const res = await fetch(url, { ...init, signal: controller.signal });
       lastRes = res;
       if (res.ok || !isRetryableStatus(res.status) || attempt === retries) {
         return res;
       }
     } catch (err) {
       lastError = err;
-      if (attempt === retries) throw err;
+      if (attempt === retries) {
+        if (err?.name === "AbortError") {
+          throw new Error("Tiempo de espera agotado. El servidor tardó demasiado.");
+        }
+        throw err;
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (extSignal) extSignal.removeEventListener("abort", onExternalAbort);
     }
     await sleep(retryDelayMs * (attempt + 1));
   }

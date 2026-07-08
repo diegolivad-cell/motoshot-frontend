@@ -1,19 +1,31 @@
-﻿import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+﻿import { useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect, useId } from "react";
 import { flushSync, createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile, imageMimeForFile } from "./storageUpload";
 import { motion, AnimatePresence } from "framer-motion";
+import { VideoCardTags } from "./MotoBrandLogo";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
 import { dismissAppSplash, SPLASH_MIN_MS } from "./splash.js";
 import { usePullToRefresh, PullToRefreshIndicator } from "./PullToRefresh";
 import { Capacitor } from "@capacitor/core";
 import { Filesystem, Directory } from "@capacitor/filesystem";
+import { pickVisualSearchPhotoFromGallery } from "./visualSearchCapture";
+import { photoToCartItem, videoToCartItem } from "./shoppingCart";
+import { useShoppingCart, ShoppingCartWidget, AddToCartButton } from "./ShoppingCart.jsx";
+import {
+  GuestCheckoutModal,
+  readGuestCheckoutDraft,
+  writeGuestCheckoutDraft,
+  clearGuestCheckoutDraft,
+} from "./GuestCheckout.jsx";
+import { GuestSuccessPage } from "./GuestSuccessPage.jsx";
 import { signInWithGoogleNative } from "./googleNativeAuth.js";
 import {
   writePendingPayment,
   readPendingPayment,
   clearPendingPayment,
+  PENDING_PAYMENT_KEY,
   openRecurrenteCheckout,
   closePaymentBrowser,
   stopPaymentPolling,
@@ -45,6 +57,9 @@ import {
   resolveVideoPurchaseState,
 } from "./videoPurchaseState.js";
 import { VideoPurchaseButton } from "./VideoPurchaseButton.jsx";
+import { FeaturedVideoFeed } from "./FeaturedVideoFeed.jsx";
+import { useContentProtection, ProtectedMedia, protectedVideoProps } from "./contentProtection.jsx";
+import { parseVideoIdFromPath } from "./videoShare.js";
 
 const VIEWS = {
   PHOTOGRAPHERS: "photographers",
@@ -53,6 +68,7 @@ const VIEWS = {
   DETAIL: "detail",
   UPLOAD: "upload",
   SUCCESS: "success",
+  GUEST_SUCCESS: "guest_success",
   AUTH: "auth",
   VENDOR_REQUEST: "vendor_request",
   MY_PURCHASES: "my_purchases",
@@ -90,6 +106,61 @@ const formatVideoDuration = (seconds) => {
   return `${m}:${String(s).padStart(2, "0")}`;
 };
 
+const formatVideoUploadDate = (iso) => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "—";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+};
+
+const getVideoListLabel = (video) => {
+  const brandModel = [video.moto_brand, video.moto_model].filter(Boolean).join(" ");
+  if (brandModel) return brandModel;
+  if (video.sector) return video.sector;
+  const tags = Array.isArray(video.additional_tags) ? video.additional_tags.filter(Boolean) : [];
+  if (tags.length) return tags.slice(0, 2).join(" · ");
+  if (video.id) return String(video.id).slice(0, 8).toUpperCase();
+  return "Video";
+};
+
+// Nombre del archivo con el que se subió el video. Cae al label si no existe.
+const getVideoUploadName = (video) => {
+  const raw = String(video?.original_filename || "").trim();
+  if (raw) return raw;
+  return getVideoListLabel(video);
+};
+
+// Líneas legibles de cupos de suscripción a partir de un fotógrafo.
+const quotaLine = (value, singular, plural, unlimitedLabel) => {
+  if (value === -1) return unlimitedLabel;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return `${n} ${n === 1 ? singular : plural} al mes`;
+};
+const subscriptionQuotaLines = (photographer) => {
+  if (!photographer) return [];
+  const lines = [];
+  const photo = quotaLine(photographer.subscription_photo_quota, "foto", "fotos", "Fotos ilimitadas");
+  const video = quotaLine(photographer.subscription_video_quota, "video", "videos", "Videos ilimitados");
+  if (photo) lines.push(photo);
+  if (video) lines.push(video);
+  return lines;
+};
+
+// Ícono de compartir con tématica MotoShot (rueda/nodos en naranja)
+const ShareProfileGlyph = ({ size = 15 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="18" cy="5" r="2.6" />
+    <circle cx="6" cy="12" r="2.6" />
+    <circle cx="18" cy="19" r="2.6" />
+    <line x1="8.3" y1="10.6" x2="15.7" y2="6.4" />
+    <line x1="8.3" y1="13.4" x2="15.7" y2="17.6" />
+  </svg>
+);
+
 const readVideoDuration = (file) => new Promise((resolve) => {
   const el = document.createElement("video");
   el.preload = "metadata";
@@ -106,7 +177,7 @@ const readVideoDuration = (file) => new Promise((resolve) => {
   el.src = url;
 });
 
-const MAX_VIDEO_BATCH = 100;
+const MAX_VIDEO_BATCH = 25;
 
 const formatFileSize = (bytes) => {
   if (!Number.isFinite(bytes) || bytes <= 0) return "";
@@ -164,32 +235,970 @@ function formatSocialLabel(platform, value) {
   return `@${handle.replace(/^@/, "")}`;
 }
 
-const extractVideoFrameBase64 = async (file) => {
-  const video = document.createElement("video");
-  video.src = URL.createObjectURL(file);
-  video.muted = true;
-  video.playsInline = true;
-  await new Promise((resolve, reject) => {
-    video.onloadeddata = resolve;
-    video.onerror = () => reject(new Error("No se pudo leer el video"));
+const hasVideoAiTags = (tags) => {
+  if (!tags) return false;
+  return ["moto_brand", "moto_model", "moto_color", "helmet_color", "suit_color", "dorsal"]
+    .some((key) => String(tags[key] || "").trim());
+};
+
+const VIDEO_AI_TAG_FIELDS = [
+  { key: "moto_brand", label: "Marca" },
+  { key: "moto_model", label: "Modelo" },
+  { key: "moto_color", label: "Color moto" },
+  { key: "helmet_color", label: "Casco" },
+  { key: "suit_color", label: "Traje" },
+  { key: "dorsal", label: "Placa" },
+];
+
+const getVideoAiTagEntries = (tags) =>
+  VIDEO_AI_TAG_FIELDS
+    .map(({ key, label }) => {
+      const value = String(tags?.[key] || "").trim();
+      return value ? { key, label, value } : null;
+    })
+    .filter(Boolean);
+
+const emptyVideoAiTags = () => ({
+  moto_brand: "",
+  moto_model: "",
+  moto_color: "",
+  helmet_color: "",
+  suit_color: "",
+  dorsal: "",
+  confidence: 0,
+});
+
+const splitVideoAiTagsResult = (tags) => {
+  if (!tags) return { aiTags: null, durationSeconds: null };
+  const durationSeconds = Number.isFinite(tags._durationSec) ? tags._durationSec : null;
+  const { _durationSec, ...aiTags } = tags;
+  return { aiTags, durationSeconds };
+};
+
+const isPaymentSyncSuccess = (data) =>
+  Boolean(data?.subscriptions?.length || data?.purchases?.length || data?.video_purchases?.length);
+
+const isPaymentStillProcessingError = (errorText = "") => {
+  const msg = String(errorText).toLowerCase();
+  return msg.includes("aún no está confirmado") || msg.includes("aun no esta confirmado");
+};
+
+const isTerminalPaymentError = (status, errorText = "") => {
+  if (isPaymentStillProcessingError(errorText)) return false;
+  const msg = String(errorText).toLowerCase();
+  if (status === 404) return true;
+  return (
+    msg.includes("no encontrad") ||
+    msg.includes("pendiente no encontrado") ||
+    msg.includes("cancelad")
+  );
+};
+
+const isValidProfileHandle = (handle) => {
+  const slug = String(handle || "").replace(/^@/, "").trim();
+  return /^[a-zA-Z0-9_]+$/.test(slug);
+};
+
+const needsAutoProfileHandle = (handle) => {
+  const raw = String(handle || "").trim();
+  return !raw || raw.includes("@") || raw.includes(".");
+};
+
+const generateAutoHandleFromName = (name) => {
+  const base = String(name || "fotografo")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/g, "")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "") || "fotografo";
+  const suffix = String(Math.floor(Math.random() * 1000)).padStart(3, "0");
+  return `${base}_${suffix}`;
+};
+
+const waitForVideoSeek = (video, timeSec, timeoutMs = 3000) =>
+  new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(`seeked timeout at ${timeSec}s`));
+    }, timeoutMs);
+
+    const onSeeked = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve();
+    };
+
+    const onError = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error("video error during seek"));
+    };
+
+    const cleanup = () => {
+      video.removeEventListener("seeked", onSeeked);
+      video.removeEventListener("error", onError);
+    };
+
+    video.addEventListener("seeked", onSeeked);
+    video.addEventListener("error", onError);
+    try {
+      video.currentTime = timeSec;
+    } catch (err) {
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(err);
+    }
   });
-  video.currentTime = Math.min(5, video.duration || 5);
-  await new Promise((resolve) => { video.onseeked = resolve; });
-  const maxDim = 1280;
+
+const VIDEO_FRAME_MAX_DIM = 960;
+const VIDEO_FRAME_PLATE_MAX_DIM = 1280;
+const VIDEO_FRAME_JPEG_QUALITY = 0.8;
+const VIDEO_FRAME_PLATE_JPEG_QUALITY = 0.86;
+const VIDEO_AI_MAX_FRAMES = 5;
+const VIDEO_AI_DEBUG = false;
+const aiDebugLog = (...args) => { if (VIDEO_AI_DEBUG) console.log(...args); };
+const VIDEO_AI_COLOR_FRAMES = 2;
+const VIDEO_AI_BRAND_FRAMES = 4;
+const VIDEO_AI_PLATE_FRAMES = 3;
+const VISION_API_TIMEOUT_MS = 60000;
+
+const loadVideoFromFile = (file) =>
+  new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "auto";
+    video.muted = true;
+    video.playsInline = true;
+    const objectUrl = URL.createObjectURL(file);
+    video.src = objectUrl;
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("loadeddata timeout"));
+    }, 15000);
+
+    const onLoaded = () => {
+      clearTimeout(timer);
+      resolve({ video, objectUrl });
+    };
+
+    const onError = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new Error("No se pudo leer el video"));
+    };
+
+    const cleanup = () => {
+      video.removeEventListener("loadeddata", onLoaded);
+      video.removeEventListener("error", onError);
+    };
+
+    video.addEventListener("loadeddata", onLoaded);
+    video.addEventListener("error", onError);
+  });
+
+const waitForPaintAfterSeek = () =>
+  new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+
+// Canvas único reutilizable — evita crear cientos de canvas y reduce presión de GC en Firefox
+let sharedCaptureCanvas = null;
+const getSharedCanvas = (w, h) => {
+  if (!sharedCaptureCanvas) sharedCaptureCanvas = document.createElement("canvas");
+  if (sharedCaptureCanvas.width !== w) sharedCaptureCanvas.width = w;
+  if (sharedCaptureCanvas.height !== h) sharedCaptureCanvas.height = h;
+  return sharedCaptureCanvas;
+};
+
+const captureVideoFrameBase64 = (video, options = {}) => {
+  const maxDim = options.maxDim ?? VIDEO_FRAME_MAX_DIM;
+  const quality = options.quality ?? VIDEO_FRAME_JPEG_QUALITY;
   let w = video.videoWidth;
   let h = video.videoHeight;
+  if (!w || !h) return null;
   if (w > maxDim || h > maxDim) {
     const scale = maxDim / Math.max(w, h);
     w = Math.round(w * scale);
     h = Math.round(h * scale);
   }
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  canvas.getContext("2d").drawImage(video, 0, 0, w, h);
-  const imageBase64 = canvas.toDataURL("image/jpeg", 0.75).split(",")[1];
-  URL.revokeObjectURL(video.src);
-  return imageBase64;
+  const canvas = getSharedCanvas(w, h);
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(video, 0, 0, w, h);
+  return canvas.toDataURL("image/jpeg", quality).split(",")[1] || null;
+};
+
+// Recorte de región del video (fracciones 0–1 del frame original)
+const captureVideoRegionCropBase64 = (video, region, options = {}) => {
+  const maxDim = options.maxDim ?? VIDEO_FRAME_PLATE_MAX_DIM;
+  const quality = options.quality ?? VIDEO_FRAME_PLATE_JPEG_QUALITY;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return null;
+
+  const cropW = Math.round(vw * region.w);
+  const cropH = Math.round(vh * region.h);
+  const cropX = Math.round(vw * region.x);
+  const cropY = Math.round(vh * region.y);
+
+  let outW = cropW;
+  let outH = cropH;
+  if (Math.max(outW, outH) > maxDim) {
+    const scale = maxDim / Math.max(outW, outH);
+    outW = Math.round(outW * scale);
+    outH = Math.round(outH * scale);
+  }
+
+  const canvas = getSharedCanvas(outW, outH);
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, outW, outH);
+  ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
+  return canvas.toDataURL("image/jpeg", quality).split(",")[1] || null;
+};
+
+// Recorte de la zona trasera donde suele estar la placa (bajo el stop)
+const captureVideoPlateCropBase64 = (video, options = {}) =>
+  captureVideoRegionCropBase64(video, { x: 0.18, y: 0.48, w: 0.64, h: 0.38 }, options);
+
+// Recorte amplio trasero — placa + stop
+const captureVideoPlateCropWideBase64 = (video, options = {}) =>
+  captureVideoRegionCropBase64(video, { x: 0.10, y: 0.42, w: 0.80, h: 0.48 }, options);
+
+// Recorte lateral-derecho para placas en vista de perfil
+const captureVideoPlateCropRightBase64 = (video, options = {}) =>
+  captureVideoRegionCropBase64(video, { x: 0.38, y: 0.44, w: 0.52, h: 0.40 }, options);
+
+// Recorte lateral-izquierdo (moto inclinada a la derecha)
+const captureVideoPlateCropLeftBase64 = (video, options = {}) =>
+  captureVideoRegionCropBase64(video, { x: 0.08, y: 0.44, w: 0.52, h: 0.40 }, options);
+
+// Recorte muy cerrado solo sobre el rectángulo de la placa
+const captureVideoPlateTightCropBase64 = (video, options = {}) =>
+  captureVideoRegionCropBase64(video, { x: 0.26, y: 0.52, w: 0.48, h: 0.22 }, options);
+
+// Recorte tanque/frente — logo de marca suele ir aquí (vista frontal/lateral)
+const captureVideoBrandTankCropBase64 = (video, options = {}) =>
+  captureVideoRegionCropBase64(video, { x: 0.24, y: 0.24, w: 0.52, h: 0.40 }, options);
+
+// Recorte carenado/tanque para color de la moto (ignora asfalto y piloto)
+const captureVideoMotoColorCropBase64 = (video, options = {}) =>
+  captureVideoRegionCropBase64(video, { x: 0.10, y: 0.34, w: 0.72, h: 0.44 }, options);
+
+// Recorte del carenado donde suele estar el texto de marca/modelo
+const captureVideoBrandCropBase64 = (video, options = {}) =>
+  captureVideoRegionCropBase64(video, { x: 0.1, y: 0.18, w: 0.8, h: 0.52 }, options);
+
+
+const buildVideoSeekTargets = (duration, { lightweight = false } = {}) => {
+  const d = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  if (lightweight) {
+    if (d <= 0) return [0];
+    const fracs = d >= 4 ? [0.15, 0.35, 0.5, 0.7, 0.85] : [0.2, 0.45, 0.7];
+    const targets = fracs.map((frac) => Number((d * frac).toFixed(3)));
+    if (d >= 4) targets.push(4);
+    return [...new Set(targets)].sort((a, b) => a - b);
+  }
+  const targets = new Set();
+  if (d >= 4) targets.add(4);
+  else if (d >= 2.5) targets.add(Number((d * 0.85).toFixed(3)));
+  if (d >= 1) {
+    // Cobertura de aproximación (frente/lateral) y alejamiento (placa), sin sobre-muestrear
+    for (const frac of [0.1, 0.2, 0.3, 0.45, 0.6, 0.7, 0.85]) {
+      targets.add(Number((d * frac).toFixed(3)));
+    }
+  }
+  return [...targets].sort((a, b) => a - b);
+};
+
+const yieldToBrowser = () =>
+  new Promise((resolve) => {
+    requestAnimationFrame(() => { requestAnimationFrame(resolve); });
+  });
+
+const hiResCaptureOptions = () => ({
+  maxDim: VIDEO_FRAME_PLATE_MAX_DIM,
+  quality: VIDEO_FRAME_PLATE_JPEG_QUALITY,
+});
+
+// Genera SOLO los recortes que el frame necesita según su uso (placa/marca/color).
+// Evita producir decenas de imágenes inútiles por frame (clave para no saturar Firefox).
+const enrichVideoFrameCrops = (video, frame, needs = {}) => {
+  const hiOpts = hiResCaptureOptions();
+  const out = { ...frame };
+  // Frame completo en alta-res: lo usan placa (fallback) y marca (fallback)
+  if (needs.plate || needs.brand) {
+    const hiResBase64 = captureVideoFrameBase64(video, hiOpts);
+    out.hiResBase64 = hiResBase64;
+    if (needs.brand) out.brandBase64 = hiResBase64;
+    if (needs.plate) out.plateBase64 = hiResBase64;
+  }
+  if (needs.brand) {
+    out.brandCropBase64 = captureVideoBrandCropBase64(video, hiOpts);
+    out.brandTankCropBase64 = captureVideoBrandTankCropBase64(video, hiOpts);
+  }
+  if (needs.color) {
+    out.motoColorCropBase64 = captureVideoMotoColorCropBase64(video, hiOpts);
+  }
+  if (needs.plate) {
+    out.plateCropBase64 = captureVideoPlateCropBase64(video, hiOpts);
+    out.plateCropWideBase64 = captureVideoPlateCropWideBase64(video, hiOpts);
+    out.plateCropRightBase64 = captureVideoPlateCropRightBase64(video, hiOpts);
+    out.plateCropLeftBase64 = captureVideoPlateCropLeftBase64(video, hiOpts);
+    out.plateTightCropBase64 = captureVideoPlateTightCropBase64(video, hiOpts);
+  }
+  return out;
+};
+
+const disposeVideoElement = (video) => {
+  if (!video) return;
+  try {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  } catch (_) {}
+};
+
+const extractVideoFramesBase64 = async (file, { isCancelled, onSeekProgress, sparseSeeks = false } = {}) => {
+  const fileName = file?.name || "sin nombre";
+  let objectUrl = null;
+  let video = null;
+  try {
+    const loaded = await loadVideoFromFile(file);
+    video = loaded.video;
+    objectUrl = loaded.objectUrl;
+
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    const seekTargets = buildVideoSeekTargets(duration, { lightweight: sparseSeeks });
+    const frames = [];
+
+    for (let seekIdx = 0; seekIdx < seekTargets.length; seekIdx += 1) {
+      const target = seekTargets[seekIdx];
+      if (typeof isCancelled === "function" && isCancelled()) return { frames: [], duration };
+      try {
+        await waitForVideoSeek(video, target, 3500);
+        if (typeof isCancelled === "function" && isCancelled()) return { frames: [], duration };
+        await waitForPaintAfterSeek();
+        const base64 = captureVideoFrameBase64(video);
+        if (!base64) continue;
+        frames.push({ timeSec: target, base64 });
+        if (typeof onSeekProgress === "function") {
+          onSeekProgress(seekIdx + 1, seekTargets.length);
+        }
+        await yieldToBrowser();
+      } catch (err) {
+        console.warn(`extractVideoFramesBase64 [${fileName}]: seek ${target}s falló:`, err?.message || err);
+      }
+    }
+
+    if (frames.length) {
+      const plateFrames = pickPlateOcrFrames(frames, duration);
+      const brandFrames = pickBrandOcrFrames(frames, duration);
+      const colorFrames = pickColorFrames(frames, duration);
+      const plateTimes = new Set(plateFrames.map((f) => f.timeSec));
+      const brandTimes = new Set(brandFrames.map((f) => f.timeSec));
+      const colorTimes = new Set(colorFrames.map((f) => f.timeSec));
+      const enrichTimes = [...new Set([...plateTimes, ...brandTimes, ...colorTimes])];
+      for (const timeSec of enrichTimes) {
+        if (typeof isCancelled === "function" && isCancelled()) return { frames: [], duration };
+        const idx = frames.findIndex((f) => f.timeSec === timeSec);
+        if (idx < 0) continue;
+        try {
+          await waitForVideoSeek(video, timeSec, 3500);
+          await waitForPaintAfterSeek();
+          frames[idx] = enrichVideoFrameCrops(video, frames[idx], {
+            plate: plateTimes.has(timeSec),
+            brand: brandTimes.has(timeSec),
+            color: colorTimes.has(timeSec),
+          });
+          await yieldToBrowser();
+        } catch (err) {
+          console.warn(`extractVideoFramesBase64 [${fileName}]: enrich ${timeSec}s falló:`, err?.message || err);
+        }
+      }
+    }
+
+    if (!frames.length) {
+      console.error(`extractVideoFramesBase64: no se extrajo ningún frame (${fileName})`);
+    }
+    return { frames, duration };
+  } catch (err) {
+    console.error(`extractVideoFramesBase64: falló para ${fileName}:`, err?.message || err);
+    return { frames: [], duration: 0 };
+  } finally {
+    disposeVideoElement(video);
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+};
+
+const extractVideoFrameBase64 = async (file) => {
+  const { frames } = await extractVideoFramesBase64(file);
+  return frames[0]?.base64 || null;
+};
+
+const scoreVideoAiTags = (tags) => {
+  if (!tags || typeof tags !== "object") return -1;
+  let score = Number(tags.confidence);
+  if (!Number.isFinite(score)) score = 0;
+  if (score > 0 && score <= 1) score *= 100;
+  const weights = {
+    moto_brand: 40,
+    moto_model: 25,
+    moto_color: 8,
+    helmet_color: 6,
+    suit_color: 6,
+    dorsal: 6,
+  };
+  for (const [key, weight] of Object.entries(weights)) {
+    if (String(tags[key] || "").trim()) score += weight;
+  }
+  return score;
+};
+
+const pickBestVideoAiTags = (candidates) => {
+  let best = null;
+  let bestScore = -1;
+  for (const tags of candidates) {
+    if (!tags) continue;
+    const score = scoreVideoAiTags(tags);
+    if (score > bestScore) {
+      bestScore = score;
+      best = tags;
+    }
+  }
+  return best;
+};
+
+const mergeVideoAiTagResults = (candidates) => {
+  const valid = candidates.filter(Boolean);
+  if (!valid.length) return null;
+
+  const merged = { ...pickBestVideoAiTags(valid) };
+  if (!merged) return null;
+
+  // Placa y marca/modelo: null aquí — los definen pasos OCR dedicados
+  merged.dorsal = null;
+  merged.moto_brand = null;
+  merged.moto_model = null;
+
+  // Colores: tomar el mejor valor por campo entre todos los frames
+  for (const field of ["moto_color", "helmet_color", "suit_color"]) {
+    let best = String(merged[field] || "").trim();
+    let bestScore = best ? (Number(merged.confidence) || 0) : -1;
+    for (const tags of valid) {
+      const val = String(tags[field] || "").trim();
+      if (!val) continue;
+      let s = Number(tags.confidence) || 0;
+      if (s > 0 && s <= 1) s *= 100;
+      if (s >= bestScore) {
+        bestScore = s;
+        best = val;
+      }
+    }
+    merged[field] = best || null;
+  }
+
+  return merged;
+};
+
+const pickPlateAnalysisFrame = (frames) => {
+  if (!frames?.length) return null;
+  let best = frames[0];
+  for (const frame of frames) {
+    if (Math.abs(frame.timeSec - 4) < Math.abs(best.timeSec - 4)) best = frame;
+  }
+  return best;
+};
+
+const pickSpreadFrames = (frames, max = VIDEO_AI_MAX_FRAMES) => {
+  if (!frames?.length) return [];
+  if (frames.length <= max) return frames;
+  const picked = [];
+  for (let i = 0; i < max; i += 1) {
+    const idx = Math.round((i * (frames.length - 1)) / (max - 1));
+    picked.push(frames[idx]);
+  }
+  return picked;
+};
+
+const pickPlateOcrFrames = (frames, duration = 0) => {
+  if (!frames?.length) return [];
+  const d = duration > 0 ? duration : Math.max(...frames.map((f) => f.timeSec), 0);
+  const scored = frames
+    .map((frame) => {
+      let score = 0;
+      if (Math.abs(frame.timeSec - 4) < 0.35) score += 100;
+      if (d > 0 && frame.timeSec >= d * 0.55 && frame.timeSec <= d * 0.92) score += 80;
+      if (d > 0 && frame.timeSec >= d * 0.4 && frame.timeSec <= d * 0.55) score += 40;
+      if (frame.plateTightCropBase64) score += 50;
+      if (frame.plateCropBase64) score += 30;
+      return { frame, score };
+    })
+    .sort((a, b) => b.score - a.score);
+  return scored.slice(0, VIDEO_AI_PLATE_FRAMES).map((x) => x.frame);
+};
+
+const normalizePlateToken = (value) =>
+  String(value || "").trim().toUpperCase().replace(/[\s\-_.]/g, "");
+
+// Caracteres confundibles por OCR
+const PLATE_LETTER_TO_DIGIT = { O: "0", D: "0", Q: "0", I: "1", L: "1", Z: "2", E: "3", A: "4", S: "5", G: "6", T: "7", B: "8" };
+const PLATE_DIGIT_TO_LETTER = { 0: "O", 1: "I", 2: "Z", 4: "A", 5: "S", 6: "G", 7: "T", 8: "B" };
+
+// Placas de moto en Guatemala: M + 3 dígitos + 3 letras (M###AAA).
+// Corrige caracteres mal leídos según la posición esperada.
+const coerceGuatemalaMotoPlate = (value) => {
+  const s = normalizePlateToken(value);
+  if (s.length !== 7 || s[0] !== "M") return s;
+  const chars = s.split("");
+  for (let i = 1; i <= 3; i += 1) {
+    if (!/\d/.test(chars[i]) && PLATE_LETTER_TO_DIGIT[chars[i]]) chars[i] = PLATE_LETTER_TO_DIGIT[chars[i]];
+  }
+  for (let i = 4; i <= 6; i += 1) {
+    if (!/[A-Z]/.test(chars[i]) && PLATE_DIGIT_TO_LETTER[chars[i]]) chars[i] = PLATE_DIGIT_TO_LETTER[chars[i]];
+  }
+  const out = chars.join("");
+  return /^M\d{3}[A-Z]{3}$/.test(out) ? out : s;
+};
+
+// ¿Coincide con el patrón canónico de placa de moto?
+const isMotoPlatePattern = (value) => /^M\d{3}[A-Z]{3}$/.test(normalizePlateToken(value));
+
+const PLATE_OCR_BLOCKLIST = /^(WILMER|KINGS|MOTOSHOT|GUATEMALA|MOTOR|KING|SHOT|GT)$/i;
+
+const isValidGuatemalaPlate = (plate) => {
+  const s = normalizePlateToken(plate);
+  if (s.length < 5 || s.length > 8) return false;
+  if (PLATE_OCR_BLOCKLIST.test(s)) return false;
+  if (!/\d/.test(s) || !/[A-Z]/.test(s)) return false;
+  if (/^\d{3}[A-Z]{2,4}$/.test(s)) return true;
+  if (/^[A-Z]\d{3}[A-Z]{2,4}$/.test(s)) return true;
+  if (/^[A-Z]{2}\d{2,3}[A-Z]{2,3}$/.test(s)) return true;
+  return /^[A-Z0-9]{5,8}$/.test(s);
+};
+
+const normalizeTagConfidence = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return n <= 1 ? n * 100 : n;
+};
+
+const plateSourceWeight = (source) => {
+  if (source === "tight") return 8;
+  if (source === "wide") return 5;
+  if (source === "crop") return 4;
+  if (source === "left" || source === "right") return 3;
+  if (source === "full") return 1;
+  return 1;
+};
+
+const alignPlateToAnchor = (anchor, plate) => {
+  const m = anchor.length;
+  const n = plate.length;
+  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  const bt = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+  for (let i = 1; i <= m; i += 1) dp[i][0] = -i;
+  for (let j = 1; j <= n; j += 1) dp[0][j] = -j;
+
+  for (let i = 1; i <= m; i += 1) {
+    for (let j = 1; j <= n; j += 1) {
+      const match = anchor[i - 1] === plate[j - 1] ? 2 : -1;
+      let best = dp[i - 1][j - 1] + match;
+      let back = 1;
+      if (dp[i - 1][j] - 1 > best) {
+        best = dp[i - 1][j] - 1;
+        back = 2;
+      }
+      if (dp[i][j - 1] - 1 > best) {
+        best = dp[i][j - 1] - 1;
+        back = 3;
+      }
+      dp[i][j] = best;
+      bt[i][j] = back;
+    }
+  }
+
+  const cols = Array(m).fill(null);
+  let i = m;
+  let j = n;
+  while (i > 0 || j > 0) {
+    const move = bt[i][j];
+    if (move === 1) {
+      cols[i - 1] = plate[j - 1];
+      i -= 1;
+      j -= 1;
+    } else if (move === 2) {
+      i -= 1;
+    } else {
+      j -= 1;
+    }
+  }
+  return cols;
+};
+
+const voteAlignedToAnchor = (anchor, items) => {
+  const votes = Array.from({ length: anchor.length }, () => ({}));
+  for (const { s, w } of items) {
+    const cols = alignPlateToAnchor(anchor, s);
+    for (let i = 0; i < anchor.length; i += 1) {
+      const c = cols[i];
+      if (!c) continue;
+      votes[i][c] = (votes[i][c] || 0) + w;
+    }
+  }
+  let out = "";
+  for (let i = 0; i < anchor.length; i += 1) {
+    const ranked = Object.entries(votes[i]).sort((a, b) => b[1] - a[1]);
+    if (ranked[0]) out += ranked[0][0];
+  }
+  return out;
+};
+
+const scorePlateAgainstReads = (plate, items) => {
+  let score = 0;
+  for (const { s, w } of items) {
+    const cols = alignPlateToAnchor(plate, s);
+    const aligned = cols.filter(Boolean).join("");
+    if (aligned === plate) score += w * 3;
+    else if (s === plate) score += w * 2;
+    else if (plate.startsWith(s) || s.startsWith(plate)) score += w;
+  }
+  return score + plate.length * 0.5;
+};
+
+// Cuántas lecturas coinciden EXACTAMENTE (por carácter) con un candidato tras alinear
+const countExactSupport = (candidate, items) =>
+  items.filter((it) => {
+    if (it.s === candidate) return true;
+    const aligned = alignPlateToAnchor(candidate, it.s).filter(Boolean).join("");
+    return aligned === candidate;
+  }).length;
+
+// Acuerdo promedio (0–1) entre las lecturas y un candidato, carácter por carácter.
+// Alto = las lecturas se agrupan (placa legible). Bajo = lecturas dispersas (ilegible).
+const charAgreement = (candidate, items) => {
+  if (!candidate || !items.length) return 0;
+  let total = 0;
+  for (const it of items) {
+    const cols = alignPlateToAnchor(candidate, it.s);
+    let match = 0;
+    for (let i = 0; i < candidate.length; i += 1) {
+      if (cols[i] === candidate[i]) match += 1;
+    }
+    total += match / candidate.length;
+  }
+  return total / items.length;
+};
+
+// Estricto: solo devuelve placa cuando hay ACUERDO real entre lecturas o una lectura
+// única muy clara. Si las lecturas se contradicen, devuelve null (no inventar).
+const votePlateOcrResults = (reads) => {
+  if (!reads.length) return null;
+  const items = reads
+    .map((read) => {
+      const s = coerceGuatemalaMotoPlate(read.dorsal);
+      const conf = (normalizeTagConfidence(read.confidence) || 0) / 100;
+      const baseW = plateSourceWeight(read.source) * (normalizeTagConfidence(read.confidence) || 1);
+      return {
+        s,
+        conf,
+        // El patrón canónico de moto pesa más para resolver empates
+        w: baseW * (isMotoPlatePattern(s) ? 1.6 : 1),
+        charCount: Number(read.char_count) || 0,
+      };
+    })
+    .filter((x) => isValidGuatemalaPlate(x.s));
+  if (!items.length) return null;
+
+  const buckets = {};
+  for (const it of items) buckets[it.s] = (buckets[it.s] || 0) + it.w;
+  const exactRanked = Object.entries(buckets).sort((a, b) => b[1] - a[1]);
+  const topExact = exactRanked[0]?.[0] || null;
+  const topCount = topExact ? items.filter((x) => x.s === topExact).length : 0;
+
+  // 1) Dos o más lecturas idénticas → confiable
+  if (topExact && topCount >= 2) return coerceGuatemalaMotoPlate(topExact);
+
+  // 2) Votación por carácter sobre el mejor ancla, evaluando acuerdo
+  const anchors = [...new Set(items.map((x) => x.s))].sort((a, b) => b.length - a.length);
+  let best = { plate: null, score: -1, support: 0, agree: 0 };
+  for (const anchor of anchors) {
+    const plate = coerceGuatemalaMotoPlate(voteAlignedToAnchor(anchor, items));
+    if (!isValidGuatemalaPlate(plate)) continue;
+    const support = countExactSupport(plate, items);
+    const agree = charAgreement(plate, items);
+    const score = scorePlateAgainstReads(plate, items);
+    if (
+      support > best.support
+      || (support === best.support && agree > best.agree)
+      || (support === best.support && agree === best.agree && score > best.score)
+    ) {
+      best = { plate, score, support, agree };
+    }
+  }
+  if (best.plate) {
+    // Estricto: solo si varias lecturas REALMENTE concuerdan (no una sola adivinanza)
+    if (best.support >= 2) return best.plate;
+    if (items.length >= 4 && best.agree >= 0.85) return best.plate; // muchas lecturas muy parecidas
+  }
+
+  // 3) Una sola lectura clara (confianza muy alta + patrón de moto)
+  const topItem = items.find((x) => x.s === topExact);
+  if (items.length === 1 && topItem && isMotoPlatePattern(topItem.s) && topItem.conf >= 0.9) {
+    return topItem.s;
+  }
+
+  // Sin acuerdo real → no inventar (mejor vacía que equivocada)
+  return null;
+};
+
+const isSoftPlateCandidate = (plate) => {
+  const s = normalizePlateToken(plate);
+  if (s.length < 5 || s.length > 8) return false;
+  if (PLATE_OCR_BLOCKLIST.test(s)) return false;
+  return /\d/.test(s) && /[A-Z]/.test(s);
+};
+
+const hasPlateConsensus = (reads) => {
+  if (reads.length < 2) return false;
+  const counts = {};
+  for (const read of reads) {
+    const s = normalizePlateToken(read.dorsal);
+    if (!isValidGuatemalaPlate(s)) continue;
+    counts[s] = (counts[s] || 0) + 1;
+  }
+  return Object.values(counts).some((c) => c >= 2);
+};
+
+const fallbackPlateFromReads = (reads) => {
+  const items = reads
+    .map((read) => {
+      const s = coerceGuatemalaMotoPlate(read.dorsal);
+      const baseW = plateSourceWeight(read.source) * (normalizeTagConfidence(read.confidence) || 1);
+      return { s, w: baseW * (isMotoPlatePattern(s) ? 1.6 : 1) };
+    })
+    .filter((x) => isSoftPlateCandidate(x.s))
+    .sort((a, b) => b.w - a.w);
+  if (!items.length) return null;
+  // Votación por carácter entre los candidatos suaves usando el de mayor peso como ancla
+  const anchors = [...new Set(items.map((x) => x.s))].sort((a, b) => b.length - a.length);
+  let best = { plate: items[0].s, score: -1 };
+  for (const anchor of anchors) {
+    const plate = voteAlignedToAnchor(anchor, items);
+    if (!isSoftPlateCandidate(plate)) continue;
+    const score = scorePlateAgainstReads(plate, items);
+    if (score > best.score) best = { plate, score };
+  }
+  return coerceGuatemalaMotoPlate(best.plate || items[0]?.s) || null;
+};
+
+// Balanceado: 3 mejores recortes centrales (tight, crop, wide). Los recortes
+// left/right se omiten para ahorrar llamadas; el respaldo de frame completo y
+// la verificación cubren las placas descentradas.
+const pickPlateImagesForFrame = (plateFrame) => [
+  plateFrame.plateTightCropBase64 ? { image: plateFrame.plateTightCropBase64, source: "tight" } : null,
+  plateFrame.plateCropBase64 ? { image: plateFrame.plateCropBase64, source: "crop" } : null,
+  plateFrame.plateCropWideBase64 ? { image: plateFrame.plateCropWideBase64, source: "wide" } : null,
+].filter(Boolean);
+
+const pickBestPlateVerifyImage = (frames) => {
+  for (const frame of frames) {
+    if (frame.plateTightCropBase64) return frame.plateTightCropBase64;
+  }
+  for (const frame of frames) {
+    if (frame.plateCropBase64) return frame.plateCropBase64;
+  }
+  for (const frame of frames) {
+    if (frame.plateCropRightBase64) return frame.plateCropRightBase64;
+  }
+  return null;
+};
+
+const mergePlateVerifyResult = (current, verified, verifiedConf = 0) => {
+  const a = normalizePlateToken(current);
+  const b = normalizePlateToken(verified);
+  if (!isValidGuatemalaPlate(b)) return a || null;
+  if (!a) return b;
+  const conf = normalizeTagConfidence(verifiedConf);
+  if (b.length > a.length) return b;
+  if (b.length === a.length) {
+    if (b === a) return b;
+    if (conf >= 85) return b;
+    const cols = alignPlateToAnchor(b, a);
+    const diff = cols.filter((c, i) => c && b[i] !== c).length;
+    if (diff <= 1) return b;
+  }
+  if (conf >= 90 && b.length >= a.length - 1) return b;
+  return a;
+};
+
+const pickPlateVerifyImages = (frames) => {
+  const imgs = [];
+  for (const frame of frames) {
+    if (frame.plateTightCropBase64) imgs.push(frame.plateTightCropBase64);
+    if (imgs.length >= 2) return imgs;
+  }
+  for (const frame of frames) {
+    if (frame.plateCropBase64 && !imgs.includes(frame.plateCropBase64)) imgs.push(frame.plateCropBase64);
+    if (imgs.length >= 2) return imgs;
+  }
+  return imgs;
+};
+
+// Estricto: solo devuelve marca/modelo con evidencia real (acuerdo entre lecturas
+// o una lectura de alta confianza). Si no, null — no adivinar.
+const voteBrandOcrResults = (reads) => {
+  if (!reads.length) return null;
+  const buckets = {};
+  for (const read of reads) {
+    const brand = String(read.moto_brand || "").trim();
+    if (!brand) continue;
+    const key = brand.toLowerCase();
+    const weight = read.source === "crop" ? 3 : 1;
+    const conf = (normalizeTagConfidence(read.confidence) || 0) / 100;
+    if (!buckets[key]) buckets[key] = { brand, count: 0, rawCount: 0, confSum: 0, maxConf: 0, models: {} };
+    buckets[key].count += weight;
+    buckets[key].rawCount += 1;
+    buckets[key].confSum += normalizeTagConfidence(read.confidence) * weight;
+    buckets[key].maxConf = Math.max(buckets[key].maxConf, conf);
+    const model = String(read.moto_model || "").trim();
+    if (model) {
+      if (!buckets[key].models[model]) buckets[key].models[model] = { weight: 0, count: 0, maxConf: 0 };
+      buckets[key].models[model].weight += weight;
+      buckets[key].models[model].count += 1;
+      buckets[key].models[model].maxConf = Math.max(buckets[key].models[model].maxConf, conf);
+    }
+  }
+  const ranked = Object.values(buckets).sort(
+    (a, b) => b.count * 1000 + b.confSum / Math.max(b.count, 1) - (a.count * 1000 + a.confSum / Math.max(a.count, 1))
+  );
+  const winner = ranked[0];
+  if (!winner) return null;
+
+  // Gate de marca: 2+ lecturas coinciden, o una sola lectura clara (conf >= 0.6)
+  const brandTrustworthy = winner.rawCount >= 2 || winner.maxConf >= 0.6;
+  if (!brandTrustworthy) return null;
+
+  // Gate de modelo: aparece en 2+ lecturas, o una lectura de alta confianza (>= 0.7)
+  const modelEntry = Object.entries(winner.models).sort((a, b) => {
+    if (b[1].weight !== a[1].weight) return b[1].weight - a[1].weight;
+    return b[0].length - a[0].length;
+  })[0];
+  let model = null;
+  if (modelEntry) {
+    const m = modelEntry[1];
+    if (m.count >= 2 || m.maxConf >= 0.7) model = modelEntry[0];
+  }
+
+  return {
+    moto_brand: winner.brand,
+    moto_model: model,
+    confidence: winner.confSum / Math.max(winner.count, 1),
+  };
+};
+
+const voteColorResults = (reads) => {
+  if (!reads.length) return null;
+  const out = { moto_color: null, helmet_color: null, suit_color: null, confidence: 0 };
+  const colorSourceWeight = (source) => {
+    // El frame completo da contexto para no confundir motor/piloto con la pintura → más confiable
+    if (source === "hires") return 5;
+    if (source === "moto_crop") return 3;
+    if (source === "brand_crop") return 2;
+    return 1;
+  };
+  for (const field of ["moto_color", "helmet_color", "suit_color"]) {
+    const buckets = {};
+    for (const read of reads) {
+      const val = String(read[field] || "").trim();
+      if (!val) continue;
+      const weight = colorSourceWeight(read.source) * (normalizeTagConfidence(read.confidence) || 1);
+      buckets[val] = (buckets[val] || 0) + weight;
+    }
+    const ranked = Object.entries(buckets).sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return b[0].length - a[0].length;
+    });
+    out[field] = ranked[0]?.[0] || null;
+  }
+  const confs = reads.map((r) => normalizeTagConfidence(r.confidence)).filter((n) => n > 0);
+  out.confidence = confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : 0;
+  return out;
+};
+
+// La marca/modelo se lee mejor en la aproximación (vista frontal/lateral, tanque visible)
+const pickBrandOcrFrames = (frames, duration = 0) => {
+  if (!frames?.length) return [];
+  const d = duration > 0 ? duration : Math.max(...frames.map((f) => f.timeSec), 0);
+  if (frames.length <= VIDEO_AI_BRAND_FRAMES) return frames;
+  const scored = frames
+    .map((frame) => {
+      let score = 0;
+      // Fase de aproximación/paso: frente y lateral visibles
+      if (d > 0 && frame.timeSec >= d * 0.15 && frame.timeSec <= d * 0.5) score += 100;
+      if (d > 0 && frame.timeSec >= d * 0.5 && frame.timeSec <= d * 0.7) score += 60;
+      if (d > 0 && frame.timeSec < d * 0.15) score += 30;
+      if (frame.brandTankCropBase64) score += 40;
+      if (frame.brandCropBase64) score += 20;
+      return { frame, score };
+    })
+    .sort((a, b) => b.score - a.score);
+  return scored.slice(0, VIDEO_AI_BRAND_FRAMES).map((x) => x.frame);
+};
+
+// El color se ve mejor de frente/lateral (carenado iluminado, sin dominar luces traseras)
+const pickColorFrames = (frames, duration = 0) => {
+  if (!frames?.length) return [];
+  if (frames.length <= VIDEO_AI_COLOR_FRAMES) return frames;
+  const d = duration > 0 ? duration : Math.max(...frames.map((f) => f.timeSec), 0);
+  const scored = frames
+    .map((frame) => {
+      let score = 0;
+      if (d > 0 && frame.timeSec >= d * 0.15 && frame.timeSec <= d * 0.55) score += 100;
+      if (d > 0 && frame.timeSec > d * 0.55 && frame.timeSec <= d * 0.7) score += 50;
+      if (frame.motoColorCropBase64) score += 30;
+      return { frame, score };
+    })
+    .sort((a, b) => b.score - a.score);
+  return scored.slice(0, VIDEO_AI_COLOR_FRAMES).map((x) => x.frame);
+};
+
+const countPlateImagesForFrame = () => 3;
+
+const countBrandImagesForFrame = () => 2;
+
+const hasBrandConsensus = (reads) => {
+  if (reads.length < 2) return false;
+  const buckets = {};
+  for (const read of reads) {
+    const brand = String(read.moto_brand || "").trim().toLowerCase();
+    if (!brand) continue;
+    buckets[brand] = (buckets[brand] || 0) + 1;
+  }
+  return Object.values(buckets).some((n) => n >= 2);
+};
+
+const pickBrandAnalysisFrame = (frames, duration = 0) => {
+  if (!frames?.length) return null;
+  const d = duration > 0 ? duration : Math.max(...frames.map((f) => f.timeSec), 1);
+  const ideal = Math.min(d * 0.25, 2);
+  const frontFrames = frames.filter((f) => f.timeSec <= d * 0.45);
+  const pool = frontFrames.length ? frontFrames : frames;
+  let best = pool[0];
+  for (const frame of pool) {
+    if (Math.abs(frame.timeSec - ideal) < Math.abs(best.timeSec - ideal)) best = frame;
+  }
+  return best;
 };
 
 const PENDING_EMAIL_CONFIRM_KEY = "motoshot_pending_email_confirm";
@@ -401,17 +1410,44 @@ const isCountryCodeOnly = (value) => {
   return PHONE_COUNTRIES.some(c => local === c.code || local === c.code.slice(1));
 };
 
+const PHONE_LOCAL_MAX_DIGITS = {
+  "+502": 8,
+  "+503": 8,
+  "+504": 8,
+  "+506": 8,
+  "+507": 8,
+  "+52": 10,
+  "+1": 10,
+  "+57": 10,
+  "+34": 9,
+};
+
+const formatPhoneLocalInput = (digits, countryCode = "+502") => {
+  const max = PHONE_LOCAL_MAX_DIGITS[countryCode] || 12;
+  const d = digits.slice(0, max);
+  if (countryCode === "+502") {
+    if (d.length <= 4) return d;
+    return `${d.slice(0, 4)}-${d.slice(4)}`;
+  }
+  return d;
+};
+
 const normalizePhoneLocal = (value, countryCode = "+502") => {
   if (isCountryCodeOnly(value)) return "";
   let local = stripLeadingCountryCodes(value);
   if (!local || isCountryCodeOnly(local)) return "";
 
   const countryDigits = countryCode.slice(1);
-  if (/^\d+$/.test(local) && local.startsWith(countryDigits) && local.length > countryDigits.length) {
-    local = local.slice(countryDigits.length);
+  let digits = local.replace(/\D/g, "");
+  if (digits.startsWith(countryDigits) && digits.length > countryDigits.length) {
+    const rawDigits = local.replace(/\D/g, "");
+    if (rawDigits === digits) {
+      digits = digits.slice(countryDigits.length);
+    }
   }
 
-  return isCountryCodeOnly(local) ? "" : local;
+  if (!digits || isCountryCodeOnly(digits)) return "";
+  return formatPhoneLocalInput(digits, countryCode);
 };
 
 const parsePhoneNumber = (fullPhone) => {
@@ -452,6 +1488,39 @@ const formatPhoneDisplay = (fullPhone) => {
 const HERO_VIDEO_URL =
   "https://ejkxoaalhrzbyudwxwei.supabase.co/storage/v1/object/public/Video-Hero/14022738_720_1280_60fps.mp4";
 
+const GALLERY_VIDEO_GRID_VARIANTS = {
+  hidden: {},
+  visible: {
+    transition: { staggerChildren: 0.045, delayChildren: 0.04 },
+  },
+};
+
+const GALLERY_VIDEO_CARD_VARIANTS = {
+  hidden: { opacity: 0, y: 18, scale: 0.94 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    transition: { duration: 0.38, ease: [0.22, 1, 0.36, 1] },
+  },
+};
+
+const GALLERY_VIDEO_LIST_VARIANTS = {
+  hidden: {},
+  visible: {
+    transition: { staggerChildren: 0.03, delayChildren: 0.02 },
+  },
+};
+
+const GALLERY_VIDEO_ROW_VARIANTS = {
+  hidden: { opacity: 0, x: -12 },
+  visible: {
+    opacity: 1,
+    x: 0,
+    transition: { duration: 0.32, ease: [0.22, 1, 0.36, 1] },
+  },
+};
+
 const BANK_ACCOUNT_TYPES = ["Monetaria", "Ahorro"];
 
 const BANK_CURRENCIES = [
@@ -466,6 +1535,81 @@ const EMPTY_BANK_FORM = {
   holder: "",
   accountNumber: "",
   accountType: "Monetaria",
+};
+
+const MEMBERSHIP_PLANS = [
+  {
+    id: "basico",
+    name: "Plan Básico",
+    price: 119.95,
+    storageGB: 15,
+    commission: 4.5,
+    image: "/membership/basico.png",
+    benefits: ["Acceso completo para subir fotos y videos", "Auto-tagging con IA", "App móvil incluida"],
+    paymentLink: "https://app.recurrente.com/s/motoshot-gt/motoshot-gt-plan-mensual",
+  },
+  {
+    id: "avanzado",
+    name: "Plan Avanzado",
+    price: 155,
+    storageGB: 50,
+    commission: 4.5,
+    image: "/membership/avanzado.png",
+    benefits: ["Todo lo del plan Básico", "Mayor almacenamiento", "Destacado ocasional en inicio"],
+    paymentLink: "https://app.recurrente.com/s/motoshot-gt/motoshot-gt-plan-avanzado",
+  },
+  {
+    id: "profesional",
+    name: "Plan Profesional",
+    price: 235,
+    storageGB: 120,
+    commission: 4.5,
+    image: "/membership/profesional.png",
+    benefits: ["Todo lo del plan Avanzado", 'Badge "Profesional" visible en tu perfil', "Prioridad en resultados de búsqueda"],
+    paymentLink: "https://app.recurrente.com/s/motoshot-gt/motoshot-gt-plan-profesional",
+    featured: true,
+  },
+  {
+    id: "elite",
+    name: "Plan Élite",
+    price: 390,
+    storageGB: 300,
+    commission: 3.5,
+    image: "/membership/elite.png",
+    benefits: ["Todo lo del plan Profesional", "Destacado fijo en inicio", "Comisión reducida de venta (3.5%)", "Soporte prioritario"],
+    paymentLink: "https://app.recurrente.com/s/motoshot-gt/motoshot-gt-plan-elite",
+  },
+];
+
+const formatStorageGb = (gb) => {
+  const n = Number(gb) || 0;
+  if (n > 0 && n < 0.01) return "<0.01 GB";
+  return `${n.toFixed(n >= 10 ? 1 : 2)} GB`;
+};
+
+const membershipPlanLabel = (planId) => {
+  const hit = MEMBERSHIP_PLANS.find((p) => p.id === planId);
+  return hit?.name || null;
+};
+
+const applyStaffStorageUsage = (usage, isStaffUser) => {
+  if (!usage || !isStaffUser || usage.staff_complimentary) return usage;
+  const limitGb = MEMBERSHIP_PLANS.find((p) => p.id === "elite")?.storageGB ?? 300;
+  const limitBytes = limitGb * 1024 ** 3;
+  const usedBytes = Number(usage.used_bytes) || 0;
+  const availableBytes = Math.max(0, limitBytes - usedBytes);
+  return {
+    ...usage,
+    membership_plan: "elite",
+    membership_status: "active",
+    plan_name: "Plan Élite",
+    staff_complimentary: true,
+    limit_gb: limitGb,
+    limit_bytes: limitBytes,
+    available_bytes: availableBytes,
+    available_gb: availableBytes / (1024 ** 3),
+    percent: limitBytes > 0 ? Math.min(100, Math.round((usedBytes / limitBytes) * 1000) / 10) : 0,
+  };
 };
 
 const BANK_FIELD_LABEL_STYLE = {
@@ -631,13 +1775,17 @@ function buildNavCurvePath(activeIndex, total, w = 400) {
   const tabW = w / total;
   const cx = tabW * activeIndex + tabW / 2;
   const r = 34;
-  const shoulder = 14;
+  const baseY = 20;
+  const peakY = 2;
+  const left = cx - r;
+  const right = cx + r;
+  const edgePad = 10;
   return [
-    `M 0 20`,
-    `L ${Math.max(0, cx - r - shoulder)} 20`,
-    `C ${cx - r} 20 ${cx - r * 0.55} 6 ${cx} 2`,
-    `C ${cx + r * 0.55} 6 ${cx + r} 20 ${Math.min(w, cx + r + shoulder)} 20`,
-    `L ${w} 20`,
+    `M 0 ${baseY}`,
+    `L ${Math.max(0, left - edgePad)} ${baseY}`,
+    `Q ${left} ${baseY} ${cx} ${peakY}`,
+    `Q ${right} ${baseY} ${Math.min(w, right + edgePad)} ${baseY}`,
+    `L ${w} ${baseY}`,
     `L ${w} 72`,
     `L 0 72`,
     `Z`,
@@ -669,30 +1817,255 @@ const NavBellIcon = () => (
   </svg>
 );
 
+const VideoPreviewVolumeOnIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M11 5L6 9H2v6h4l5 4V5z" fill="currentColor" />
+    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+  </svg>
+);
+
+const VideoPreviewVolumeOffIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M11 5L6 9H2v6h4l5 4V5z" fill="currentColor" />
+    <path d="M22 9l-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    <path d="M16 9l6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+  </svg>
+);
+
+const PhotographerPhotoCountIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path
+      d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="12" cy="13" r="4" stroke="currentColor" strokeWidth="2" />
+  </svg>
+);
+
+const PhotographerVideoCountIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <rect x="2" y="6" width="13" height="12" rx="2" stroke="currentColor" strokeWidth="2" />
+    <path d="M22 8l-5 4 5 4V8z" fill="currentColor" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+  </svg>
+);
+
+const PhotographerFolderCountIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path
+      d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const formatPhotographerMediaCount = (count) => ((count || 0) > 99 ? "+99" : (count || 0));
+
+const normalizePhotographerCounts = (photographer) => {
+  if (!photographer) return photographer;
+  const photosCount = photographer.photos_count ?? photographer.photos?.[0]?.count ?? 0;
+  const albumsCount = photographer.albums_count ?? photographer.albums?.[0]?.count ?? 0;
+  const videosCount = photographer.videos_count ?? photographer.videos?.[0]?.count ?? 0;
+  const { photos, albums, videos, ...rest } = photographer;
+  return {
+    ...rest,
+    photos_count: photosCount,
+    albums_count: albumsCount,
+    videos_count: videosCount,
+  };
+};
+
+const PhotographerMediaCounts = ({ photographer, style = {} }) => {
+  const ph = normalizePhotographerCounts(photographer);
+  const itemStyle = { display: "inline-flex", alignItems: "center", gap: 4 };
+  return (
+    <div style={{ fontSize: 11, color: "var(--muted)", display: "flex", gap: 8, flexWrap: "wrap", ...style }}>
+      <span style={itemStyle} title="Fotos">
+        <PhotographerPhotoCountIcon />
+        {formatPhotographerMediaCount(ph?.photos_count)}
+      </span>
+      <span style={itemStyle} title="Videos">
+        <PhotographerVideoCountIcon />
+        {formatPhotographerMediaCount(ph?.videos_count)}
+      </span>
+      <span style={itemStyle} title="Álbumes">
+        <PhotographerFolderCountIcon />
+        {formatPhotographerMediaCount(ph?.albums_count)}
+      </span>
+    </div>
+  );
+};
+
+const PhotographerPreviewThumbs = ({ items = [] }) => {
+  const thumbs = (items || []).filter((item) => item?.url).slice(0, 6);
+  if (thumbs.length === 0) return null;
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(3, 1fr)",
+        gap: 3,
+        marginBottom: 10,
+        borderRadius: 8,
+        overflow: "hidden",
+      }}
+    >
+      {thumbs.map((item, index) => (
+        <motion.div
+          key={`${item.type}-${item.id}`}
+          initial={{ opacity: 0, scale: 0.94 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ delay: index * 0.04, duration: 0.22 }}
+          style={{
+            position: "relative",
+            aspectRatio: "1",
+            background: "var(--card)",
+            overflow: "hidden",
+          }}
+        >
+          <img
+            src={item.url}
+            alt=""
+            loading="lazy"
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+          {item.type === "video" && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "grid",
+                placeItems: "center",
+                background: "rgba(0,0,0,0.28)",
+              }}
+            >
+              <AppIcon name="video" size={14} color="#fff" />
+            </div>
+          )}
+        </motion.div>
+      ))}
+    </div>
+  );
+};
+
+const VideoPlayIcon = () => (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M8 5v14l11-7z" />
+  </svg>
+);
+
+const VideoPauseIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <rect x="6" y="5" width="4" height="14" rx="1" />
+    <rect x="14" y="5" width="4" height="14" rx="1" />
+  </svg>
+);
+
+const VideoPreviewViewsIcon = ({ size = 14 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path
+      d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
+  </svg>
+);
+
+const VideoSalesCountIcon = ({ size = 14 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path
+      d="M7 7h10l1 4H6l1-4z"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M7 11v7h10v-7"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinejoin="round"
+    />
+    <path d="M10 14h4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+  </svg>
+);
+
 const CAN_HOVER_VIDEO_PREVIEW =
   typeof window !== "undefined" &&
   window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 
 function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
+  const navRef = useRef(null);
+  const gradId = useId().replace(/:/g, "");
+  const [navWidth, setNavWidth] = useState(() =>
+    typeof window !== "undefined" ? Math.round(window.innerWidth) : 400
+  );
   const activeIndex = Math.max(0, items.findIndex(i => i.id === activeTab));
   const activeItem = items[activeIndex] || items[0];
   const tabPercent = items.length > 0 ? 100 / items.length : 100;
   const isCeoNav = variant === "ceo";
   const iconName = (item) => item.icon || item.id;
   const activeBadge = formatNavBadge(activeItem?.badge);
+  const curvePath = useMemo(
+    () => buildNavCurvePath(activeIndex, items.length, navWidth),
+    [activeIndex, items.length, navWidth]
+  );
+
+  useLayoutEffect(() => {
+    const el = navRef.current;
+    if (!el) return undefined;
+    const update = () => {
+      const w = Math.round(el.getBoundingClientRect().width);
+      if (w > 0) setNavWidth(w);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("orientationchange", update);
+    };
+  }, []);
 
   return (
-    <nav className={`bottom-nav${isCeoNav ? " bottom-nav-ceo" : ""}`} aria-label="Navegación principal">
-      <svg className="bnav-curve" viewBox="0 0 400 72" preserveAspectRatio="none" aria-hidden="true">
+    <nav
+      ref={navRef}
+      className={`bottom-nav${isCeoNav ? " bottom-nav-ceo" : ""}`}
+      aria-label="Navegación principal"
+    >
+      <svg
+        className="bnav-curve"
+        viewBox={`0 0 ${navWidth} 72`}
+        width={navWidth}
+        height={72}
+        preserveAspectRatio="xMidYMin meet"
+        aria-hidden="true"
+      >
         <defs>
-          <linearGradient id="bnavGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+          <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stopColor={isCeoNav ? "rgba(255,194,102,0)" : "rgba(255,107,0,0)"} />
             <stop offset="50%" stopColor={isCeoNav ? "rgba(255,194,102,0.4)" : "rgba(255,107,0,0.35)"} />
             <stop offset="100%" stopColor={isCeoNav ? "rgba(255,194,102,0)" : "rgba(255,107,0,0)"} />
           </linearGradient>
         </defs>
-        <path d={buildNavCurvePath(activeIndex, items.length)} fill="#0e0e0e" />
-        <path d={buildNavCurvePath(activeIndex, items.length)} fill="none" stroke="url(#bnavGrad)" strokeWidth="1" />
+        <path d={curvePath} fill="#0e0e0e" shapeRendering="geometricPrecision" />
+        <path
+          d={curvePath}
+          fill="none"
+          stroke={`url(#${gradId})`}
+          strokeWidth="1"
+          vectorEffect="non-scaling-stroke"
+        />
       </svg>
 
       <motion.div
@@ -848,9 +2221,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
   }, [src]);
 
   return (
-    <div style={{ width: "100%", height: "100%", position: "relative", overflow: "hidden" }}>
+    <ProtectedMedia style={{ width: "100%", height: "100%", position: "relative", overflow: "hidden" }}>
       {imageUrl && (
-        <img src={imageUrl} alt={photographer}
+        <img src={imageUrl} alt={photographer} draggable={false}
           style={{ width: "100%", height: "100%", objectFit: "cover", display: loaded ? "block" : "none" }} />
       )}
       {!purchased && loaded && (
@@ -863,7 +2236,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
           </div>
         </div>
       )}
-    </div>
+    </ProtectedMedia>
   );
 }
 //USE STATES
@@ -873,6 +2246,11 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [pendingPurchase, setPendingPurchase] = useState(null);
   const [purchased, setPurchased] = useState([]);
   const [payStep, setPayStep] = useState(0);
+  const [cartCheckoutLoading, setCartCheckoutLoading] = useState(false);
+  const [guestCheckoutOpen, setGuestCheckoutOpen] = useState(false);
+  const [guestCheckoutLoading, setGuestCheckoutLoading] = useState(false);
+  const [guestClaimToken, setGuestClaimToken] = useState(null);
+  const guestCheckoutResolverRef = useRef(null);
   const [activeTab, setActiveTab] = useState("feed");
   const [searchTerm, setSearchTerm] = useState("");
   const [photos, setPhotos] = useState([]);
@@ -900,6 +2278,13 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [editForm, setEditForm] = useState({ name: "", bio: "", handle: "", phone: "", instagram: "", tiktok: "", facebook: "", telegram: "", whatsapp: "" });
   const [editMode, setEditMode] = useState(false);
   const [editLoading, setEditLoading] = useState(false);
+  const [storageUsage, setStorageUsage] = useState(null);
+  const [storageItems, setStorageItems] = useState({ photos: [], videos: [] });
+  const [storageManagerOpen, setStorageManagerOpen] = useState(false);
+  const [editMembershipOpen, setEditMembershipOpen] = useState(false);
+  const [membershipSaving, setMembershipSaving] = useState(false);
+  const [storageTab, setStorageTab] = useState("photos");
+  const [storageLoading, setStorageLoading] = useState(false);
   const [avatarFile, setAvatarFile] = useState(null);
   const [avatarLoading, setAvatarLoading] = useState(false);
   const [phoneCountry, setPhoneCountry] = useState("+502");
@@ -910,6 +2295,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [photographerPhotos, setPhotographerPhotos] = useState([]);
   const [detailReturnView, setDetailReturnView] = useState(VIEWS.PHOTOGRAPHERS);
   const [mySubscriptions, setMySubscriptions] = useState([]);
+  const [subscriptionUsage, setSubscriptionUsage] = useState({});
+  const [claimingMediaId, setClaimingMediaId] = useState(null);
   const [announcements, setAnnouncements] = useState([]);
   const [announcementForm, setAnnouncementForm] = useState({ title: "", body: "", image_url: "" });
   const [userRole, setUserRole] = useState(null);
@@ -953,7 +2340,54 @@ function WatermarkedImage({ src, photographer, purchased }) {
     (video) => Boolean(video && user && video.photographer?.user_id === user.id),
     [user]
   );
+  const toastTimerRef = useRef(null);
+  const showToast = (msg) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setMessage(msg);
+    toastTimerRef.current = setTimeout(() => {
+      setMessage("");
+      toastTimerRef.current = null;
+    }, 3000);
+  };
+
+  const requestGuestCheckoutDetails = useCallback(() => {
+    const draft = readGuestCheckoutDraft();
+    if (draft?.guest_email && draft?.guest_name) {
+      return Promise.resolve(draft);
+    }
+    return new Promise((resolve, reject) => {
+      guestCheckoutResolverRef.current = { resolve, reject };
+      setGuestCheckoutOpen(true);
+    });
+  }, []);
+
+  const handleGuestCheckoutSubmit = (fields) => {
+    writeGuestCheckoutDraft(fields);
+    setGuestCheckoutOpen(false);
+    guestCheckoutResolverRef.current?.resolve(fields);
+    guestCheckoutResolverRef.current = null;
+  };
+
+  const handleGuestCheckoutClose = () => {
+    setGuestCheckoutOpen(false);
+    guestCheckoutResolverRef.current?.reject(new Error("cancelled"));
+    guestCheckoutResolverRef.current = null;
+  };
+
+  const buildCheckoutHeaders = () => {
+    const headers = { "Content-Type": "application/json" };
+    if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`;
+    return headers;
+  };
+
+  const getGuestCheckoutFields = async () => {
+    if (session?.access_token) return {};
+    return requestGuestCheckoutDetails();
+  };
   const isLoggedIn = authReady && Boolean(user && session?.access_token);
+  const cart = useShoppingCart({ isLoggedIn, showToast });
+  const [cartOpenSignal, setCartOpenSignal] = useState(0);
+  const openCart = useCallback(() => setCartOpenSignal((n) => n + 1), []);
   const [showPassword, setShowPassword] = useState(false);
   const [showSubscribeModal, setShowSubscribeModal] = useState(false);
   const [showManageSubscriptions, setShowManageSubscriptions] = useState(false);
@@ -967,11 +2401,16 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [profileSearchInput, setProfileSearchInput] = useState("");
   const [profileSearchQuery, setProfileSearchQuery] = useState("");
   const [profileSearchRan, setProfileSearchRan] = useState(false);
+  const [myProfileSearchInput, setMyProfileSearchInput] = useState("");
+  const [myProfileSearchQuery, setMyProfileSearchQuery] = useState("");
   const [albumForm, setAlbumForm] = useState({ name: "", event_date: "" });
   const [showAlbumModal, setShowAlbumModal] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedPhotos, setSelectedPhotos] = useState(new Set());
+  const [videoSelectionMode, setVideoSelectionMode] = useState(false);
+  const [selectedVideoIds, setSelectedVideoIds] = useState(new Set());
+  const [videoBulkDeleteProgress, setVideoBulkDeleteProgress] = useState(null);
   const [profileTab, setProfileTab] = useState("medios");
   const [posts, setPosts] = useState([]);
   const [postsLoading, setPostsLoading] = useState(false);
@@ -980,15 +2419,6 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [globalLoading, setGlobalLoading] = useState({ active: false, message: "" });
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const authSubmittingRef = useRef(false);
-  const toastTimerRef = useRef(null);
-  const showToast = (msg) => {
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    setMessage(msg);
-    toastTimerRef.current = setTimeout(() => {
-      setMessage("");
-      toastTimerRef.current = null;
-    }, 3000);
-  };
 
   const clearGoogleOAuthUi = useCallback(() => {
     authSubmittingRef.current = false;
@@ -1077,10 +2507,13 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const heroVideoRef = useRef(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMode, setSearchMode] = useState(false);
+  const [searchSource, setSearchSource] = useState(null);
   const [unifiedSearch, setUnifiedSearch] = useState({ photographers: [], photos: [] });
   const [searchLoading, setSearchLoading] = useState(false);
   const [handleAvailable, setHandleAvailable] = useState(null);
   const [photoViewMode, setPhotoViewMode] = useState("grid");
+  const [videoViewMode, setVideoViewMode] = useState("grid");
+  const [galleryPhotoViewMode, setGalleryPhotoViewMode] = useState("grid");
   const [allSubscriptions, setAllSubscriptions] = useState([]);
   const [subsLoading, setSubsLoading] = useState(false);
   const [withdrawals, setWithdrawals] = useState([]);
@@ -1109,15 +2542,29 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [uploadFiles, setUploadFiles] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({});
   const [videos, setVideos] = useState([]);
-  const [videoSearchQuery, setVideoSearchQuery] = useState("");
-  const [videoSearchRan, setVideoSearchRan] = useState(false);
-  const [videosLoading, setVideosLoading] = useState(false);
+  const [videoFeedRefreshToken, setVideoFeedRefreshToken] = useState(0);
+  const [feedFocusVideoId, setFeedFocusVideoId] = useState(null);
+  const contentProtectionActive = useMemo(() => (
+    view === VIEWS.VIDEO_SEARCH
+    || view === VIEWS.PHOTOGRAPHERS
+    || view === VIEWS.PHOTOGRAPHER_PROFILE
+    || view === VIEWS.MY_GALLERY
+    || Boolean(selected)
+  ), [view, selected]);
+  useContentProtection(contentProtectionActive);
+  const [visualSearchLoading, setVisualSearchLoading] = useState(false);
+  const [visualSearchDetected, setVisualSearchDetected] = useState(null);
+  const [visualSearchMessage, setVisualSearchMessage] = useState("");
+  const [visualSearchPreview, setVisualSearchPreview] = useState(null);
+  const visualSearchInputRef = useRef(null);
   const [photographerVideos, setPhotographerVideos] = useState([]);
   const [videoPreviewActive, setVideoPreviewActive] = useState({});
   const [videoPreviewProgress, setVideoPreviewProgress] = useState({});
-  const [videoPreviewMuted, setVideoPreviewMuted] = useState(true);
+  const [videoPreviewMuted, setVideoPreviewMuted] = useState({});
   const [videoDurationCache, setVideoDurationCache] = useState({});
   const [analyzingMedia, setAnalyzingMedia] = useState(false);
+  const [aiAnalysisProgress, setAiAnalysisProgress] = useState(0);
+  const [aiAnalysisStep, setAiAnalysisStep] = useState("");
   const [autoTags, setAutoTags] = useState(null);
   const [pendingDeliveries, setPendingDeliveries] = useState([]);
   const [pendingDeliveriesLoading, setPendingDeliveriesLoading] = useState(false);
@@ -1125,18 +2572,23 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [hqUploads, setHqUploads] = useState({});
   const [videoMediaReady, setVideoMediaReady] = useState({});
   const [videoQueue, setVideoQueue] = useState([]);
+  const videoQueueRef = useRef([]);
+  const batchAiRunRef = useRef(0);
+  const videoAiLockRef = useRef(Promise.resolve());
+  const videoItemAiPromiseRef = useRef(new Map());
+  const queueAiProgressThrottleRef = useRef(new Map());
   const [videoThumbnailFile, setVideoThumbnailFile] = useState(null);
   const [videoDurationSeconds, setVideoDurationSeconds] = useState(null);
   const [videoForm, setVideoForm] = useState({
     price: "", sector: "", event_time_start: "", event_time_end: "", album_id: "",
   });
   const [videoUploadLoading, setVideoUploadLoading] = useState(false);
+  const [videoBatchReviewing, setVideoBatchReviewing] = useState(false);
   const [myVideos, setMyVideos] = useState([]);
   const [myVideosLoading, setMyVideosLoading] = useState(false);
   const [editingVideoId, setEditingVideoId] = useState(null);
   const [videoEditForm, setVideoEditForm] = useState({});
   const [videoEditSaving, setVideoEditSaving] = useState(false);
-  const [videoEditPayPalDisclosureAccepted, setVideoEditPayPalDisclosureAccepted] = useState(false);
   const [videoEditOriginal, setVideoEditOriginal] = useState(null);
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [videoEditingNotesDraft, setVideoEditingNotesDraft] = useState("");
@@ -1145,18 +2597,41 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [videoEditingNotesEditing, setVideoEditingNotesEditing] = useState(false);
   const [purchasedVideos, setPurchasedVideos] = useState([]);
   const [buyerGalleryModalIdx, setBuyerGalleryModalIdx] = useState(null);
+  const [buyerGalleryMediaTab, setBuyerGalleryMediaTab] = useState("photos");
+  const [buyerGalleryViewMode, setBuyerGalleryViewMode] = useState("grid");
   const buyerGallerySwipeRef = useRef(0);
+  const buyerGalleryTabDefaultedRef = useRef(false);
   const videoRefs = useRef({});
   const playingVideos = useRef([]);
+  const externalVideoPreviewStopsRef = useRef(new Map());
+  const previewViewTrackedRef = useRef(new Set());
   const videoPreviewHandlers = useRef({});
   const videoPurchasesRef = useRef([]);
+  const videoAiAnalysisGenRef = useRef(0);
 
   useEffect(() => {
     videoPurchasesRef.current = videoPurchases;
   }, [videoPurchases]);
 
+  useEffect(() => {
+    videoQueueRef.current = videoQueue;
+  }, [videoQueue]);
+
+  useEffect(() => {
+    if (!user) {
+      buyerGalleryTabDefaultedRef.current = false;
+      return;
+    }
+    if (profile?.verification_status === "approved") return;
+    if (buyerGalleryTabDefaultedRef.current || purchasesLoading) return;
+    const photoCount = purchases.length;
+    const videoCount = videoPurchases.length;
+    if (photoCount === 0 && videoCount === 0) return;
+    setBuyerGalleryMediaTab(videoCount > photoCount ? "videos" : "photos");
+    buyerGalleryTabDefaultedRef.current = true;
+  }, [user, profile, purchases, videoPurchases, purchasesLoading]);
+
   const handleBuyVideo = (video) => {
-    if (!user) { setMessage(""); setView(VIEWS.AUTH); return; }
     if (isOwnVideo(video)) {
       showToast("No podés comprar tu propio video.");
       return;
@@ -1378,6 +2853,18 @@ function WatermarkedImage({ src, photographer, purchased }) {
     setMySubscriptions([]);
   }, []);
 
+  const refreshSubscriptionUsage = useCallback(async () => {
+    if (!session?.access_token) return;
+    try {
+      const { res, data } = await apiJson("/api/subscriptions/usage", {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) setSubscriptionUsage(data.usage || {});
+    } catch (err) {
+      console.error(err);
+    }
+  }, [session]);
+
   const refreshMySubscriptions = useCallback(async () => {
     if (!session?.access_token) return;
     try {
@@ -1388,11 +2875,47 @@ function WatermarkedImage({ src, photographer, purchased }) {
     } catch (err) {
       console.error(err);
     }
-  }, [session]);
+    refreshSubscriptionUsage();
+  }, [session, refreshSubscriptionUsage]);
 
   const paymentSyncInFlight = useRef(false);
   const vendorDashboardInFlight = useRef(false);
   const reconcileAtRef = useRef(0);
+  const prevViewRef = useRef(view);
+
+  const clearHomeUrl = () => {
+    window.history.replaceState({}, document.title, "/");
+  };
+
+  const updatePhotographerProfileUrl = (photographer) => {
+    if (!photographer?.id) return;
+    const handleSlug = String(photographer?.handle || "").replace(/^@/, "").trim();
+    const nextPath = isValidProfileHandle(handleSlug)
+      ? `/@${handleSlug}`
+      : `/@id/${photographer.id}`;
+    const currentPath = window.location.pathname.replace(/\/$/, "") || "/";
+    if (currentPath === nextPath) {
+      window.history.replaceState({}, document.title, nextPath);
+    } else {
+      window.history.pushState({}, document.title, nextPath);
+    }
+  };
+
+  useEffect(() => {
+    const prev = prevViewRef.current;
+    if (prev === VIEWS.PHOTOGRAPHER_PROFILE && view !== VIEWS.PHOTOGRAPHER_PROFILE) {
+      clearHomeUrl();
+    }
+    if (view === VIEWS.PHOTOGRAPHER_PROFILE && prev !== VIEWS.PHOTOGRAPHER_PROFILE) {
+      if (selectedPhotographer?.id) {
+        updatePhotographerProfileUrl(selectedPhotographer);
+      }
+    }
+    if (view === VIEWS.PHOTOGRAPHERS && prev !== VIEWS.PHOTOGRAPHERS) {
+      clearHomeUrl();
+    }
+    prevViewRef.current = view;
+  }, [view, selectedPhotographer]);
   const RECONCILE_COOLDOWN_MS = 5 * 60 * 1000;
 
   const finalizePhotoPurchase = useCallback(async (photoId) => {
@@ -1430,6 +2953,129 @@ function WatermarkedImage({ src, photographer, purchased }) {
     showToast("Compra registrada. Tu video estará disponible en Compras en las próximas 24 horas.");
   }, [videos]);
 
+  const finalizeCartPurchase = useCallback(async (photoIds = [], videoIds = []) => {
+    clearPendingPayment();
+    cart.clearCart();
+    if (photoIds.length) {
+      setPurchased((prev) => [...new Set([...prev, ...photoIds])]);
+    }
+    if (videoIds.length) {
+      setPurchasedVideos((prev) => [...new Set([...prev, ...videoIds])]);
+    }
+    setPayStep(0);
+    setSelected(null);
+    setSelectedVideo(null);
+    setView(VIEWS.MY_PURCHASES);
+    setActiveTab("purchases");
+    try {
+      await fetchPurchases();
+    } catch (err) {
+      console.error("fetchPurchases after cart buy:", err);
+    }
+    const total = photoIds.length + videoIds.length;
+    showToast(total > 1 ? `¡${total} compras confirmadas!` : "¡Compra confirmada!");
+  }, [cart]);
+
+  const handleCartCheckout = async ({ items, total, closePanel }) => {
+    if (!items?.length) return;
+    if (Number(total) < RECURRENTE_MIN_GTQ) {
+      showToast(`Recurrente requiere un mínimo de Q${RECURRENTE_MIN_GTQ}. Agregá más ítems al carrito.`);
+      return;
+    }
+    try {
+      const guestFields = await getGuestCheckoutFields();
+      setCartCheckoutLoading(true);
+      closePanel?.();
+      const { res, data } = await apiJson(
+        "/api/payments/create-cart-order",
+        {
+          method: "POST",
+          headers: buildCheckoutHeaders(),
+          body: JSON.stringify({
+            items: items.map((item) => ({ type: item.type, id: item.id })),
+            ...guestFields,
+            return_url: buildPaymentReturnUrl({ cart: "1", guest: guestFields.guest_email ? "1" : undefined }),
+            cancel_url: buildPaymentCancelUrl({ cart: "1" }),
+          }),
+        },
+        { wake: true }
+      );
+      if (!res.ok) throw new Error(data.error || "No se pudo iniciar el pago del carrito.");
+      writePendingPayment({
+        kind: "cart",
+        checkoutId: data.checkout_id || data.order_id || null,
+        itemCount: items.length,
+        isGuest: Boolean(data.is_guest || guestFields.guest_email),
+        guestEmail: guestFields.guest_email || null,
+        guestClaimToken: data.guest_claim_token || null,
+      });
+      closePanel?.();
+      await openRecurrenteCheckout(
+        data.approve_url || data.checkout_url,
+        () => (guestFields.guest_email ? syncGuestPendingPayments({ silent: false }) : syncPendingPayments({ silent: false }))
+      );
+    } catch (err) {
+      if (err?.message !== "cancelled") {
+        showToast(err?.message || "No se pudo procesar el carrito.");
+      }
+    } finally {
+      setCartCheckoutLoading(false);
+    }
+  };
+
+  const syncGuestPendingPayments = useCallback(async ({ silent = false } = {}) => {
+    const pending = readPendingPayment();
+    const params = new URLSearchParams(window.location.search);
+    const checkoutId =
+      pending?.checkoutId ||
+      params.get("checkout_id") ||
+      params.get("order_id") ||
+      undefined;
+    const guestEmail =
+      pending?.guestEmail ||
+      readGuestCheckoutDraft()?.guest_email ||
+      undefined;
+
+    if (!checkoutId || !guestEmail) return false;
+    if (paymentSyncInFlight.current) return false;
+
+    paymentSyncInFlight.current = true;
+    try {
+      if (!silent) {
+        setGlobalLoading({ active: true, message: "Confirmando tu pago..." });
+      }
+      const { res, data } = await apiJson(
+        "/api/payments/sync-guest-pending",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ checkout_id: checkoutId, guest_email: guestEmail }),
+        },
+        { wake: true }
+      );
+      if (!res.ok) throw new Error(data.error || "No se pudo confirmar el pago.");
+      clearPendingPayment();
+      clearGuestCheckoutDraft();
+      cart.clearCart();
+      const token = data.guest_claim_token || pending?.guestClaimToken;
+      if (token) {
+        setGuestClaimToken(token);
+        setView(VIEWS.GUEST_SUCCESS);
+      } else {
+        showToast("¡Compra confirmada! Revisá tu correo.");
+        setView(VIEWS.PHOTOGRAPHERS);
+      }
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return true;
+    } catch (err) {
+      if (!silent) showToast(err.message || "No se pudo confirmar tu pago.");
+      return false;
+    } finally {
+      paymentSyncInFlight.current = false;
+      if (!silent) setGlobalLoading({ active: false, message: "" });
+    }
+  }, [cart]);
+
   const handlePaymentCancelled = useCallback(() => {
     stopPaymentPolling();
     clearPendingPayment();
@@ -1441,48 +3087,98 @@ function WatermarkedImage({ src, photographer, purchased }) {
   }, []);
 
   const syncPendingPayments = useCallback(async ({ silent = false } = {}) => {
-    if (!session?.access_token || paymentSyncInFlight.current) return false;
-    if (isOAuthCallback() || successMode === "oauth" || successMode === "email") return false;
+    if (!session?.access_token || paymentSyncInFlight.current) {
+      return false;
+    }
+    if (isOAuthCallback() || successMode === "oauth" || successMode === "email") {
+      return false;
+    }
 
     const pending = readPendingPayment();
     const params = new URLSearchParams(window.location.search);
     const checkoutIdFromUrl = params.get("checkout_id") || params.get("order_id");
     const paymentReturn =
       params.get("payment_return") === "true" ||
-      params.get("paypal_return") === "true" ||
       Boolean(checkoutIdFromUrl);
-    const paypalToken = params.get("token");
     const videoIdFromUrl = params.get("video_id");
-    if (!pending && !paymentReturn && !(paypalToken && videoIdFromUrl)) return false;
-
-    paymentSyncInFlight.current = true;
-    if (!silent) {
-      setGlobalLoading({ active: true, message: "Confirmando tu pago..." });
+    if (!pending && !paymentReturn) {
+      return false;
     }
+
     const hintVideoId = pending?.videoId || videoIdFromUrl || undefined;
     const hintPhotoId = pending?.photoId || params.get("photo_id") || undefined;
     const hintCheckoutId = pending?.checkoutId || checkoutIdFromUrl || undefined;
-    const shouldRetry = paymentReturn || Boolean(paypalToken && hintVideoId);
-    const maxAttempts = shouldRetry ? 12 : 1;
+    const hasSyncHints = Boolean(pending || hintCheckoutId || hintVideoId || hintPhotoId);
+    const SYNC_PENDING_MAX_MS = 10_000;
+    const syncStartedAt = Date.now();
+    const isSyncTimedOut = () => Date.now() - syncStartedAt >= SYNC_PENDING_MAX_MS;
+    const remainingSyncMs = () => Math.max(0, SYNC_PENDING_MAX_MS - (Date.now() - syncStartedAt));
 
-    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const fetchWithTimeout = async (url, options, timeoutMs) => {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { ...options, signal: controller.signal });
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    };
+
+    const stopPendingPaymentSync = () => {
+      stopPaymentPolling();
+      try { sessionStorage.removeItem(PENDING_PAYMENT_KEY); } catch { /* ignore */ }
+      try { localStorage.removeItem(PENDING_PAYMENT_KEY); } catch { /* ignore */ }
+      clearPendingPayment();
+      window.history.replaceState({}, document.title, window.location.pathname);
+    };
+
+    const failSyncPendingTimeout = () => {
+      syncAborted = true;
+      stopPendingPaymentSync();
+      if (!silent) {
+        setGlobalLoading({ active: false, message: "" });
+        showToast("No pudimos confirmar tu pago. Si realizaste el pago, contáctanos.");
+      }
+    };
+
+    let syncAborted = false;
+    paymentSyncInFlight.current = true;
 
     try {
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const syncRes = await fetch("/api/payments/sync-pending", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${session.access_token}`,
+      if (!silent) {
+        setGlobalLoading({ active: true, message: "Confirmando tu pago..." });
+      }
+
+      while (!isSyncTimedOut()) {
+        try {
+        const syncRes = await fetchWithTimeout(
+          "/api/payments/sync-pending",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({
+              video_id: hintVideoId || undefined,
+              photo_id: hintPhotoId || undefined,
+              checkout_id: hintCheckoutId || undefined,
+            }),
           },
-          body: JSON.stringify({
-            video_id: hintVideoId || undefined,
-            photo_id: hintPhotoId || undefined,
-            checkout_id: hintCheckoutId || undefined,
-          }),
-        });
+          Math.max(500, remainingSyncMs())
+        );
         const syncData = await syncRes.json().catch(() => ({}));
-        if (!syncRes.ok) throw new Error(syncData.error || "No se pudo confirmar el pago");
+
+        if (!syncRes.ok) {
+          if (isTerminalPaymentError(syncRes.status, syncData?.error)) {
+            syncAborted = true;
+            stopPendingPaymentSync();
+            return false;
+          }
+          const waitMs = Math.min(2000, remainingSyncMs());
+          if (waitMs > 0) await sleep(waitMs);
+          continue;
+        }
 
         if (syncData.subscriptions?.length) {
           stopPaymentPolling();
@@ -1497,6 +3193,19 @@ function WatermarkedImage({ src, photographer, purchased }) {
         }
 
         const purchase = syncData.purchases?.[0];
+        const videoPurchase = syncData.video_purchases?.[0];
+        const photoIds = (syncData.purchases || []).map((row) => row.photo_id).filter(Boolean);
+        const videoIds = (syncData.video_purchases || []).map((row) => row.video_id).filter(Boolean);
+        const multiCartPurchase = photoIds.length + videoIds.length > 1 || pending?.kind === "cart";
+
+        if (multiCartPurchase && (photoIds.length || videoIds.length)) {
+          stopPaymentPolling();
+          await closePaymentBrowser();
+          await finalizeCartPurchase(photoIds, videoIds);
+          window.history.replaceState({}, document.title, window.location.pathname);
+          return true;
+        }
+
         if (purchase?.photo_id) {
           stopPaymentPolling();
           await closePaymentBrowser();
@@ -1505,7 +3214,6 @@ function WatermarkedImage({ src, photographer, purchased }) {
           return true;
         }
 
-        const videoPurchase = syncData.video_purchases?.[0];
         if (videoPurchase?.video_id) {
           stopPaymentPolling();
           await closePaymentBrowser();
@@ -1514,130 +3222,109 @@ function WatermarkedImage({ src, photographer, purchased }) {
           return true;
         }
 
-        const resolvedVideoId = hintVideoId;
-        if (paypalToken && resolvedVideoId) {
-          const res = await fetch("/api/payments/capture-video-paypal-order", {
+        let terminalFailure = false;
+
+        const attemptCapture = async (url, body) => {
+          const res = await fetch(url, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
               Authorization: `Bearer ${session.access_token}`,
             },
-            body: JSON.stringify({
-              order_id: paypalToken,
-              paypal_order_id: paypalToken,
-              video_id: resolvedVideoId,
-            }),
+            body: JSON.stringify(body),
           });
           const data = await res.json().catch(() => ({}));
-          if (res.ok) {
+          if (res.ok) return { ok: true };
+          if (isTerminalPaymentError(res.status, data?.error)) {
+            return { ok: false, terminal: true };
+          }
+          return { ok: false, terminal: false };
+        };
+
+        const resolvedVideoId = hintVideoId;
+        if (pending?.kind === "cart" && (pending.checkoutId || hintCheckoutId)) {
+          const result = await attemptCapture("/api/payments/capture-cart-order", {
+            checkout_id: pending.checkoutId || hintCheckoutId || undefined,
+            order_id: pending.checkoutId || hintCheckoutId || undefined,
+          });
+          if (result.ok) {
             stopPaymentPolling();
             await closePaymentBrowser();
-            await finalizeVideoPurchase(resolvedVideoId);
+            const retryRes = await fetchWithTimeout(
+              "/api/payments/sync-pending",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({ checkout_id: pending.checkoutId || hintCheckoutId || undefined }),
+              },
+              Math.max(500, remainingSyncMs())
+            );
+            const retryData = await retryRes.json().catch(() => ({}));
+            const photoIds = (retryData.purchases || []).map((row) => row.photo_id).filter(Boolean);
+            const videoIds = (retryData.video_purchases || []).map((row) => row.video_id).filter(Boolean);
+            await finalizeCartPurchase(photoIds, videoIds);
             window.history.replaceState({}, document.title, window.location.pathname);
             return true;
           }
+          if (result.terminal) terminalFailure = true;
         }
 
         if (pending?.kind === "video" && pending.videoId) {
-          if (pending.provider === "paypal" && (pending.orderId || paypalToken)) {
-            const res = await fetch("/api/payments/capture-video-paypal-order", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${session.access_token}`,
-              },
-              body: JSON.stringify({
-                order_id: pending.orderId || paypalToken,
-                paypal_order_id: pending.orderId || paypalToken,
-                video_id: pending.videoId,
-              }),
-            });
-            if (res.ok) {
-              stopPaymentPolling();
-              await closePaymentBrowser();
-              await finalizeVideoPurchase(pending.videoId);
-              window.history.replaceState({}, document.title, window.location.pathname);
-              return true;
-            }
-          } else {
-            const res = await fetch("/api/payments/capture-video-order", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${session.access_token}`,
-              },
-              body: JSON.stringify({
-                checkout_id: pending.checkoutId || hintCheckoutId || undefined,
-                order_id: pending.checkoutId || hintCheckoutId || undefined,
-                video_id: pending.videoId,
-              }),
-            });
-            if (res.ok) {
-              stopPaymentPolling();
-              await closePaymentBrowser();
-              await finalizeVideoPurchase(pending.videoId);
-              window.history.replaceState({}, document.title, window.location.pathname);
-              return true;
-            }
-          }
-        } else if (hintVideoId && (paymentReturn || paypalToken)) {
-          const res = await fetch("/api/payments/capture-video-order", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${session.access_token}`,
-            },
-            body: JSON.stringify({
-              checkout_id: hintCheckoutId || undefined,
-              order_id: hintCheckoutId || undefined,
-              video_id: hintVideoId,
-            }),
+          const result = await attemptCapture("/api/payments/capture-video-order", {
+            checkout_id: pending.checkoutId || hintCheckoutId || undefined,
+            order_id: pending.checkoutId || hintCheckoutId || undefined,
+            video_id: pending.videoId,
           });
-          if (res.ok) {
+          if (result.ok) {
+            stopPaymentPolling();
+            await closePaymentBrowser();
+            await finalizeVideoPurchase(pending.videoId);
+            window.history.replaceState({}, document.title, window.location.pathname);
+            return true;
+          }
+          if (result.terminal) terminalFailure = true;
+        } else if (resolvedVideoId && paymentReturn) {
+          const result = await attemptCapture("/api/payments/capture-video-order", {
+            checkout_id: hintCheckoutId || undefined,
+            order_id: hintCheckoutId || undefined,
+            video_id: hintVideoId,
+          });
+          if (result.ok) {
             stopPaymentPolling();
             await closePaymentBrowser();
             await finalizeVideoPurchase(hintVideoId);
             window.history.replaceState({}, document.title, window.location.pathname);
             return true;
           }
+          if (result.terminal) terminalFailure = true;
         }
 
         if (pending?.kind === "photo" && pending.photoId) {
-          const res = await fetch("/api/payments/capture-order", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${session.access_token}`,
-            },
-            body: JSON.stringify({
-              checkout_id: pending.checkoutId || hintCheckoutId || undefined,
-              order_id: pending.checkoutId || hintCheckoutId || undefined,
-              photo_id: pending.photoId,
-            }),
+          const result = await attemptCapture("/api/payments/capture-order", {
+            checkout_id: pending.checkoutId || hintCheckoutId || undefined,
+            order_id: pending.checkoutId || hintCheckoutId || undefined,
+            photo_id: pending.photoId,
           });
-          if (res.ok) {
+          if (result.ok) {
             stopPaymentPolling();
             await closePaymentBrowser();
             await finalizePhotoPurchase(pending.photoId);
             window.history.replaceState({}, document.title, window.location.pathname);
             return true;
           }
+          if (result.terminal) terminalFailure = true;
         }
 
         if (pending?.kind === "subscription" && pending.photographerId) {
-          const res = await fetch("/api/payments/capture-subscription-order", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${session.access_token}`,
-            },
-            body: JSON.stringify({
-              checkout_id: pending.checkoutId || undefined,
-              order_id: pending.checkoutId || undefined,
-              photographer_id: pending.photographerId,
-            }),
+          const result = await attemptCapture("/api/payments/capture-subscription-order", {
+            checkout_id: pending.checkoutId || undefined,
+            order_id: pending.checkoutId || undefined,
+            photographer_id: pending.photographerId,
           });
-          if (res.ok) {
+          if (result.ok) {
             stopPaymentPolling();
             await closePaymentBrowser();
             clearPendingPayment();
@@ -1648,13 +3335,28 @@ function WatermarkedImage({ src, photographer, purchased }) {
             window.history.replaceState({}, document.title, window.location.pathname);
             return true;
           }
+          if (result.terminal) terminalFailure = true;
         }
 
-        if (attempt < maxAttempts - 1) await sleep(2000);
+        if (terminalFailure || (!isPaymentSyncSuccess(syncData) && !hasSyncHints)) {
+          syncAborted = true;
+          stopPendingPaymentSync();
+          break;
+        }
+
+        const waitMs = Math.min(2000, remainingSyncMs());
+        if (waitMs <= 0) break;
+        await sleep(waitMs);
+        } catch (err) {
+          console.error("[syncPendingPayments]", err);
+          const waitMs = Math.min(2000, remainingSyncMs());
+          if (waitMs <= 0) break;
+          await sleep(waitMs);
+        }
       }
 
-      if (shouldRetry && !silent) {
-        showToast("Estamos confirmando tu pago. Reabrí la app en unos segundos si no ves la compra.");
+      if (!syncAborted) {
+        failSyncPendingTimeout();
       }
       return false;
     } catch (err) {
@@ -1668,7 +3370,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
         setGlobalLoading({ active: false, message: "" });
       }
     }
-  }, [session, successMode, finalizePhotoPurchase, finalizeVideoPurchase, refreshMySubscriptions]);
+  }, [session, successMode, finalizePhotoPurchase, finalizeVideoPurchase, finalizeCartPurchase, refreshMySubscriptions]);
 
   const isSubscribedToPhotographer = useCallback(
     (photographerId) =>
@@ -1715,6 +3417,14 @@ function WatermarkedImage({ src, photographer, purchased }) {
 
   // ── Auth ───────────────────────────────────────────────────
   useEffect(() => {
+    const path = window.location.pathname.replace(/\/$/, "") || "/";
+    const profileIdMatch = path.match(/^\/@id\/([0-9a-fA-F-]{36})$/);
+    const profileIdFromUrl = profileIdMatch ? profileIdMatch[1] : null;
+    const handleMatch = path.match(/^\/@([a-zA-Z0-9_]+)$/);
+    const profileHandleFromUrl = handleMatch ? handleMatch[1] : null;
+    const videoIdFromUrl = parseVideoIdFromPath(path)
+      || new URLSearchParams(window.location.search).get("video");
+
     const initAuth = async () => {
       try {
         const handledOAuth = await processOAuthCallbackFromUrl();
@@ -1729,6 +3439,16 @@ function WatermarkedImage({ src, photographer, purchased }) {
           clearGoogleOAuthUi();
         }
         setAuthReady(true);
+        if (videoIdFromUrl) {
+          setFeedFocusVideoId(videoIdFromUrl);
+          setActiveTab("videos");
+          setView(VIEWS.VIDEO_SEARCH);
+          window.history.replaceState({}, document.title, "/");
+        } else if (profileIdFromUrl) {
+          loadPhotographerByHandle(`/@id/${profileIdFromUrl}`);
+        } else if (profileHandleFromUrl) {
+          loadPhotographerByHandle(profileHandleFromUrl);
+        }
       }
     };
     initAuth();
@@ -2044,6 +3764,99 @@ const fetchPurchases = async ({ silent = false } = {}) => {
   }
 };
 
+// ── Reclamos de suscripción (cupos) ──────────────────────────
+const getSubscriptionUsageFor = useCallback(
+  (photographerId, mediaType) => {
+    if (!photographerId) return null;
+    const entry = subscriptionUsage[photographerId];
+    if (!entry) return null;
+    return entry[mediaType] || null;
+  },
+  [subscriptionUsage]
+);
+
+// ¿Puede reclamar gratis este contenido con su suscripción?
+const canClaimMedia = useCallback(
+  (photographerId, mediaType) => {
+    if (!user || !photographerId) return false;
+    if (!isSubscribedToPhotographer(photographerId)) return false;
+    const usage = getSubscriptionUsageFor(photographerId, mediaType);
+    if (!usage) return false;
+    if (usage.unlimited || usage.quota === -1) return true;
+    return (usage.remaining ?? 0) > 0;
+  },
+  [user, isSubscribedToPhotographer, getSubscriptionUsageFor]
+);
+
+const handleClaimMedia = useCallback(
+  async (mediaType, mediaId) => {
+    if (!session?.access_token || !mediaId) return false;
+    setClaimingMediaId(mediaId);
+    try {
+      const { res, data } = await apiJson("/api/subscriptions/claim", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ media_type: mediaType, media_id: mediaId }),
+      });
+      if (!res.ok) {
+        showToast(data.error || "No se pudo reclamar el contenido.");
+        return false;
+      }
+      if (mediaType === "photo") setPurchased((prev) => [...new Set([...prev, mediaId])]);
+      else setPurchasedVideos((prev) => [...new Set([...prev, mediaId])]);
+      await fetchPurchases({ silent: true });
+      await refreshSubscriptionUsage();
+      showToast("Listo: reclamaste este contenido con tu suscripción.");
+      return true;
+    } catch (err) {
+      console.error("handleClaimMedia:", err);
+      showToast("No se pudo reclamar el contenido.");
+      return false;
+    } finally {
+      setClaimingMediaId(null);
+    }
+  },
+  [session, refreshSubscriptionUsage]
+);
+
+// Botón "Reclamar con suscripción" reutilizable (fotos y videos)
+const renderClaimButton = (mediaType, mediaId, photographerId, { compact = false } = {}) => {
+  if (!photographerId || !mediaId) return null;
+  const alreadyHasAccess =
+    mediaType === "photo" ? purchased.includes(mediaId) : purchasedVideos.includes(mediaId);
+  if (alreadyHasAccess) return null;
+  if (!canClaimMedia(photographerId, mediaType)) return null;
+  const usage = getSubscriptionUsageFor(photographerId, mediaType);
+  const unlimited = usage?.unlimited || usage?.quota === -1;
+  const remainingLabel = unlimited ? "incluido" : `quedan ${usage?.remaining ?? 0}`;
+  const busy = claimingMediaId === mediaId;
+  return (
+    <AppButton
+      onClick={(e) => {
+        if (e && e.stopPropagation) e.stopPropagation();
+        handleClaimMedia(mediaType, mediaId);
+      }}
+      disabled={busy}
+      style={{
+        background: "rgba(255,122,0,0.12)",
+        border: "1px solid var(--orange)",
+        color: "var(--orange)",
+        borderRadius: 8,
+        padding: compact ? "5px 10px" : "8px 12px",
+        fontSize: compact ? 11 : 13,
+        fontWeight: 700,
+        cursor: busy ? "default" : "pointer",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {busy ? "Reclamando…" : `★ Reclamar (${remainingLabel})`}
+    </AppButton>
+  );
+};
+
 const downloadFromSignedUrl = async (url, filename) => {
   const fileRes = await fetch(url);
   if (!fileRes.ok) {
@@ -2186,15 +3999,82 @@ const fetchVendorDashboard = async ({ reconcile = false, silent = false } = {}) 
     setPostsLoading(false);
   }
 };
-const fetchPhotographers = async () => {
+const fetchPhotographers = async ({ silent = false } = {}) => {
   try {
-    setPhotographersLoading(true);
+    if (!silent) setPhotographersLoading(true);
     const { res, data } = await apiJson("/api/auth/photographers");
-    if (res.ok) setPhotographers(data.photographers || []);
+    if (res.ok) {
+      setPhotographers((data.photographers || []).map(normalizePhotographerCounts));
+    }
   } catch (err) {
     console.error(err);
   } finally {
-    setPhotographersLoading(false);
+    if (!silent) setPhotographersLoading(false);
+  }
+};
+
+const adjustPhotographerMediaCounts = (photographerId, { photosDelta = 0, videosDelta = 0 } = {}) => {
+  if (!photographerId || (!photosDelta && !videosDelta)) return;
+  setPhotographers((prev) => prev.map((ph) => {
+    if (ph.id !== photographerId) return ph;
+    return {
+      ...ph,
+      photos_count: Math.max(0, (ph.photos_count || 0) + photosDelta),
+      videos_count: Math.max(0, (ph.videos_count || 0) + videosDelta),
+    };
+  }));
+};
+
+const syncPhotographerCardCounts = (photographerId, deltas) => {
+  adjustPhotographerMediaCounts(photographerId, deltas);
+  void fetchPhotographers({ silent: true });
+};
+
+const fetchStorageUsage = async () => {
+  if (!session) return;
+  try {
+    setStorageLoading(true);
+    const { res, data } = await apiJson("/api/auth/storage-usage", {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (res.ok) setStorageUsage(applyStaffStorageUsage(data.usage || null, isStaff));
+  } catch (err) {
+    console.error("fetchStorageUsage:", err);
+  } finally {
+    setStorageLoading(false);
+  }
+};
+
+const fetchStorageItems = async () => {
+  if (!session) return;
+  try {
+    setStorageLoading(true);
+    const { res, data } = await apiJson("/api/auth/storage-items", {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (res.ok) {
+      setStorageItems({
+        photos: data.photos || [],
+        videos: data.videos || [],
+      });
+    }
+  } catch (err) {
+    console.error("fetchStorageItems:", err);
+  } finally {
+    setStorageLoading(false);
+  }
+};
+
+const notifyGalleryPhotoDeleted = (deletedCount = 1) => {
+  if (profile?.id && deletedCount > 0) {
+    syncPhotographerCardCounts(profile.id, { photosDelta: -deletedCount });
+  }
+  fetchPhotos();
+};
+
+const notifyGalleryVideoDeleted = (deletedCount = 1) => {
+  if (profile?.id && deletedCount > 0) {
+    syncPhotographerCardCounts(profile.id, { videosDelta: -deletedCount });
   }
 };
 
@@ -2206,6 +4086,88 @@ const fetchAlbums = async (photographerId) => {
   } catch (err) {
     console.error(err);
   }
+};
+
+const loadPhotographerByHandle = async (handleOrPath) => {
+  const input = String(handleOrPath || "").trim();
+  const idFromPath =
+    input.match(/\/@id\/([0-9a-fA-F-]{36})/i)?.[1]
+    || input.match(/^@id\/([0-9a-fA-F-]{36})/i)?.[1]
+    || (input.match(/^[0-9a-fA-F-]{36}$/) ? input : null);
+
+  if (idFromPath) {
+    fetchPhotographerProfile(idFromPath);
+    setView(VIEWS.PHOTOGRAPHER_PROFILE);
+    return;
+  }
+
+  const slug = input.replace(/^@/, "").replace(/^\/+/, "");
+  const { data, error } = await supabase
+    .from("photographers")
+    .select("*")
+    .in("handle", [slug, `@${slug}`])
+    .eq("active", true)
+    .limit(1)
+    .maybeSingle();
+  if (data && !error) {
+    fetchPhotographerProfile(data.id);
+    setView(VIEWS.PHOTOGRAPHER_PROFILE);
+  }
+};
+
+const handleShareProfile = async (photographer) => {
+  const handleSlug = String(photographer.handle || "").replace(/^@/, "").trim();
+  const handleValid = isValidProfileHandle(handleSlug);
+  const url = handleValid ? `https://motoshot.pro/@${handleSlug}` : "https://motoshot.pro";
+  const text = `Mira las fotos y videos de ${photographer.name} en MotoShot GT 🏍️`;
+
+  if (!handleValid) {
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch (e) {}
+    showToast("Este fotógrafo aún no tiene un nombre de usuario configurado");
+    return;
+  }
+
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: photographer.name, text, url });
+    } catch (e) {}
+  } else {
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast("Link copiado al portapapeles");
+    } catch (e) {}
+  }
+};
+
+// Botón "Compartir perfil" reutilizable (perfil propio y ajeno)
+const renderShareProfileButton = (photographer) => {
+  if (!photographer) return null;
+  return (
+    <div style={{ display: "flex", justifyContent: "center", marginTop: 4, marginBottom: 16 }}>
+      <button
+        type="button"
+        onClick={() => handleShareProfile(photographer)}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 8,
+          background: "rgba(255,122,0,0.12)",
+          border: "1px solid var(--orange)",
+          borderRadius: 22,
+          padding: "8px 18px",
+          color: "var(--orange)",
+          cursor: "pointer",
+          fontSize: 13,
+          fontWeight: 700,
+          fontFamily: "'DM Sans', sans-serif",
+        }}
+      >
+        <ShareProfileGlyph size={15} /> Compartir perfil
+      </button>
+    </div>
+  );
 };
 
 const fetchPhotographerProfile = async (id) => {
@@ -2227,16 +4189,21 @@ const fetchPhotographerProfile = async (id) => {
     if (!profileRes.ok) throw new Error(profileData.error || "No se pudo cargar el perfil");
     if (!videosRes.ok) console.error("fetchPhotographerProfile videos:", videosRes.status);
 
+    const loadedPhotos = profileData.photos || [];
+    const loadedVideos = Array.isArray(videosData) ? videosData : [];
+    const defaultProfileMediaTab = loadedVideos.length > loadedPhotos.length ? "videos" : "photos";
+
     setSelectedPhotographer(profileData.photographer);
-    setPhotographerPhotos(profileData.photos || []);
+    setPhotographerPhotos(loadedPhotos);
     setAlbums(albumsData.albums || []);
-    setPhotographerVideos(Array.isArray(videosData) ? videosData : []);
-    setProfileMediaTab("photos");
+    setPhotographerVideos(loadedVideos);
+    setProfileMediaTab(defaultProfileMediaTab);
     setProfileSearchInput("");
     setProfileSearchQuery("");
     setProfileSearchRan(false);
     setSelectedAlbum(null);
     setSelectedTag(null);
+    updatePhotographerProfileUrl(profileData.photographer);
   } catch (err) {
     console.error("fetchPhotographerProfile:", err);
     setPhotographerVideos([]);
@@ -2689,7 +4656,7 @@ const exportPayrollCsv = () => {
     showToast("No hay filas para exportar.");
     return;
   }
-  const headers = ["Nombre", "Handle", "Email", "Cuenta bancaria", "Ventas semana (Q)", "Saldo disponible (Q)", "A pagar (Q)", "Retiro pendiente (Q)"];
+  const headers = ["Nombre", "Handle", "Email", "Cuenta bancaria", "Ventas semana netas (Q)", "Saldo disponible neto (Q)", "A pagar (Q)", "Retiro pendiente (Q)"];
   const lines = payrollData.rows.map((r) =>
     [
       r.name,
@@ -2759,8 +4726,14 @@ const exportPayrollCsv = () => {
     const pathname = window.location.pathname.replace(/\/$/, "") || "/";
     const isComprasPath = pathname === "/compras";
     const isAbrirPath = pathname === "/abrir";
+    const sharedVideoId = parseVideoIdFromPath(pathname);
     const goto = params.get("goto");
-    if (goto === "compras" || isComprasPath || (isAbrirPath && !goto)) {
+    if (sharedVideoId) {
+      setFeedFocusVideoId(sharedVideoId);
+      setActiveTab("videos");
+      setView(VIEWS.VIDEO_SEARCH);
+      window.history.replaceState({}, document.title, "/");
+    } else if (goto === "compras" || isComprasPath || (isAbrirPath && !goto)) {
       if (isLoggedIn) {
         setActiveTab("purchases");
         setView(VIEWS.MY_PURCHASES);
@@ -2790,6 +4763,21 @@ const exportPayrollCsv = () => {
           } else if (urlStr.includes("goto=entregas")) {
             setActiveTab("deliveries");
             setView(VIEWS.PENDING_DELIVERIES);
+          } else {
+            const videoMatch = urlStr.match(/\/v\/([0-9a-fA-F-]{36})/i);
+            if (videoMatch) {
+              setFeedFocusVideoId(videoMatch[1]);
+              setActiveTab("videos");
+              setView(VIEWS.VIDEO_SEARCH);
+            } else {
+            const profileIdMatch = urlStr.match(/\/@id\/([0-9a-fA-F-]{36})/i);
+            if (profileIdMatch) {
+              loadPhotographerByHandle(`/@id/${profileIdMatch[1]}`);
+            } else {
+              const profileMatch = urlStr.match(/\/@([a-zA-Z0-9_]+)/);
+              if (profileMatch) loadPhotographerByHandle(profileMatch[1]);
+            }
+            }
           }
         });
         removeListener = () => listener.remove();
@@ -3066,70 +5054,502 @@ useEffect(() => {
     return () => window.clearInterval(dashTimer);
   }, [view, profile?.verification_status, profile?.id, session?.access_token]);
 
-  const analyzeMediaWithAI = async (file) => {
-    if (!session?.access_token) return;
-    setAnalyzingMedia(true);
+  const cancelVideoAiAnalysis = () => {
+    videoAiAnalysisGenRef.current += 1;
+    setAnalyzingMedia(false);
     setAutoTags(null);
-    try {
-      let imageBase64;
-      let mimeType;
-      if (file.type.startsWith("video/")) {
-        imageBase64 = await extractVideoFrameBase64(file);
-        mimeType = "image/jpeg";
-      } else {
-        const reader = new FileReader();
-        await new Promise((resolve) => {
-          reader.onload = resolve;
-          reader.readAsDataURL(file);
-        });
-        imageBase64 = reader.result.split(",")[1];
-        mimeType = file.type;
-      }
-      const endpoint = file.type.startsWith("video/") ? "/api/videos/analyze-frame" : "/api/photos/analyze";
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ imageBase64, mimeType }),
-      });
-      const data = await res.json();
-      if (res.ok) setAutoTags(data);
-      else showToast(data.error || "No se pudo analizar el archivo.");
-    } catch (err) {
-      console.error("Error analizando media:", err);
-      showToast("Error al analizar con IA.");
-    } finally {
-      setAnalyzingMedia(false);
-    }
+    setAiAnalysisProgress(0);
+    setAiAnalysisStep("");
   };
 
-  const analyzeVideoFrameTags = async (file) => {
+  const updateAiAnalysisProgress = (pct, step = "") => {
+    setAiAnalysisProgress(Math.max(0, Math.min(100, Math.round(pct))));
+    if (step) setAiAnalysisStep(step);
+  };
+
+  const beginVideoAiAnalysis = () => {
+    videoAiAnalysisGenRef.current += 1;
+    return videoAiAnalysisGenRef.current;
+  };
+
+  const isVideoAiStale = (generation) => videoAiAnalysisGenRef.current !== generation;
+
+  const analyzeVideoFrameTags = async (file, { batch = false, sparseSeeks = false, isCancelled, onProgress } = {}) => {
+    const cancelled = () => (typeof isCancelled === "function" ? isCancelled() : false);
+    const report = (pct, step) => {
+      if (onProgress && !cancelled()) onProgress({ pct, step });
+    };
     if (!session?.access_token) return null;
+    const fileName = file?.name || "sin nombre";
+    aiDebugLog("[analyzeVideoFrameTags]", { fileName, batch, sparseSeeks });
     try {
-      const imageBase64 = await extractVideoFrameBase64(file);
-      const res = await fetch("/api/videos/analyze-frame", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ imageBase64, mimeType: "image/jpeg" }),
+      report(1, "Preparando video...");
+      const { frames, duration: videoDuration } = await extractVideoFramesBase64(file, {
+        sparseSeeks,
+        isCancelled: cancelled,
+        onSeekProgress: (done, total) => {
+          report(2 + (done / Math.max(total, 1)) * 16, `Extrayendo frames (${done}/${total})...`);
+        },
       });
-      const data = await res.json().catch(() => null);
-      return res.ok ? data : null;
-    } catch {
+      if (cancelled()) return null;
+      if (!frames.length) {
+        console.error(`analyzeVideoFrameTags [${fileName}]: no se pudo extraer frame del video`);
+        return null;
+      }
+
+      const duration = videoDuration || Math.max(...frames.map((f) => f.timeSec), 0);
+      let merged = {
+        moto_brand: null,
+        moto_model: null,
+        moto_color: null,
+        helmet_color: null,
+        suit_color: null,
+        dorsal: null,
+        confidence: 0,
+      };
+
+      const apiOpts = {
+        retries: 1,
+        retryDelayMs: 1500,
+        timeoutMs: VISION_API_TIMEOUT_MS,
+      };
+      const pause = async () => {
+        if (batch) {
+          await sleep(350);
+          await yieldToBrowser();
+        }
+      };
+
+      const visionApi = async (path, body, logLabel, { wake = false } = {}) => {
+        try {
+          return await apiJson(path, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify(body),
+          }, { ...apiOpts, wake });
+        } catch (err) {
+          console.warn(`[analyzeVideoFrameTags] ${logLabel} falló:`, err?.message || err);
+          return { res: { ok: false, status: 0 }, data: { error: err?.message } };
+        }
+      };
+
+      const colorFrames = pickColorFrames(frames, duration);
+      const plateFrames = pickPlateOcrFrames(frames, duration);
+      const brandFrames = pickBrandOcrFrames(frames, duration);
+      const verifyStepCount = pickPlateVerifyImages(plateFrames).length;
+      const apiTotal = colorFrames.length * 2
+        + plateFrames.length * countPlateImagesForFrame()
+        + brandFrames.length * countBrandImagesForFrame()
+        + verifyStepCount;
+      let apiStep = 0;
+      const bumpApiProgress = (stepLabel) => {
+        apiStep += 1;
+        report(
+          18 + (apiStep / Math.max(apiTotal, 1)) * 80,
+          `${stepLabel} (${apiStep}/${apiTotal})`
+        );
+      };
+
+      // Colores — recorte del carenado + frame completo (contexto para separar moto del piloto)
+      const colorReads = [];
+      const runColorImage = async (image, source, colorFrame, wake) => {
+        if (!image || cancelled()) return;
+        bumpApiProgress("Detectando colores");
+        const { res, data } = await visionApi(
+          "/api/videos/analyze-colors",
+          { imageBase64: image, mimeType: "image/jpeg" },
+          `analyze-colors ${colorFrame.timeSec}s ${source}`,
+          { wake }
+        );
+        aiDebugLog("[analyzeVideoFrameTags] analyze-colors", {
+          fileName,
+          frame: `${Math.round(colorFrame.timeSec * 10) / 10}s`,
+          source,
+          status: res.status,
+          body: data,
+        });
+        if (res.ok && data) colorReads.push({ ...data, source });
+        await pause();
+      };
+      for (let ci = 0; ci < colorFrames.length; ci += 1) {
+        if (cancelled()) return null;
+        const colorFrame = colorFrames[ci];
+        await runColorImage(colorFrame.motoColorCropBase64 || colorFrame.brandCropBase64, "moto_crop", colorFrame, ci === 0);
+        if (cancelled()) return null;
+        await runColorImage(colorFrame.base64, "hires", colorFrame, false);
+      }
+      const votedColors = voteColorResults(colorReads);
+      if (votedColors) merged = { ...merged, ...votedColors };
+
+      // Placa — mejores recortes, salida anticipada si hay consenso
+      const plateReads = [];
+      const rawPlateReads = [];
+      const runPlateImage = async (image, source, plateFrame) => {
+        if (!image || cancelled()) return;
+        bumpApiProgress("Leyendo placa");
+        const { res, data } = await visionApi(
+          "/api/videos/analyze-plate",
+          { imageBase64: image, mimeType: "image/jpeg" },
+          `analyze-plate ${plateFrame.timeSec}s ${source}`
+        );
+        aiDebugLog("[analyzeVideoFrameTags] analyze-plate", {
+          fileName,
+          frame: `${Math.round(plateFrame.timeSec * 10) / 10}s`,
+          source,
+          status: res.status,
+          body: data,
+        });
+        if (res.ok && data?.dorsal && isSoftPlateCandidate(data.dorsal)) {
+          rawPlateReads.push({ ...data, source });
+          if (isValidGuatemalaPlate(data.dorsal)) plateReads.push({ ...data, source });
+        }
+        await pause();
+      };
+
+      for (let pi = 0; pi < plateFrames.length; pi += 1) {
+        if (cancelled()) return null;
+        if (hasPlateConsensus(plateReads)) break;
+        const plateFrame = plateFrames[pi];
+        const plateImages = pickPlateImagesForFrame(plateFrame);
+        for (let ii = 0; ii < plateImages.length; ii += 1) {
+          if (cancelled()) return null;
+          if (hasPlateConsensus(plateReads)) break;
+          await runPlateImage(plateImages[ii].image, plateImages[ii].source, plateFrame);
+        }
+      }
+
+      // Respaldo placa: si no hubo lectura válida, probar el frame completo en los mejores frames
+      if (!votePlateOcrResults(plateReads) && !cancelled()) {
+        const fallbackPlateFrames = plateFrames.slice(0, 3);
+        for (let pi = 0; pi < fallbackPlateFrames.length; pi += 1) {
+          if (cancelled()) return null;
+          if (hasPlateConsensus(plateReads)) break;
+          await runPlateImage(fallbackPlateFrames[pi].plateBase64, "full", fallbackPlateFrames[pi]);
+          if (votePlateOcrResults(plateReads)) break;
+        }
+      }
+
+      let votedPlate = votePlateOcrResults(plateReads);
+
+      // Verificación OCR en los 2 mejores recortes — sus lecturas se reintegran al voto
+      const verifyImages = pickPlateVerifyImages(plateFrames);
+      for (let vi = 0; vi < verifyImages.length; vi += 1) {
+        if (cancelled()) break;
+        bumpApiProgress("Verificando placa");
+        const { res, data } = await visionApi(
+          "/api/videos/analyze-plate-verify",
+          {
+            imageBase64: verifyImages[vi],
+            mimeType: "image/jpeg",
+            hint: votedPlate || undefined,
+          },
+          "analyze-plate-verify"
+        );
+        aiDebugLog("[analyzeVideoFrameTags] analyze-plate-verify", {
+          fileName,
+          hint: votedPlate,
+          status: res.status,
+          body: data,
+        });
+        if (res.ok && data?.dorsal && isSoftPlateCandidate(data.dorsal)) {
+          rawPlateReads.push({ ...data, source: "tight" });
+          if (isValidGuatemalaPlate(data.dorsal)) plateReads.push({ ...data, source: "tight" });
+        }
+        await pause();
+      }
+      // Recalcular con las lecturas de verificación incluidas (estricto: null si no hay acuerdo)
+      votedPlate = votePlateOcrResults(plateReads);
+      if (votedPlate) merged.dorsal = votedPlate;
+
+      // Marca/modelo — pasada 1: recortes tanque + carenado; frame completo solo como respaldo
+      const brandReads = [];
+      const runBrandImage = async (image, source, brandFrame) => {
+        if (!image || cancelled()) return;
+        bumpApiProgress("Identificando marca y modelo");
+        const { res, data } = await visionApi(
+          "/api/videos/analyze-brand",
+          { imageBase64: image, mimeType: "image/jpeg" },
+          `analyze-brand ${brandFrame.timeSec}s ${source}`
+        );
+          aiDebugLog("[analyzeVideoFrameTags] analyze-brand", {
+          fileName,
+          frame: `${Math.round(brandFrame.timeSec * 10) / 10}s`,
+          source,
+          status: res.status,
+          body: data,
+        });
+        if (res.ok && data?.moto_brand) brandReads.push({ ...data, source });
+        await pause();
+      };
+
+      for (let bi = 0; bi < brandFrames.length; bi += 1) {
+        if (cancelled()) return null;
+        const brandFrame = brandFrames[bi];
+        await runBrandImage(brandFrame.brandTankCropBase64, "crop", brandFrame);
+        if (hasBrandConsensus(brandReads)) break;
+        await runBrandImage(brandFrame.brandCropBase64, "crop", brandFrame);
+        if (hasBrandConsensus(brandReads)) break;
+      }
+
+      // Respaldo: si los recortes no dieron marca, probar frame completo en todos los frames
+      if (!voteBrandOcrResults(brandReads)?.moto_brand && !cancelled()) {
+        for (let bi = 0; bi < brandFrames.length; bi += 1) {
+          if (cancelled()) return null;
+          await runBrandImage(brandFrames[bi].brandBase64, "full", brandFrames[bi]);
+          if (hasBrandConsensus(brandReads)) break;
+        }
+      }
+
+      const votedBrand = voteBrandOcrResults(brandReads);
+      if (votedBrand?.moto_brand) {
+        merged.moto_brand = votedBrand.moto_brand;
+        merged.moto_model = votedBrand.moto_model || null;
+        merged.confidence = Math.max(Number(merged.confidence) || 0, Number(votedBrand.confidence) || 0);
+      }
+
+      if (cancelled()) return null;
+      report(100, "Análisis completado");
+      aiDebugLog("[analyzeVideoFrameTags] resultado final", { fileName, merged });
+      const result = { ...merged, _durationSec: Math.round(duration) };
+      // Liberar los base64 de los frames (varios MB) antes de continuar, para que GC los recupere
+      for (const f of frames) {
+        if (!f) continue;
+        f.base64 = null;
+        f.hiResBase64 = null;
+        f.brandBase64 = null;
+        f.plateBase64 = null;
+        f.brandCropBase64 = null;
+        f.brandTankCropBase64 = null;
+        f.motoColorCropBase64 = null;
+        f.plateCropBase64 = null;
+        f.plateCropWideBase64 = null;
+        f.plateCropRightBase64 = null;
+        f.plateCropLeftBase64 = null;
+        f.plateTightCropBase64 = null;
+      }
+      frames.length = 0;
+      if (batch) {
+        await sleep(300);
+        await yieldToBrowser();
+      }
+      return result;
+    } catch (err) {
+      console.error(`analyzeVideoFrameTags [${fileName}]:`, err?.message || err);
       return null;
     }
   };
 
-  const fileToBase64 = (file) =>
-    new Promise((resolve, reject) => {
+  const analyzeMediaWithAI = async (file) => {
+    if (!session?.access_token) return;
+    const generation = beginVideoAiAnalysis();
+    const isCancelled = () => isVideoAiStale(generation);
+    setAnalyzingMedia(true);
+    setAutoTags(null);
+    setAiAnalysisProgress(0);
+    setAiAnalysisStep("Iniciando análisis...");
+    try {
+      if (file.type.startsWith("video/")) {
+        const data = await runLockedVideoAiAnalysis(null, file, {
+          sparseSeeks: false,
+          isCancelled,
+          onProgress: ({ pct, step }) => {
+            if (!isCancelled()) updateAiAnalysisProgress(pct, step);
+          },
+        });
+        if (isCancelled()) return;
+        const { aiTags } = splitVideoAiTagsResult(data);
+        if (aiTags && hasVideoAiTags(aiTags)) setAutoTags(aiTags);
+        else if (!aiTags) {
+          if (!isCancelled()) showToast("No se pudo extraer un frame del video para analizar.");
+        } else showToast("La IA no detectó tags en este video. Podés editarlos manualmente.");
+        return;
+      }
+
       const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result).split(",")[1] || null);
-      reader.onerror = () => reject(new Error("No se pudo leer el archivo."));
-      reader.readAsDataURL(file);
-    });
+      await new Promise((resolve) => {
+        reader.onload = resolve;
+        reader.readAsDataURL(file);
+      });
+      if (isCancelled()) return;
+      const imageBase64 = reader.result.split(",")[1];
+      const { res, data } = await apiJson("/api/photos/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ imageBase64, mimeType: file.type }),
+      }, { retries: 3, retryDelayMs: 2000, wake: true });
+      if (isCancelled()) return;
+      if (res.ok) setAutoTags(data);
+      else showToast(data.error || "No se pudo analizar el archivo.");
+    } catch (err) {
+      if (!isCancelled()) {
+        console.error("Error analizando media:", err);
+        showToast("Error al analizar con IA.");
+      }
+    } finally {
+      if (!isCancelled()) {
+        setAiAnalysisProgress(100);
+        setAnalyzingMedia(false);
+      }
+      setAiAnalysisStep("");
+    }
+  };
+
+  const patchVideoAiTags = async (videoId, tags) => {
+    if (!session?.access_token || !videoId || !hasVideoAiTags(tags)) return false;
+    try {
+      const res = await fetch(apiUrl(`/api/videos/${videoId}`), {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          moto_brand: tags.moto_brand || "",
+          moto_model: tags.moto_model || "",
+          moto_color: tags.moto_color || "",
+          helmet_color: tags.helmet_color || "",
+          suit_color: tags.suit_color || "",
+          dorsal: tags.dorsal || "",
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        console.error(`patchVideoAiTags [${videoId}]: HTTP ${res.status} — ${data?.error || res.statusText}`);
+      }
+      return res.ok;
+    } catch (err) {
+      console.error(`patchVideoAiTags [${videoId}]:`, err?.message || err);
+      return false;
+    }
+  };
+
+  const acquireVideoAiLock = () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const prev = videoAiLockRef.current;
+    videoAiLockRef.current = prev.then(() => gate);
+    return prev.then(() => release);
+  };
+
+  const runLockedVideoAiAnalysis = async (itemId, file, options = {}) => {
+    const existing = itemId ? videoItemAiPromiseRef.current.get(itemId) : null;
+    if (existing) return existing;
+
+    const task = (async () => {
+      const release = await acquireVideoAiLock();
+      try {
+        if (options?.isCancelled?.()) return null;
+        return await analyzeVideoFrameTags(file, options);
+      } finally {
+        release();
+      }
+    })();
+
+    if (itemId) videoItemAiPromiseRef.current.set(itemId, task);
+    try {
+      return await task;
+    } finally {
+      if (itemId && videoItemAiPromiseRef.current.get(itemId) === task) {
+        videoItemAiPromiseRef.current.delete(itemId);
+      }
+    }
+  };
+
+  const setQueueItemAiStatus = (itemId, aiStatus) => {
+    setVideoQueue((prev) => prev.map((q) => (q.id === itemId ? { ...q, aiStatus } : q)));
+  };
+
+  const updateQueueItemAiProgress = (itemId, pct, step = "") => {
+    const rounded = Math.max(0, Math.min(100, Math.round(pct)));
+    // Evitar re-renders innecesarios: solo actualizar si cambió el paso o el % saltó >=2
+    const last = queueAiProgressThrottleRef.current.get(itemId);
+    if (last && last.step === step && Math.abs(last.pct - rounded) < 2 && rounded !== 100) return;
+    queueAiProgressThrottleRef.current.set(itemId, { pct: rounded, step });
+    setVideoQueue((prev) => prev.map((q) => {
+      if (q.id !== itemId) return q;
+      return {
+        ...q,
+        aiProgress: rounded,
+        ...(step ? { aiStep: step } : {}),
+      };
+    }));
+  };
+
+  const cancelBatchQueueAi = () => {
+    batchAiRunRef.current += 1;
+  };
+
+  const runBatchQueueAiAnalysis = async (items) => {
+    if (!session?.access_token || !items?.length) return;
+    const runId = ++batchAiRunRef.current;
+
+    for (const item of items) {
+      if (batchAiRunRef.current !== runId) return;
+      const queued = videoQueueRef.current.find((q) => q.id === item.id);
+      if (videoQueueRef.current.length > 0 && !queued) continue;
+      if (queued?.aiTags || queued?.aiStatus === "done") continue;
+
+      setQueueItemAiStatus(item.id, "analyzing");
+      updateQueueItemAiProgress(item.id, 0, "Iniciando análisis...");
+      const rawTags = await runLockedVideoAiAnalysis(item.id, item.file, {
+        batch: true,
+        sparseSeeks: false,
+        isCancelled: () => batchAiRunRef.current !== runId
+          || !videoQueueRef.current.some((q) => q.id === item.id),
+        onProgress: ({ pct, step }) => updateQueueItemAiProgress(item.id, pct, step),
+      });
+
+      if (batchAiRunRef.current !== runId) return;
+
+      const { aiTags, durationSeconds } = splitVideoAiTagsResult(rawTags);
+      queueAiProgressThrottleRef.current.delete(item.id);
+      setVideoQueue((prev) => prev.map((q) => {
+        if (q.id !== item.id) return q;
+        return {
+          ...q,
+          aiTags,
+          durationSeconds: durationSeconds ?? q.durationSeconds ?? null,
+          aiStatus: hasVideoAiTags(aiTags) ? "done" : "failed",
+          aiProgress: 100,
+          aiStep: hasVideoAiTags(aiTags) ? "Análisis completado" : "Sin tags detectados",
+        };
+      }));
+      // Pausa entre videos para que el navegador recupere memoria y no se trabe
+      await sleep(250);
+      await yieldToBrowser();
+    }
+  };
+
+  useEffect(() => {
+    if (!session?.access_token || videoQueue.length <= 1 || videoUploadLoading || videoBatchReviewing) return;
+    const needs = videoQueue.filter(
+      (i) => i.status === "pending" && !i.aiStatus && !hasVideoAiTags(i.aiTags)
+    );
+    if (!needs.length || videoQueue.some((i) => i.aiStatus === "analyzing")) return;
+    runBatchQueueAiAnalysis(needs);
+  }, [session?.access_token, videoQueue.length, videoUploadLoading, videoBatchReviewing]);
+
+  const fileToBase64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || null);
+    reader.onerror = () => reject(new Error("No se pudo leer el archivo."));
+    reader.readAsDataURL(file);
+  });
 
   // El video se sube directo a Supabase Storage desde el navegador (el backend
   // en Render no aguanta archivos grandes en memoria). Luego solo se registran
   // los metadatos en el backend.
-  const uploadQueuedVideo = async (item, { thumbnailFile, tags, form, onProgress }) => {
+  const updateQueueItemTag = (itemId, key, value) => {
+    setVideoQueue((prev) => prev.map((q) => {
+      if (q.id !== itemId) return q;
+      return { ...q, aiTags: { ...emptyVideoAiTags(), ...(q.aiTags || {}), [key]: value } };
+    }));
+  };
+
+  const uploadQueuedVideo = async (item, { thumbnailFile, tags, form, onProgress, isBatch = false, skipAiAnalysis = false }) => {
     const file = item.file;
     const ext = videoExtForFile(file);
     const videoId = crypto.randomUUID();
@@ -3137,12 +5557,57 @@ useEffect(() => {
     let thumbnail_path = null;
     let thumbnail_base64 = null;
     const uploadedPaths = [];
+    let aiAnalysisFailed = false;
 
     const cleanupUploaded = () => {
       uploadedPaths.forEach((p) => removeFromSupabaseStorage("videos-preview", p));
     };
 
     try {
+      let videoTags = tags ?? item.aiTags ?? null;
+
+      if (!hasVideoAiTags(videoTags) && !skipAiAnalysis) {
+        const pending = videoItemAiPromiseRef.current.get(item.id);
+        if (pending) {
+          const rawPending = await pending.catch(() => null);
+          const { aiTags, durationSeconds } = splitVideoAiTagsResult(rawPending);
+          videoTags = aiTags;
+          if (hasVideoAiTags(videoTags)) {
+            setQueueItemAiStatus(item.id, "done");
+            setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? {
+              ...q,
+              aiTags: videoTags,
+              durationSeconds: durationSeconds ?? q.durationSeconds ?? null,
+            } : q)));
+          }
+        }
+      }
+
+      if (!hasVideoAiTags(videoTags) && !skipAiAnalysis) {
+        if (isBatch) setQueueItemAiStatus(item.id, "analyzing");
+        const rawTags = await runLockedVideoAiAnalysis(item.id, file, {
+          batch: isBatch,
+          sparseSeeks: false,
+          isCancelled: () => !videoQueueRef.current.some((q) => q.id === item.id),
+        });
+        const { aiTags, durationSeconds } = splitVideoAiTagsResult(rawTags);
+        videoTags = aiTags;
+        if (isBatch) {
+          if (hasVideoAiTags(videoTags)) {
+            setQueueItemAiStatus(item.id, "done");
+            setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? {
+              ...q,
+              aiTags: videoTags,
+              durationSeconds: durationSeconds ?? q.durationSeconds ?? null,
+            } : q)));
+          } else {
+            aiAnalysisFailed = true;
+            setQueueItemAiStatus(item.id, "failed");
+            videoTags = null;
+          }
+        }
+      }
+
       if (thumbnailFile) {
         const thumbExt = imageExtForFile(thumbnailFile);
         thumbnail_path = `${profile.id}/${videoId}/thumbnail_${Date.now()}.${thumbExt}`;
@@ -3176,13 +5641,16 @@ useEffect(() => {
       });
       uploadedPaths.push(storagePath);
 
-      const dur = await readVideoDuration(file).catch(() => null);
-      const videoTags = tags || (await analyzeVideoFrameTags(file));
+      let dur = item.durationSeconds ?? null;
+      if (!dur && !isBatch) {
+        dur = await readVideoDuration(file).catch(() => null);
+      }
 
       const body = {
         video_id: videoId,
         storage_path: storagePath,
         ext,
+        original_filename: file?.name || null,
         duration_seconds: dur || null,
         price: form.price,
         sector: form.sector,
@@ -3197,6 +5665,7 @@ useEffect(() => {
         dorsal: videoTags?.dorsal || "",
         thumbnail_path,
         thumbnail_base64,
+        file_size_bytes: file?.size || null,
       };
 
       const { res, data } = await apiJson("/api/videos/register", {
@@ -3211,6 +5680,17 @@ useEffect(() => {
         cleanupUploaded();
         throw new Error(data?.error || "No se pudo registrar el video.");
       }
+
+      const registeredVideoId = data?.video?.id || videoId;
+      if (isBatch && aiAnalysisFailed) {
+        const rawRetry = await runLockedVideoAiAnalysis(`${item.id}-retry`, file, { batch: true, sparseSeeks: false });
+        const { aiTags: retryTags } = splitVideoAiTagsResult(rawRetry);
+        if (hasVideoAiTags(retryTags)) {
+          const patched = await patchVideoAiTags(registeredVideoId, retryTags);
+          if (patched) setQueueItemAiStatus(item.id, "done");
+        }
+      }
+
       return data;
     } catch (err) {
       cleanupUploaded();
@@ -3224,9 +5704,29 @@ useEffect(() => {
     if (!items.length) return;
 
     const isSingle = videoQueue.length === 1;
+    if (!isSingle && videoQueue.some((i) => i.aiStatus === "analyzing")) {
+      showToast("Esperá a que termine el análisis de todos los videos.");
+      return;
+    }
+
+    // Si hay hora de inicio, la hora de fin es obligatoria (y viceversa)
+    const startT = (videoForm.event_time_start || "").trim();
+    const endT = (videoForm.event_time_end || "").trim();
+    if (startT && !endT) {
+      showToast("Indicá la hora en que terminó la sesión (horario de fin).");
+      return;
+    }
+    if (endT && !startT) {
+      showToast("Indicá la hora de inicio del horario.");
+      return;
+    }
+
     const form = { ...videoForm };
     const singleTags = isSingle ? autoTags : null;
     const queueThumb = videoThumbnailFile;
+
+    batchAiRunRef.current += 1;
+    setVideoBatchReviewing(false);
 
     setVideoUploadLoading(true);
     if (isSingle) {
@@ -3236,12 +5736,25 @@ useEffect(() => {
     let done = 0;
     let failed = 0;
     for (const item of items) {
-      setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "uploading", error: null, progress: 0 } : q)));
+      setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? {
+        ...q,
+        status: "uploading",
+        error: null,
+        progress: 0,
+        aiStatus: q.aiStatus === "done" || q.aiStatus === "failed" ? q.aiStatus : null,
+      } : q)));
       try {
         const onProgress = (pct) => {
           setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, progress: pct } : q)));
         };
-        await uploadQueuedVideo(item, { thumbnailFile: queueThumb, tags: singleTags, form, onProgress });
+        await uploadQueuedVideo(item, {
+          thumbnailFile: queueThumb,
+          tags: isSingle ? singleTags : (item.aiTags ?? emptyVideoAiTags()),
+          form,
+          onProgress,
+          isBatch: !isSingle,
+          skipAiAnalysis: !isSingle,
+        });
         done += 1;
         setVideoQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "done", progress: 100 } : q)));
       } catch (err) {
@@ -3256,7 +5769,9 @@ useEffect(() => {
 
     if (failed === 0) {
       showToast(done === 1 ? "Listo: video subido exitosamente." : `Listo: ${done} videos subidos exitosamente.`);
+      cancelBatchQueueAi();
       setVideoQueue([]);
+      setVideoBatchReviewing(false);
       setVideoThumbnailFile(null);
       setVideoDurationSeconds(null);
       setAutoTags(null);
@@ -3265,6 +5780,52 @@ useEffect(() => {
       showToast(`${done} video(s) subido(s), ${failed} con error. Tocá SUBIR para reintentar los fallidos.`);
     }
     if (profile?.id) fetchMyVideos(profile.id);
+  };
+
+  const handleVideoUploadAction = () => {
+    if (!session?.access_token || !profile?.id || videoUploadLoading) return;
+    const pendingItems = videoQueue.filter((i) => i.status === "pending" || i.status === "error");
+    if (!pendingItems.length) return;
+
+    // Si hay hora de inicio, la hora de fin es obligatoria (y viceversa)
+    const startT = (videoForm.event_time_start || "").trim();
+    const endT = (videoForm.event_time_end || "").trim();
+    if (startT && !endT) {
+      showToast("Indicá la hora en que terminó la sesión (horario de fin).");
+      return;
+    }
+    if (endT && !startT) {
+      showToast("Indicá la hora de inicio del horario.");
+      return;
+    }
+
+    const isSingle = videoQueue.length === 1;
+    if (isSingle) {
+      startVideoQueueUpload();
+      return;
+    }
+
+    if (videoBatchReviewing) {
+      startVideoQueueUpload();
+      return;
+    }
+
+    if (videoQueue.some((i) => i.aiStatus === "analyzing")) {
+      showToast("Esperá a que la IA termine de analizar todos los videos.");
+      return;
+    }
+
+    const allAiFinished = videoQueue.every((i) => i.aiStatus === "done" || i.aiStatus === "failed");
+    if (!allAiFinished) {
+      showToast("Todavía faltan videos por analizar. Esperá un momento.");
+      return;
+    }
+
+    setVideoQueue((prev) => prev.map((q) => ({
+      ...q,
+      aiTags: { ...emptyVideoAiTags(), ...(q.aiTags || {}) },
+    })));
+    setVideoBatchReviewing(true);
   };
 
   const handleVideoSearch = async (query = videoSearchQuery, purchaseRows = null) => {
@@ -3304,6 +5865,109 @@ useEffect(() => {
     }
   };
 
+  const readImageFileAsBase64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("No se pudo leer la imagen"));
+    reader.readAsDataURL(file);
+  });
+
+  const runVisualMotoSearch = async (file) => {
+    if (!file || !String(file.type || "").startsWith("image/")) {
+      showToast("Elegí una imagen de tu moto (JPG, PNG o WebP).");
+      return;
+    }
+
+    setSearchMode(true);
+    setSearchSource("visual");
+    setVisualSearchLoading(true);
+    setSearchLoading(true);
+    setVisualSearchDetected(null);
+    setVisualSearchMessage("");
+    setUnifiedSearch({ photographers: [], photos: [] });
+    if (visualSearchPreview) URL.revokeObjectURL(visualSearchPreview);
+    setVisualSearchPreview(URL.createObjectURL(file));
+
+    try {
+      const imageBase64 = await readImageFileAsBase64(file);
+      const headers = { "Content-Type": "application/json" };
+      if (session?.access_token) {
+        headers.Authorization = `Bearer ${session.access_token}`;
+      }
+      const res = await fetch("/api/search/by-image", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          imageBase64,
+          mimeType: file.type || "image/jpeg",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al buscar por imagen");
+
+      setVisualSearchDetected(data.detected || null);
+      setVisualSearchMessage(data.message || "");
+      setUnifiedSearch({
+        photographers: (data.photographers || []).map(normalizePhotographerCounts),
+        photos: [],
+      });
+    } catch (err) {
+      console.error("runVisualMotoSearch:", err);
+      showToast(err.message || "No se pudo analizar la foto.");
+      setVisualSearchMessage("No se pudo completar la búsqueda visual. Intentá de nuevo.");
+      setUnifiedSearch({ photographers: [], photos: [] });
+    } finally {
+      setVisualSearchLoading(false);
+      setSearchLoading(false);
+    }
+  };
+
+  const handleVisualSearchFile = (fileList) => {
+    const file = fileList?.[0];
+    if (file) runVisualMotoSearch(file);
+  };
+
+  const openVisualSearchImageSource = async () => {
+    if (visualSearchLoading) return;
+
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const file = await pickVisualSearchPhotoFromGallery();
+        runVisualMotoSearch(file);
+      } catch (err) {
+        const cancelled = /cancel|dismiss|abort|user cancelled/i.test(String(err?.message || ""));
+        if (!cancelled) {
+          console.error("openVisualSearchImageSource native:", err);
+          showToast(err?.message || "No se pudo abrir la galería.");
+        }
+      }
+      return;
+    }
+
+    visualSearchInputRef.current?.click();
+  };
+
+  const clearVisualMotoSearch = () => {
+    setVisualSearchDetected(null);
+    setVisualSearchMessage("");
+    if (visualSearchPreview) URL.revokeObjectURL(visualSearchPreview);
+    setVisualSearchPreview(null);
+    if (visualSearchInputRef.current) visualSearchInputRef.current.value = "";
+  };
+
+  const clearAttachedSearchPhoto = () => {
+    clearVisualMotoSearch();
+    if (searchSource === "visual") {
+      setSearchMode(false);
+      setSearchSource(null);
+      setUnifiedSearch({ photographers: [], photos: [] });
+    }
+  };
+
   const refreshCurrentView = useCallback(async () => {
     await Promise.race([
       wakeApiServer({ maxAttempts: 3, delayMs: 800 }),
@@ -3314,15 +5978,12 @@ useEffect(() => {
       case VIEWS.PHOTOGRAPHERS:
         await Promise.all([fetchPhotos(), fetchPhotographers(), fetchAnnouncements()]);
         break;
-      case VIEWS.VIDEO_SEARCH: {
-        let purchaseRows = videoPurchasesRef.current;
+      case VIEWS.VIDEO_SEARCH:
         if (user && session?.access_token) {
-          const result = await fetchPurchases({ silent: true });
-          purchaseRows = result?.videoRows || videoPurchasesRef.current;
+          await fetchPurchases({ silent: true });
         }
-        await handleVideoSearch(videoSearchQuery, purchaseRows);
+        setVideoFeedRefreshToken((token) => token + 1);
         break;
-      }
       case VIEWS.MY_PURCHASES:
         if (user && session) await fetchPurchases();
         break;
@@ -3383,7 +6044,6 @@ useEffect(() => {
     }
   }, [
     view,
-    videoSearchQuery,
     user,
     session,
     profile,
@@ -3399,7 +6059,7 @@ useEffect(() => {
     !showPasswordReset &&
     payStep === 0 &&
     !confirmDialog &&
-    ![VIEWS.AUTH, VIEWS.SUCCESS, VIEWS.RESET_PASSWORD].includes(view);
+    ![VIEWS.AUTH, VIEWS.SUCCESS, VIEWS.RESET_PASSWORD, VIEWS.VIDEO_SEARCH].includes(view);
 
   const { pullDistance, refreshing: pullRefreshing, contentOffset, refreshHoldPx, shouldTransition } = usePullToRefresh({
     onRefresh: refreshCurrentView,
@@ -3416,27 +6076,45 @@ useEffect(() => {
 
   useEffect(() => {
     if (view !== VIEWS.VIDEO_SEARCH) return;
-    setVideoSearchRan(false);
-    setVideoSearchQuery("");
-    let cancelled = false;
-    (async () => {
-      let purchaseRows = videoPurchasesRef.current;
-      if (user && session?.access_token) {
-        const result = await fetchPurchases({ silent: true });
-        purchaseRows = result?.videoRows || videoPurchasesRef.current;
-      }
-      if (!cancelled) await handleVideoSearch("", purchaseRows);
-    })();
-    return () => { cancelled = true; };
+    if (!user || !session?.access_token) return;
+    fetchPurchases({ silent: true }).catch(() => {});
   }, [view, user, session?.access_token]);
 
-  useEffect(() => {
-    Object.values(videoRefs.current).forEach((el) => {
-      if (el) el.muted = videoPreviewMuted;
-    });
-  }, [videoPreviewMuted]);
+  const isVideoPreviewMuted = (videoId) => videoPreviewMuted[videoId] !== false;
 
-  const stopVideoPreview = (videoId) => {
+  const syncPreviewViewsCount = (videoId, previewViews) => {
+    const applyCount = (count) => Number.isFinite(count) ? count : 0;
+    const next = applyCount(previewViews);
+    const bump = (video) => (
+      video?.id === videoId ? { ...video, preview_views: next } : video
+    );
+    setMyVideos((prev) => prev.map(bump));
+    setVideos((prev) => prev.map(bump));
+    setPhotographerVideos((prev) => prev.map(bump));
+  };
+
+  const clearPreviewViewSession = (videoId) => {
+    if (videoId) previewViewTrackedRef.current.delete(videoId);
+  };
+
+  const trackPreviewView = (videoId) => {
+    if (!videoId || previewViewTrackedRef.current.has(videoId)) return;
+    previewViewTrackedRef.current.add(videoId);
+    fetch(apiUrl(`/api/videos/${videoId}/track-view`), { method: "POST" })
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Error al registrar reproducción");
+        if (Number.isFinite(data.preview_views)) {
+          syncPreviewViewsCount(videoId, data.preview_views);
+        }
+      })
+      .catch((err) => {
+        clearPreviewViewSession(videoId);
+        console.error("trackPreviewView:", err?.message || err);
+      });
+  };
+
+  const stopVideoPreview = (videoId, { clearViewSession = false } = {}) => {
     const videoEl = videoRefs.current[videoId];
     const handler = videoPreviewHandlers.current[videoId];
     if (videoEl && handler) {
@@ -3447,20 +6125,40 @@ useEffect(() => {
       videoEl.classList.remove("is-playing");
       videoEl.pause();
       videoEl.currentTime = 0;
+      videoEl.removeAttribute("src");
+      videoEl.load();
     }
     playingVideos.current = playingVideos.current.filter((id) => id !== videoId);
     setVideoPreviewActive((prev) => ({ ...prev, [videoId]: false }));
     setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: 0 }));
+    setVideoPreviewMuted((prev) => ({ ...prev, [videoId]: true }));
+    if (clearViewSession) clearPreviewViewSession(videoId);
   };
 
-  const startVideoPreview = (videoId, durationSeconds) => {
+  const stopAllVideoPreviews = (exceptId = null) => {
+    [...playingVideos.current].forEach((id) => {
+      if (id !== exceptId) stopVideoPreview(id, { clearViewSession: true });
+    });
+    externalVideoPreviewStopsRef.current.forEach((stopFn, id) => {
+      if (id !== exceptId) stopFn();
+    });
+  };
+
+  const startVideoPreview = (videoId, durationSeconds, { userInitiated = false, previewUrl = "" } = {}) => {
     const videoEl = videoRefs.current[videoId];
     if (!videoEl) return;
-    if (playingVideos.current.length >= 3 && !playingVideos.current.includes(videoId)) {
-      stopVideoPreview(playingVideos.current[0]);
-    }
+    stopAllVideoPreviews(videoId);
     if (!playingVideos.current.includes(videoId)) {
       playingVideos.current.push(videoId);
+    }
+
+    setVideoPreviewActive((prev) => ({ ...prev, [videoId]: true }));
+
+    if (previewUrl) {
+      const currentSrc = videoEl.currentSrc || videoEl.getAttribute("src") || "";
+      if (!currentSrc || !currentSrc.includes(previewUrl)) {
+        videoEl.src = previewUrl;
+      }
     }
 
     const onTimeUpdate = () => {
@@ -3468,9 +6166,7 @@ useEffect(() => {
       const progress = Math.min(videoEl.currentTime / previewLimit, 1);
       setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: progress }));
       if (videoEl.currentTime >= previewLimit || videoEl.ended) {
-        videoEl.pause();
-        videoEl.currentTime = 0;
-        setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: 0 }));
+        stopVideoPreview(videoId, { clearViewSession: true });
       }
     };
 
@@ -3479,40 +6175,77 @@ useEffect(() => {
     }
     videoPreviewHandlers.current[videoId] = onTimeUpdate;
     videoEl.addEventListener("timeupdate", onTimeUpdate);
-    videoEl.muted = videoPreviewMuted;
+    if (userInitiated) {
+      setVideoPreviewMuted((prev) => ({ ...prev, [videoId]: false }));
+      videoEl.muted = false;
+      videoEl.volume = 1;
+    } else {
+      videoEl.muted = true;
+    }
     videoEl.classList.add("is-playing");
-    setVideoPreviewActive((prev) => ({ ...prev, [videoId]: true }));
 
     const beginPlay = () => {
       const el = videoRefs.current[videoId];
       if (!el) return;
+      if (userInitiated) {
+        el.muted = false;
+        el.volume = 1;
+      } else {
+        el.muted = true;
+      }
       el.currentTime = 0;
-      el.play().catch(() => {});
+      if (userInitiated) trackPreviewView(videoId);
+      const playPromise = el.play();
+      if (playPromise?.catch) {
+        playPromise.catch(() => stopVideoPreview(videoId));
+      }
     };
 
-    if (videoEl.readyState >= 2) {
-      beginPlay();
-    } else {
-      const onReady = () => {
-        videoEl.removeEventListener("loadeddata", onReady);
+    const ensurePlay = () => {
+      if (videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        beginPlay();
+        return;
+      }
+      const onCanPlay = () => {
+        videoEl.removeEventListener("canplay", onCanPlay);
         beginPlay();
       };
-      videoEl.addEventListener("loadeddata", onReady);
-      if (videoEl.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+      videoEl.addEventListener("canplay", onCanPlay);
+      if (videoEl.networkState === HTMLMediaElement.NETWORK_EMPTY || videoEl.readyState < HTMLMediaElement.HAVE_METADATA) {
         videoEl.load();
       }
+    };
+
+    ensurePlay();
+  };
+
+  const playVideoPreview = (videoId, durationSeconds, previewUrl = "") => {
+    if (videoPreviewActive[videoId]) {
+      stopVideoPreview(videoId);
+      return;
     }
+    stopAllVideoPreviews(videoId);
+    startVideoPreview(videoId, durationSeconds, { userInitiated: true, previewUrl });
   };
 
-  const toggleVideoPreview = (videoId, durationSeconds) => {
-    if (videoPreviewActive[videoId]) stopVideoPreview(videoId);
-    else startVideoPreview(videoId, durationSeconds);
-  };
+  useEffect(() => {
+    return () => {
+      stopAllVideoPreviews();
+      playingVideos.current = [];
+      previewViewTrackedRef.current.clear();
+    };
+  }, [view]);
 
-  const toggleVideoPreviewMute = (e) => {
+  const toggleVideoPreviewMute = (e, videoId) => {
     e.stopPropagation();
     e.preventDefault();
-    setVideoPreviewMuted((prev) => !prev);
+    const nextMuted = !isVideoPreviewMuted(videoId);
+    setVideoPreviewMuted((prev) => ({ ...prev, [videoId]: nextMuted }));
+    const el = videoRefs.current[videoId];
+    if (el) {
+      el.muted = nextMuted;
+      if (!nextMuted) el.volume = 1;
+    }
   };
 
   const markVideoMediaReady = useCallback((videoId) => {
@@ -3530,12 +6263,20 @@ useEffect(() => {
     videoEl.currentTime = seekTo;
   }, []);
 
-  const renderVideoCards = (videoList) => videoList.map((video) => {
+  const renderVideoCards = (videoList, { hidePurchase = false, hidePhotographer = false } = {}) => videoList.map((video) => {
     const durationLabel = formatVideoDuration(video.duration_seconds || videoDurationCache[video.id]);
     const isPreviewing = Boolean(videoPreviewActive[video.id]);
     const previewProgress = videoPreviewProgress[video.id] || 0;
     const posterSrc = getVideoThumbnail(video);
     const previewLimit = video.duration_seconds || videoDurationCache[video.id];
+    const isMuted = isVideoPreviewMuted(video.id);
+    const photographerHandle =
+      video.photographer?.handle
+      || video.photographer?.name
+      || selectedPhotographer?.handle
+      || selectedPhotographer?.name
+      || "MOTOSHOT";
+    const watermarkText = `@${String(photographerHandle).replace(/^@/, "")} • MotoShot GT`;
 
     return (
       <div
@@ -3546,25 +6287,15 @@ useEffect(() => {
           className="video-card-media"
           style={{ position: "relative", paddingBottom: "56.25%", background: "#0a0a0a" }}
           onContextMenu={(e) => e.preventDefault()}
-          {...(CAN_HOVER_VIDEO_PREVIEW ? {
-            onMouseEnter: () => startVideoPreview(video.id, previewLimit),
-            onMouseLeave: () => stopVideoPreview(video.id),
-          } : {
-            onTouchEnd: (e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              toggleVideoPreview(video.id, previewLimit);
-            },
-          })}
+          onClick={() => playVideoPreview(video.id, previewLimit, video.preview_url)}
         >
           <video
             ref={(el) => { videoRefs.current[video.id] = el; }}
             className={`video-card-preview${isPreviewing ? " is-playing" : ""}`}
-            src={video.preview_url}
-            poster={posterSrc || undefined}
-            muted={videoPreviewMuted}
+            src={isPreviewing ? video.preview_url : undefined}
+            muted={isMuted}
             playsInline
-            preload={posterSrc ? "none" : "metadata"}
+            preload={isPreviewing ? "auto" : "none"}
             controls={false}
             controlsList="nodownload noplaybackrate nofullscreen noremoteplayback"
             disablePictureInPicture
@@ -3594,25 +6325,77 @@ useEffect(() => {
               onLoad={() => markVideoMediaReady(video.id)}
             />
           )}
+          {isPreviewing && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                zIndex: 9,
+                pointerEvents: "none",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  position: "absolute",
+                  top: "-40%",
+                  left: "-40%",
+                  width: "180%",
+                  height: "180%",
+                  display: "grid",
+                  gridTemplateColumns: "repeat(3, 1fr)",
+                  gap: "28px 20px",
+                  transform: "rotate(-30deg)",
+                  alignContent: "center",
+                  justifyItems: "center",
+                }}
+              >
+                {Array.from({ length: 18 }).map((_, i) => (
+                  <span
+                    key={i}
+                    style={{
+                      color: "rgba(255,255,255,0.5)",
+                      fontSize: 14,
+                      fontWeight: 700,
+                      whiteSpace: "nowrap",
+                      userSelect: "none",
+                    }}
+                  >
+                    {watermarkText}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           <button
             type="button"
-            aria-label={videoPreviewMuted ? "Activar sonido del preview" : "Silenciar preview"}
-            aria-pressed={!videoPreviewMuted}
-            onClick={toggleVideoPreviewMute}
+            aria-label={isMuted ? "Activar sonido del preview" : "Silenciar preview"}
+            aria-pressed={!isMuted}
+            onClick={(e) => toggleVideoPreviewMute(e, video.id)}
             onMouseDown={(e) => e.stopPropagation()}
             onTouchStart={(e) => e.stopPropagation()}
             onTouchEnd={(e) => e.stopPropagation()}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "rgba(255,107,0,0.9)";
+              e.currentTarget.style.color = "#1a1008";
+              e.currentTarget.style.borderColor = "rgba(255,107,0,0.55)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = isMuted ? "rgba(0,0,0,0.65)" : "rgba(255,107,0,0.75)";
+              e.currentTarget.style.color = isMuted ? "rgba(255,255,255,0.92)" : "#1a1008";
+              e.currentTarget.style.borderColor = isMuted ? "transparent" : "rgba(255,107,0,0.55)";
+            }}
             style={{
               position: "absolute",
               bottom: 8,
               left: 8,
-              zIndex: 7,
-              width: 30,
-              height: 30,
+              zIndex: 11,
+              width: 32,
+              height: 32,
               borderRadius: "50%",
-              border: videoPreviewMuted ? "none" : "1px solid rgba(255,107,0,0.55)",
-              background: videoPreviewMuted ? "rgba(0,0,0,0.78)" : "rgba(255,107,0,0.92)",
-              color: videoPreviewMuted ? "rgba(255,255,255,0.9)" : "#1a1008",
+              border: isMuted ? "1px solid transparent" : "1px solid rgba(255,107,0,0.55)",
+              background: isMuted ? "rgba(0,0,0,0.65)" : "rgba(255,107,0,0.75)",
+              color: isMuted ? "rgba(255,255,255,0.92)" : "#1a1008",
               display: "grid",
               placeItems: "center",
               cursor: "pointer",
@@ -3620,16 +6403,44 @@ useEffect(() => {
               WebkitBackdropFilter: "blur(6px)",
               boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
               padding: 0,
+              transition: "background 0.15s, color 0.15s, border-color 0.15s",
             }}
           >
-            <AppIcon name={videoPreviewMuted ? "volumeOff" : "volume"} size={15} />
+            {isMuted ? <VideoPreviewVolumeOffIcon /> : <VideoPreviewVolumeOnIcon />}
+          </button>
+          <button
+            type="button"
+            aria-label={isPreviewing ? "Pausar video" : "Reproducir video"}
+            onClick={(e) => {
+              e.stopPropagation();
+              playVideoPreview(video.id, previewLimit, video.preview_url);
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchEnd={(e) => e.stopPropagation()}
+            style={{
+              position: "absolute",
+              zIndex: 11,
+              border: "none",
+              cursor: "pointer",
+              color: "#fff",
+              background: "rgba(0,0,0,0.55)",
+              display: "grid",
+              placeItems: "center",
+              padding: 0,
+              ...(isPreviewing
+                ? { top: 8, right: 8, width: 32, height: 32, borderRadius: 6 }
+                : { top: "50%", left: "50%", transform: "translate(-50%, -50%)", width: 56, height: 56, borderRadius: "50%" }),
+            }}
+          >
+            {isPreviewing ? <VideoPauseIcon /> : <VideoPlayIcon />}
           </button>
           {durationLabel && (
             <div style={{
               position: "absolute",
               bottom: 8,
               right: 8,
-              zIndex: 4,
+              zIndex: 11,
               background: "rgba(0,0,0,0.82)",
               color: "#fff",
               padding: "2px 6px",
@@ -3642,13 +6453,13 @@ useEffect(() => {
             </div>
           )}
           {isPreviewing && (
-            <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 3, zIndex: 5, background: "rgba(255,255,255,0.2)" }}>
+            <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 4, zIndex: 12, background: "rgba(255,255,255,0.2)" }}>
               <div style={{ width: `${previewProgress * 100}%`, height: "100%", background: "var(--orange)", transition: "width 0.08s linear" }} />
             </div>
           )}
         </div>
         <div style={{ padding: 12 }}>
-          {video.photographer?.name && (
+          {!hidePhotographer && video.photographer?.name && (
             <button
               type="button"
               onClick={(e) => openPhotographerFromVideo(video, e)}
@@ -3677,24 +6488,27 @@ useEffect(() => {
               )}
             </button>
           )}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-            {video.moto_brand && (
-              <span className="tag active" style={{ fontSize: 11 }}>
-                {video.moto_brand} {video.moto_model}
-              </span>
-            )}
-            {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
-            {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
-            {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <VideoCardTags video={video} />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-            <VideoPurchaseButton
-              video={video}
-              isOwn={isOwnVideo(video)}
-              purchaseState={resolveVideoPurchaseState(video, videoPurchaseStatusById)}
-              onBuy={handleBuyVideo}
-            />
+            {!hidePurchase && (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                {!isOwnVideo(video) && renderClaimButton("video", video.id, video.photographer?.id)}
+                {!isOwnVideo(video) && !resolveVideoPurchaseState(video, videoPurchaseStatusById) && (
+                  <AddToCartButton
+                    compact
+                    inCart={cart.isInCart("video", video.id)}
+                    onClick={() => cart.addItem(videoToCartItem(video))}
+                  />
+                )}
+                <VideoPurchaseButton
+                  video={video}
+                  isOwn={isOwnVideo(video)}
+                  purchaseState={resolveVideoPurchaseState(video, videoPurchaseStatusById)}
+                  onBuy={handleBuyVideo}
+                />
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -3716,6 +6530,17 @@ useEffect(() => {
     setEditForm(prev => ({ ...prev, phone: localNumber }));
   }, [editMode, profile?.phone]);
 
+  useEffect(() => {
+    if (!editMode) {
+      setStorageManagerOpen(false);
+      setEditMembershipOpen(false);
+      return;
+    }
+    if (profile?.verification_status === "approved" && session) {
+      fetchStorageUsage();
+    }
+  }, [editMode, profile?.id, profile?.verification_status, session]);
+
   // ── Pending purchase after login ───────────────────────────
   useEffect(() => {
     if (user && pendingPurchase) {
@@ -3728,31 +6553,58 @@ useEffect(() => {
 
   // ── Recurrente return (web + APK) ──────────────────────────
   useEffect(() => {
-    if (!authReady || !session) return;
+    if (!authReady) return;
 
     const params = new URLSearchParams(window.location.search);
-    const paymentCancel =
-      params.get("payment_cancel") === "true" || params.get("paypal_cancel") === "true";
+    if (params.get("guest_success") === "1") {
+      const token = params.get("claim_token");
+      if (token) {
+        setGuestClaimToken(token);
+        setView(VIEWS.GUEST_SUCCESS);
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+      return;
+    }
+
+    const paymentCancel = params.get("payment_cancel") === "true";
 
     if (paymentCancel) {
+      clearPendingPayment();
       handlePaymentCancelled();
       window.history.replaceState({}, document.title, window.location.pathname);
       return;
     }
 
+    const pending = readPendingPayment();
+    const hasPaymentReturn =
+      params.get("payment_return") === "true" ||
+      Boolean(params.get("checkout_id") || params.get("order_id"));
+    if (!pending && !hasPaymentReturn) return;
+
+    if (pending?.isGuest || (!session && (pending?.guestEmail || readGuestCheckoutDraft()?.guest_email))) {
+      syncGuestPendingPayments();
+      return;
+    }
+    if (!session) return;
+
     syncPendingPayments();
-  }, [authReady, session, syncPendingPayments, handlePaymentCancelled]);
+  }, [authReady, session, syncPendingPayments, syncGuestPendingPayments, handlePaymentCancelled]);
 
   useEffect(() => {
-    if (!authReady || !session) return;
+    if (!authReady) return;
     return onNativePaymentResume((source) => {
       if (source === "browserCancelled" || source === "appUrlCancel") {
         handlePaymentCancelled();
         return;
       }
 
+      const pending = readPendingPayment();
+      const guestPending =
+        pending?.isGuest || (!session && (pending?.guestEmail || readGuestCheckoutDraft()?.guest_email));
+
       if (source === "browserClosedPending") {
-        syncPendingPayments({ silent: false });
+        if (guestPending) syncGuestPendingPayments({ silent: false });
+        else if (session) syncPendingPayments({ silent: false });
         return;
       }
 
@@ -3768,9 +6620,10 @@ useEffect(() => {
         source === "appUrlOpen" ||
         source === "launchUrl" ||
         source === "browserAfterReturn";
-      syncPendingPayments({ silent: !showLoading });
+      if (guestPending) syncGuestPendingPayments({ silent: !showLoading });
+      else if (session) syncPendingPayments({ silent: !showLoading });
     });
-  }, [authReady, session, syncPendingPayments, handlePaymentCancelled]);
+  }, [authReady, session, syncPendingPayments, syncGuestPendingPayments, handlePaymentCancelled]);
 
   const filteredPhotos = photos.filter(p => {
   if (searchTerm === "") return true;
@@ -3784,9 +6637,9 @@ useEffect(() => {
 
   // ── Handlers ───────────────────────────────────────────────
   const handleBuy = (photo) => {
-    if (!user) { setPendingPurchase(photo); setMessage(""); setView(VIEWS.AUTH); return; }
     setSelectedVideo(null);
-    setSelected(photo); setPayStep(1);
+    setSelected(photo);
+    setPayStep(1);
   };
 
   const handlePayment = async () => {
@@ -3797,28 +6650,44 @@ useEffect(() => {
     }
     setPayStep(2);
     try {
-      const res = await fetch("/api/payments/create-order", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-        body: JSON.stringify({
-          photo_id: selected.id,
-          return_url: buildPaymentReturnUrl({ photo_id: selected.id }),
-          cancel_url: buildPaymentCancelUrl({ photo_id: selected.id }),
-        }),
-      });
-      const data = await res.json();
+      const guestFields = await getGuestCheckoutFields();
+      const { res, data } = await apiJson(
+        "/api/payments/create-order",
+        {
+          method: "POST",
+          headers: buildCheckoutHeaders(),
+          body: JSON.stringify({
+            photo_id: selected.id,
+            ...guestFields,
+            return_url: buildPaymentReturnUrl({
+              photo_id: selected.id,
+              guest: guestFields.guest_email ? "1" : undefined,
+            }),
+            cancel_url: buildPaymentCancelUrl({ photo_id: selected.id }),
+          }),
+        },
+        { wake: true }
+      );
       if (!res.ok) throw new Error(data.error || "Error creando orden");
       writePendingPayment({
         kind: "photo",
         photoId: selected.id,
         checkoutId: data.checkout_id || data.order_id || null,
+        isGuest: Boolean(data.is_guest || guestFields.guest_email),
+        guestEmail: guestFields.guest_email || null,
+        guestClaimToken: data.guest_claim_token || null,
       });
-      await openRecurrenteCheckout(data.approve_url || data.checkout_url, () =>
-        syncPendingPayments({ silent: true })
+      await openRecurrenteCheckout(
+        data.approve_url || data.checkout_url,
+        () => (guestFields.guest_email ? syncGuestPendingPayments({ silent: true }) : syncPendingPayments({ silent: true }))
       );
       setPayStep(1);
     } catch (err) {
-      console.error(err); setPayStep(1);       showToast(err.message || "No se pudo iniciar el pago.");
+      if (err?.message !== "cancelled") {
+        console.error(err);
+        showToast(err.message || "No se pudo iniciar el pago.");
+      }
+      setPayStep(1);
     }
   };
 
@@ -3837,81 +6706,50 @@ useEffect(() => {
       return;
     }
     if (Number(selectedVideo.price) < RECURRENTE_MIN_GTQ) {
-      showToast(`Recurrente requiere un mínimo de Q${RECURRENTE_MIN_GTQ}. Usá PayPal para este video.`);
-      await handleVideoPayPalPayment();
+      showToast(`Recurrente requiere un mínimo de Q${RECURRENTE_MIN_GTQ}. Este video no puede comprarse con el precio actual.`);
       return;
     }
     setPayStep(2);
     try {
-      const res = await fetch("/api/payments/create-video-order", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-        body: JSON.stringify({
-          video_id: selectedVideo.id,
-          return_url: buildPaymentReturnUrl({ video_id: selectedVideo.id }),
-          cancel_url: buildPaymentCancelUrl({ video_id: selectedVideo.id }),
-        }),
-      });
-      const data = await res.json();
+      const guestFields = await getGuestCheckoutFields();
+      const { res, data } = await apiJson(
+        "/api/payments/create-video-order",
+        {
+          method: "POST",
+          headers: buildCheckoutHeaders(),
+          body: JSON.stringify({
+            video_id: selectedVideo.id,
+            ...guestFields,
+            return_url: buildPaymentReturnUrl({
+              video_id: selectedVideo.id,
+              guest: guestFields.guest_email ? "1" : undefined,
+            }),
+            cancel_url: buildPaymentCancelUrl({ video_id: selectedVideo.id }),
+          }),
+        },
+        { wake: true }
+      );
       if (!res.ok) throw new Error(data.error || "Error creando orden");
       writePendingPayment({
         kind: "video",
         videoId: selectedVideo.id,
         checkoutId: data.checkout_id || data.order_id || null,
         provider: "recurrente",
+        isGuest: Boolean(data.is_guest || guestFields.guest_email),
+        guestEmail: guestFields.guest_email || null,
+        guestClaimToken: data.guest_claim_token || null,
       });
-      await openRecurrenteCheckout(data.approve_url || data.checkout_url, () =>
-        syncPendingPayments({ silent: true })
+      await openRecurrenteCheckout(
+        data.approve_url || data.checkout_url,
+        () => (guestFields.guest_email ? syncGuestPendingPayments({ silent: true }) : syncPendingPayments({ silent: true }))
       );
       setPayStep(1);
     } catch (err) {
-      console.error(err);
+      if (err?.message !== "cancelled") {
+        console.error(err);
+        showToast(err.message || "No se pudo iniciar el pago.");
+      }
       setPayStep(1);
-      showToast(err.message || "No se pudo iniciar el pago.");
-    }
-  };
-
-  const handleVideoPayPalPayment = async () => {
-    if (!selectedVideo) return;
-    if (isOwnVideo(selectedVideo)) {
-      showToast("No podés comprar tu propio video.");
-      setPayStep(0);
-      setSelectedVideo(null);
-      return;
-    }
-    if (getVideoPurchaseState(selectedVideo)) {
-      showToast("Ya compraste este video.");
-      setPayStep(0);
-      setSelectedVideo(null);
-      return;
-    }
-    setPayStep(2);
-    try {
-      const res = await fetch("/api/payments/create-video-paypal-order", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-        body: JSON.stringify({
-          video_id: selectedVideo.id,
-          return_url: buildPaymentReturnUrl({ video_id: selectedVideo.id, paypal_return: "true" }),
-          cancel_url: buildPaymentCancelUrl({ video_id: selectedVideo.id, paypal_cancel: "true" }),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Error creando orden PayPal");
-      writePendingPayment({
-        kind: "video",
-        videoId: selectedVideo.id,
-        orderId: data.order_id || data.paypal_order_id || null,
-        provider: "paypal",
-      });
-      await openRecurrenteCheckout(data.approve_url, () =>
-        syncPendingPayments({ silent: true })
-      );
-      setPayStep(1);
-    } catch (err) {
-      console.error(err);
-      setPayStep(1);
-      showToast(err.message || "No se pudo iniciar PayPal.");
     }
   };
 
@@ -4044,6 +6882,25 @@ useEffect(() => {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     setUser(null); setProfile(null); setSession(null);
+
+    // Limpiar TODO el estado ligado al comprador para que el siguiente
+    // usuario (o el estado de invitado) no herede compras/estados previos.
+    setPurchased([]);
+    setPurchasedVideos([]);
+    setPurchases([]);
+    setVideoPurchases([]);
+    setMySubscriptions([]);
+    setSubscriptionUsage({});
+    setNotifications([]);
+    videoPurchasesRef.current = [];
+    const stripPurchaseStatus = (list) =>
+      Array.isArray(list)
+        ? list.map((v) => (v?.buyer_purchase_status ? { ...v, buyer_purchase_status: null } : v))
+        : list;
+    setVideos((prev) => stripPurchaseStatus(prev));
+    setPhotographerVideos((prev) => stripPurchaseStatus(prev));
+    try { cart.clearCart(); } catch (_) { /* ignore */ }
+
     setActiveTab("feed");
     setView(VIEWS.PHOTOGRAPHERS);
   };
@@ -4077,12 +6934,17 @@ useEffect(() => {
         doc_back_url = backUrl.publicUrl;
       }
   
+      let handleToSave = String(vendorForm.handle || "").trim().replace(/^@/, "");
+      if (needsAutoProfileHandle(handleToSave)) {
+        handleToSave = generateAutoHandleFromName(vendorForm.name);
+      }
+
       const res = await fetch("/api/auth/request-vendor", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
         body: JSON.stringify({
           name: vendorForm.name,
-          handle: vendorForm.handle,
+          handle: handleToSave,
           verification_id: `[${vendorForm.doc_type.toUpperCase()}] ${vendorForm.verification_id}`,
           bio: vendorForm.bio,
           doc_front_url,
@@ -4100,6 +6962,92 @@ useEffect(() => {
     } finally {
       setGlobalLoading({ active: false, message: "" });
     }
+  };
+
+  const handleMembershipPlanSelect = (plan) => {
+    const link = String(plan?.paymentLink || "").trim();
+    if (link.startsWith("PENDIENTE_")) {
+      showToast("Este plan estará disponible muy pronto");
+      return;
+    }
+    if (link.startsWith("https://")) {
+      window.open(link, "_blank", "noopener,noreferrer");
+    }
+  };
+
+  const saveMembershipPlan = async (plan) => {
+    if (!session?.access_token || !plan?.id) return;
+    const complimentary = isStaff || storageUsage?.staff_complimentary;
+    const link = String(plan?.paymentLink || "").trim();
+
+    if (!complimentary) {
+      if (link.startsWith("PENDIENTE_")) {
+        showToast("Este plan estará disponible muy pronto");
+        return;
+      }
+      if (link.startsWith("https://")) {
+        window.open(link, "_blank", "noopener,noreferrer");
+        return;
+      }
+    }
+
+    if (plan.id === storageUsage?.membership_plan) {
+      showToast(`Ya tenés el ${plan.name}.`);
+      return;
+    }
+
+    setMembershipSaving(true);
+    try {
+      const { res, data } = await apiJson("/api/auth/membership", {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ plan: plan.id }),
+      });
+      if (!res.ok) throw new Error(data.error || "No se pudo actualizar el plan");
+      setStorageUsage(applyStaffStorageUsage(data.usage || null, isStaff));
+      showToast(`Plan actualizado a ${plan.name}.`);
+    } catch (err) {
+      console.error("saveMembershipPlan:", err);
+      showToast(err.message || "No se pudo actualizar el plan.");
+    } finally {
+      setMembershipSaving(false);
+    }
+  };
+
+  const cancelMembership = () => {
+    if (isStaff || storageUsage?.staff_complimentary) {
+      showToast("Tu cuenta admin tiene Plan Élite sin cargo. Podés cambiar de plan; no requiere cancelación.");
+      return;
+    }
+    openConfirmDialog({
+      title: "CANCELAR MEMBRESÍA",
+      message: "¿Cancelar tu membresía? Seguirás con acceso al plan básico. Tu contenido publicado no se borra, pero el límite de almacenamiento bajará.",
+      confirmLabel: "SÍ, CANCELAR",
+      cancelLabel: "VOLVER",
+      destructive: true,
+      onConfirm: async () => {
+        if (!session?.access_token) return;
+        setMembershipSaving(true);
+        try {
+          const { res, data } = await apiJson("/api/auth/membership/cancel", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${session.access_token}` },
+          });
+          if (!res.ok) throw new Error(data.error || "No se pudo cancelar");
+          setStorageUsage(data.usage || null);
+          setEditMembershipOpen(false);
+          showToast(data.message || "Membresía cancelada.");
+        } catch (err) {
+          console.error("cancelMembership:", err);
+          showToast(err.message || "No se pudo cancelar la membresía.");
+        } finally {
+          setMembershipSaving(false);
+        }
+      },
+    });
   };
 
   const revokeUploadPreview = (item) => {
@@ -4217,7 +7165,9 @@ useEffect(() => {
           <span>Bienvenido, {getUserDisplayName()}</span>
         </div>
       ) : (
-        <div style={{ marginTop: 12, color: "var(--muted)" }}>Iniciá sesión para comprar fotos.</div>
+        <div style={{ marginTop: 12, color: "var(--muted)", fontSize: 14, lineHeight: 1.5 }}>
+          Comprá sin crear cuenta · Solo nombre y correo para tu confirmación
+        </div>
       )}
     </div>
   );
@@ -4264,7 +7214,7 @@ useEffect(() => {
             method: "DELETE",
             headers: { Authorization: `Bearer ${session?.access_token}` },
           });
-          if (res.ok) fetchPhotos();
+          if (res.ok) notifyGalleryPhotoDeleted(1);
         },
       });
           }}
@@ -4281,12 +7231,20 @@ useEffect(() => {
             <div className="card-price">Q{photo.price}</div>
             {!isOwnPhoto(photo) && (
             !canDownloadPhoto(photo) ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {renderClaimButton("photo", photo.id, photo.photographer?.id, { compact: true })}
+            <AddToCartButton
+              compact
+              inCart={cart.isInCart("photo", photo.id)}
+              onClick={() => cart.addItem(photoToCartItem(photo))}
+            />
             <AppButton
             className="card-buy"
             onClick={e => { e.stopPropagation(); handleBuy(photo); }}
           >
             Comprar
           </AppButton>
+          </div>
   ) : (
     <AppButton
       className="card-buy card-buy-download"
@@ -4697,8 +7655,8 @@ useEffect(() => {
       <div className="upload-view admin-panel admin-panel-ceo ceo-payroll-view">
         <div className="admin-panel-badge admin-panel-badge-ceo">CEO</div>
         <SectionTitleIcon icon="payroll">PLANILLA SEMANAL</SectionTitleIcon>
-        <div className="section-sub">
-          Pagos semanales a fotógrafos: ventas de la semana, retiros pendientes y cuentas bancarias.
+        <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.55, marginBottom: 16 }}>
+          Pagos semanales a fotógrafos (montos netos después de comisiones MotoShot y Recurrente): ventas de la semana, retiros pendientes y cuentas bancarias.
         </div>
         {payrollData?.week_label && (
           <div className="ceo-payroll-week">{payrollData.week_label}</div>
@@ -4771,39 +7729,39 @@ useEffect(() => {
     );
   };
 
-const discoveryTerm = searchQuery.trim().toLowerCase();
-const filteredPhotographers = discoveryTerm
-  ? photographers.filter(ph =>
-      (ph.name || "").toLowerCase().includes(discoveryTerm) ||
-      (ph.handle || "").toLowerCase().includes(discoveryTerm)
-    )
-  : photographers;
-const hasDiscoveryQuery = discoveryTerm.length > 0;
-
 const MATCH_REASON_LABELS = {
-  location: "Lugar",
-  tag: "Modelo / tag",
+  name: "Nombre",
+  location: "Ubicación",
+  brand: "Marca / modelo",
+  plate: "Placa",
+  schedule: "Horario",
+  tag: "Color / tag",
   photographer: "Fotógrafo",
+  visual: "Moto similar",
 };
 
 const clearDiscoverySearch = () => {
   setSearchQuery("");
   setSearchMode(false);
+  setSearchSource(null);
   setUnifiedSearch({ photographers: [], photos: [] });
+  clearVisualMotoSearch();
 };
 
 const runDiscoverySearch = async () => {
   const term = searchQuery.trim();
   if (!term) return;
   setSearchMode(true);
+  setSearchSource("text");
+  clearVisualMotoSearch();
   setSearchLoading(true);
   try {
     const res = await fetch(`/api/search?q=${encodeURIComponent(term)}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Error en búsqueda");
     setUnifiedSearch({
-      photographers: data.photographers || [],
-      photos: data.photos || [],
+      photographers: (data.photographers || []).map(normalizePhotographerCounts),
+      photos: [],
     });
   } catch (err) {
     console.error(err);
@@ -4845,6 +7803,40 @@ const openPhotographerFromVideo = (video, e) => {
   e?.stopPropagation();
   if (!video?.photographer?.id) return;
   openPhotographerResult(video.photographer);
+};
+
+const openMatchPreviewItem = async (preview, e) => {
+  e?.stopPropagation();
+  e?.preventDefault();
+  if (!preview?.id || !preview?.media_type) return;
+
+  if (preview.media_type === "photo") {
+    let photo = preview;
+    if (!preview.watermark_url || preview.price == null) {
+      try {
+        const res = await fetch(`/api/photos/${preview.id}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Foto no encontrada");
+        photo = data;
+      } catch (err) {
+        console.error("openMatchPreviewItem photo:", err);
+        showToast("No se pudo abrir la foto.");
+        return;
+      }
+    }
+    setSelectedVideo(null);
+    openPhotoDetail(photo, VIEWS.PHOTOGRAPHERS);
+    return;
+  }
+
+  if (preview.media_type === "video") {
+    if (!preview.preview_url || preview.price == null) {
+      showToast("No se pudo abrir el video.");
+      return;
+    }
+    setSelected(null);
+    handleBuyVideo(preview);
+  }
 };
 
 const renderPhotographers = () => (
@@ -4910,13 +7902,9 @@ const renderPhotographers = () => (
           Bienvenido, {getUserDisplayName()}
         </div>
       ) : (
-        <AppButton
-          className="nav-btn primary"
-          style={{ marginTop: 16 }}
-          onClick={() => setView(VIEWS.AUTH)}
-        >
-          Iniciá sesión para comprar fotos y videos
-        </AppButton>
+        <div style={{ marginTop: 16, color: "var(--muted)", fontSize: 14, lineHeight: 1.5, maxWidth: 420, marginInline: "auto" }}>
+          Explorá fotógrafos y comprá fotos o videos sin registrarte. Te pedimos solo tu correo para enviarte la confirmación.
+        </div>
       )}
     </motion.div>
 
@@ -5010,12 +7998,7 @@ const renderPhotographers = () => (
             </div>
             <div style={{ fontWeight: 700, fontSize: 13 }}>{ph.name}</div>
             <div style={{ color: "var(--orange)", fontSize: 11 }}>{ph.handle}</div>
-            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="camera" size={12} /> {(ph.photos_count || 0) > 99 ? "+99" : (ph.photos_count || 0)} foto{ph.photos_count !== 1 ? "s" : ""}</span>
-              {(ph.albums_count || 0) > 0 && (
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="folder" size={12} /> {ph.albums_count} álbum{ph.albums_count !== 1 ? "es" : ""}</span>
-              )}
-            </div>
+            <PhotographerMediaCounts photographer={ph} style={{ marginTop: 4 }} />
           </div>
         </div>
       ))}
@@ -5028,45 +8011,128 @@ const renderPhotographers = () => (
       <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 2, marginBottom: 4 }}>
         BUSCAR
       </div>
-      <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 14 }}>
-        Un solo buscador: fotógrafo, modelo de moto (tags) o lugar de la rodada
+      <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 14, lineHeight: 1.5 }}>
+        Escribí marca, placa, horario o ubicación — o adjuntá una <strong style={{ color: "var(--orange)", fontWeight: 800 }}>FOTO</strong> de tu moto
       </div>
 
-      <div style={{ position: "relative", marginBottom: 16, display: "flex", gap: 8 }}>
-        <div style={{ position: "relative", flex: 1 }}>
+      <input
+        ref={visualSearchInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          handleVisualSearchFile(e.target.files);
+          e.target.value = "";
+        }}
+      />
+
+      <div
+        className="unified-search-wrap"
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        onDrop={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!visualSearchLoading) handleVisualSearchFile(e.dataTransfer?.files);
+        }}
+      >
+        <div className="unified-search-bar">
+          <button
+            type="button"
+            className="unified-search-camera"
+            aria-label="Buscar con foto de moto"
+            disabled={visualSearchLoading}
+            onClick={openVisualSearchImageSource}
+          >
+            <AppIcon name="camera" size={17} color="var(--orange)" />
+          </button>
           <input
-            className="search-input"
-            placeholder="Ej: Juan, Honda CBR, Curva del Caminero…"
+            className="search-input unified-search-input"
+            placeholder="Ej: Honda, M425LXG, 10:30, Curva del Caminero…"
             value={searchQuery}
-            onChange={e => {
-              setSearchQuery(e.target.value);
-              if (!e.target.value.trim()) clearDiscoverySearch();
+            onChange={(e) => {
+              const value = e.target.value;
+              setSearchQuery(value);
+              if (!value.trim()) {
+                clearDiscoverySearch();
+              } else if (searchMode) {
+                setSearchMode(false);
+                setSearchSource(null);
+                setUnifiedSearch({ photographers: [], photos: [] });
+              }
             }}
-            onKeyDown={e => { if (e.key === "Enter") runDiscoverySearch(); }}
+            onKeyDown={(e) => { if (e.key === "Enter") runDiscoverySearch(); }}
           />
           {searchQuery && (
-            <AppButton
+            <button
+              type="button"
+              className="unified-search-clear"
+              aria-label="Limpiar texto"
               onClick={clearDiscoverySearch}
-              style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 18 }}
             >
-              <AppIcon name="x" size={18} />
-            </AppButton>
+              <AppIcon name="x" size={16} />
+            </button>
           )}
+          <button
+            type="button"
+            className="unified-search-submit"
+            aria-label="Buscar"
+            onClick={runDiscoverySearch}
+            disabled={!searchQuery.trim()}
+          >
+            <AppIcon name="search" size={16} />
+          </button>
         </div>
-        <AppButton
-          className="nav-btn primary"
-          style={{ flexShrink: 0, padding: "0 20px" }}
-          onClick={runDiscoverySearch}
-        >
-          Buscar
-        </AppButton>
+
+        {visualSearchPreview && (
+          <div className="unified-search-photo-chip">
+            <img src={visualSearchPreview} alt="" />
+            <div className="unified-search-photo-chip__meta">
+              <span className="unified-search-photo-chip__label">Foto de moto</span>
+              {visualSearchLoading && (
+                <span className="unified-search-photo-chip__status">Analizando…</span>
+              )}
+            </div>
+            <button
+              type="button"
+              className="unified-search-photo-chip__remove"
+              aria-label="Quitar foto"
+              onClick={clearAttachedSearchPhoto}
+              disabled={visualSearchLoading}
+            >
+              <AppIcon name="x" size={14} />
+            </button>
+          </div>
+        )}
       </div>
+
+      {visualSearchDetected && (visualSearchDetected.moto_brand || visualSearchDetected.moto_model || visualSearchDetected.moto_color) && (
+        <div style={{ marginBottom: 16, marginTop: 12, padding: "12px 14px", borderRadius: 10, background: "rgba(255,107,0,0.08)", border: "1px solid rgba(255,107,0,0.25)" }}>
+          <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>
+            Detectamos
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
+            {[visualSearchDetected.moto_brand, visualSearchDetected.moto_model, visualSearchDetected.moto_color].filter(Boolean).join(" ")}
+          </div>
+        </div>
+      )}
+
+      {visualSearchMessage && (
+        <div style={{ marginBottom: 16, marginTop: 12, padding: "12px 14px", borderRadius: 10, background: "var(--card)", border: "1px solid var(--border)", color: "var(--muted)", fontSize: 13, lineHeight: 1.5 }}>
+          {visualSearchMessage}
+        </div>
+      )}
+
+      <div style={{ marginBottom: 16 }} />
 
       {searchMode && (
         <div style={{ marginBottom: 24 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <div style={{ fontSize: 13, color: "var(--muted)" }}>
-              Resultados para <strong style={{ color: "var(--text)" }}>"{searchQuery}"</strong>
+              {searchSource === "visual" ? (
+                <>Fotógrafos con motos similares</>
+              ) : (
+                <>Resultados para <strong style={{ color: "var(--text)" }}>"{searchQuery}"</strong></>
+              )}
             </div>
             <AppButton
               onClick={clearDiscoverySearch}
@@ -5076,98 +8142,136 @@ const renderPhotographers = () => (
             </AppButton>
           </div>
 
-          {searchLoading ? (
-            <div className="empty"><LoaderIcon size={44} /><div>Buscando...</div></div>
-          ) : unifiedSearch.photographers.length === 0 && unifiedSearch.photos.length === 0 ? (
+          {(searchLoading || visualSearchLoading) ? (
+            <div className="empty">
+              <LoaderIcon size={44} />
+              <div>
+                {searchSource === "visual"
+                  ? "Analizando tu moto y buscando coincidencias…"
+                  : "Buscando por marca, placa, horario, ubicación y nombre…"}
+              </div>
+            </div>
+          ) : unifiedSearch.photographers.length === 0 ? (
             <div className="empty">
               <EmptyIcon name="search" />
-              <div>No hay fotógrafos ni fotos que coincidan. Probá otro nombre, modelo o lugar.</div>
+              <div>No hay coincidencias. Probá otra marca, placa, horario, ubicación o nombre.</div>
             </div>
           ) : (
-            <>
-              {unifiedSearch.photographers.length > 0 && (
-                <div style={{ marginBottom: 20 }}>
-                  <div className="search-results-heading">FOTÓGRAFOS</div>
-                  {unifiedSearch.photographers.map(ph => (
-                    <div
-                      key={ph.id}
-                      onClick={() => openPhotographerResult(ph)}
-                      style={{ display: "flex", alignItems: "center", gap: 12, padding: 14, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", marginBottom: 10, cursor: "pointer" }}
-                    >
-                      <div style={{ width: 52, height: 52, borderRadius: "50%", overflow: "hidden", border: "2px solid var(--orange)", background: "var(--card)", flexShrink: 0 }}>
-                        {ph.avatar_url
-                          ? <img src={ph.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                          : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}><AvatarPlaceholder size={20} /></div>}
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 700, fontSize: 15 }}>{ph.name}</div>
-                        <div style={{ color: "var(--orange)", fontSize: 13 }}>{ph.handle}</div>
-                        {ph.bio && <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 2 }}>{ph.bio}</div>}
-                      </div>
-                      <AppIcon name="arrowRight" size={20} color="var(--muted)" />
+            <div>
+              <div className="search-results-heading">COINCIDENCIAS</div>
+              {unifiedSearch.photographers.map(ph => (
+                <div
+                  key={ph.id}
+                  onClick={() => openPhotographerResult(ph)}
+                  style={{
+                    padding: 14,
+                    borderRadius: 12,
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    marginBottom: 10,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ width: 52, height: 52, borderRadius: "50%", overflow: "hidden", border: "2px solid var(--orange)", background: "var(--card)", flexShrink: 0 }}>
+                      {ph.avatar_url
+                        ? <img src={ph.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}><AvatarPlaceholder size={20} /></div>}
                     </div>
-                  ))}
-                </div>
-              )}
-
-              {unifiedSearch.photos.length > 0 && (
-                <div>
-                  <div className="search-results-heading">FOTOS</div>
-                  <div className="photo-search-grid">
-                    {unifiedSearch.photos.map(photo => (
-                      <div
-                        key={photo.id}
-                        className="photo-search-card"
-                        onClick={() => openPhotoSearchResult(photo)}
-                      >
-                        <div className="photo-search-thumb">
-                          {photo.watermark_url
-                            ? <img src={photo.watermark_url} alt="" />
-                            : <div style={{ display: "grid", placeItems: "center", height: "100%" }}><AppIcon name="camera" size={28} color="var(--muted)" /></div>}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>{ph.name}</div>
+                      <div style={{ color: "var(--orange)", fontSize: 13 }}>{ph.handle}</div>
+                      {ph.bio && <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 2 }}>{ph.bio}</div>}
+                      {(ph.match_reasons || []).length > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                          {ph.match_reasons.map((reason) => (
+                            <span key={reason} className="photo-search-match">{MATCH_REASON_LABELS[reason] || reason}</span>
+                          ))}
                         </div>
-                        <div className="photo-search-body">
-                          {photo.matchReasons?.length > 0 && (
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
-                              {photo.matchReasons.map((r) => (
-                                <span key={r} className="photo-search-match">{MATCH_REASON_LABELS[r] || r}</span>
-                              ))}
-                            </div>
-                          )}
-                          <div style={{ fontSize: 11, color: "var(--orange)", fontWeight: 700, marginBottom: 4 }}>
-                            <IconText icon="pin" size={11}>{photo.location}</IconText>
-                          </div>
-                          {photo.tags?.length > 0 && (
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
-                              {photo.tags.slice(0, 4).map(t => (
-                                <span key={t} className="photo-search-tag">{t}</span>
-                              ))}
-                            </div>
-                          )}
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                            <div style={{ minWidth: 0 }}>
-                              <div style={{ fontWeight: 700, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                {photo.photographer?.name || "Fotógrafo"}
-                              </div>
-                              <div style={{ fontSize: 11, color: "var(--muted)" }}>{photo.photographer?.handle}</div>
-                            </div>
-                            <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, color: "var(--success)", flexShrink: 0 }}>
-                              Q{photo.price}
-                            </div>
-                          </div>
-                          <AppButton
-                            className="nav-btn"
-                            style={{ width: "100%", marginTop: 10, fontSize: 11, padding: "8px 10px" }}
-                            onClick={(e) => openPhotographerFromPhoto(photo, e)}
-                          >
-                            Ver fotógrafo
-                          </AppButton>
-                        </div>
-                      </div>
-                    ))}
+                      )}
+                      <PhotographerMediaCounts photographer={ph} style={{ marginTop: 6 }} />
+                    </div>
+                    <AppIcon name="arrowRight" size={20} color="var(--muted)" />
                   </div>
+
+                  {ph.match_previews?.length > 0 && (
+                    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                      <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>
+                        {searchSource === "visual" ? "Motos similares encontradas" : "Coincidencias en su galería"}
+                        {(ph.match_count || 0) > ph.match_previews.length
+                          ? ` · ${ph.match_previews.length} de ${ph.match_count}`
+                          : ` · ${ph.match_previews.length}`}
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 8,
+                          overflowX: "auto",
+                          scrollbarWidth: "none",
+                          WebkitOverflowScrolling: "touch",
+                          paddingBottom: 2,
+                        }}
+                      >
+                        {ph.match_previews.map((item) => (
+                          <button
+                            key={`${item.media_type}-${item.id}`}
+                            type="button"
+                            title={item.media_type === "video" ? "Ver y comprar video" : "Ver y comprar foto"}
+                            onClick={(e) => openMatchPreviewItem(item, e)}
+                            style={{
+                              flexShrink: 0,
+                              width: 76,
+                              padding: 0,
+                              border: "none",
+                              background: "none",
+                              cursor: "pointer",
+                            }}
+                          >
+                            <div
+                              style={{
+                                position: "relative",
+                                width: 76,
+                                height: 76,
+                                borderRadius: 10,
+                                overflow: "hidden",
+                                background: "var(--card)",
+                                border: "1px solid rgba(255,107,0,0.35)",
+                              }}
+                            >
+                              <img
+                                src={item.thumbnail_url}
+                                alt=""
+                                loading="lazy"
+                                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                              />
+                              <div
+                                style={{
+                                  position: "absolute",
+                                  bottom: 4,
+                                  right: 4,
+                                  width: 20,
+                                  height: 20,
+                                  borderRadius: 6,
+                                  background: "rgba(0,0,0,0.72)",
+                                  display: "grid",
+                                  placeItems: "center",
+                                }}
+                              >
+                                <AppIcon
+                                  name={item.media_type === "video" ? "video" : "camera"}
+                                  size={11}
+                                  color="#fff"
+                                />
+                              </div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
-            </>
+              ))}
+            </div>
           )}
         </div>
       )}
@@ -5193,6 +8297,11 @@ const renderPhotographers = () => (
           <div style={{ width: 52, height: 52, borderRadius: "50%", background: "var(--card)", marginTop: -26, marginBottom: 8, border: "3px solid var(--border)" }} />
           <div style={{ height: 14, width: "60%", background: "var(--card)", borderRadius: 6, marginBottom: 8 }} />
           <div style={{ height: 11, width: "40%", background: "var(--card)", borderRadius: 6, marginBottom: 12 }} />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 3, marginBottom: 10 }}>
+            {[1, 2, 3, 4, 5, 6].map((slot) => (
+              <div key={slot} style={{ aspectRatio: "1", background: "var(--card)", borderRadius: 4 }} />
+            ))}
+          </div>
           <div style={{ height: 10, width: "80%", background: "var(--card)", borderRadius: 6 }} />
         </div>
       </motion.div>
@@ -5200,12 +8309,7 @@ const renderPhotographers = () => (
   </div>
 ) : photographers.length === 0 ? (
         <div className="empty"><EmptyIcon name="camera" /><div>No hay fotógrafos verificados aún.</div></div>
-      ) : hasDiscoveryQuery && !searchMode && filteredPhotographers.length === 0 ? (
-        <div className="empty">
-          <EmptyIcon name="search" />
-          <div>No se encontró ningún fotógrafo con ese nombre</div>
-        </div>
-      ) : !searchMode ? (
+      ) : (
         <motion.div
   style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}
   variants={{
@@ -5215,7 +8319,7 @@ const renderPhotographers = () => (
   initial="hidden"
   animate="show"
 >
-{filteredPhotographers.map(ph => (
+{photographers.map(ph => (
     <motion.div
       key={ph.id}
       variants={{
@@ -5250,13 +8354,9 @@ const renderPhotographers = () => (
         <div style={{ fontWeight: 700, fontSize: 14 }}>{ph.name}</div>
         <div style={{ color: "var(--orange)", fontSize: 12, marginBottom: 6 }}>{ph.handle || ""}</div>
         {ph.bio && <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 8, lineHeight: 1.4 }}>{ph.bio}</div>}
+        <PhotographerPreviewThumbs items={ph.recent_previews} />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ fontSize: 11, color: "var(--muted)", display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="camera" size={12} /> {(ph.photos_count || 0) > 99 ? "+99" : (ph.photos_count || 0)} foto{ph.photos_count !== 1 ? "s" : ""}</span>
-            {(ph.albums_count || 0) > 0 && (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="folder" size={12} /> {ph.albums_count} álbum{ph.albums_count !== 1 ? "es" : ""}</span>
-            )}
-          </div>
+          <PhotographerMediaCounts photographer={ph} />
           {ph.subscription_price ? (
             <div style={{ background: "var(--orange)", color: "#fff", fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 20 }}>
               Sub Q{ph.subscription_price}/mes
@@ -5267,7 +8367,7 @@ const renderPhotographers = () => (
     </motion.div>
   ))}
 </motion.div>
-      ) : null}
+      )}
         </>
       )}
     </div>
@@ -5449,11 +8549,13 @@ const renderPhotographerProfile = () => {
     initial={{ opacity: 0, y: 10 }}
     animate={{ opacity: 1, y: 0 }}
     transition={{ duration: 0.4, delay: 0.2, ease: "easeOut" }}
-    style={{ color: "var(--muted)", fontSize: 13, marginBottom: formatPhoneDisplay(selectedPhotographer.phone) ? 8 : 16, lineHeight: 1.6, textAlign: "center" }}
+    style={{ color: "var(--muted)", fontSize: 13, marginBottom: 12, lineHeight: 1.6, textAlign: "center" }}
   >
     {selectedPhotographer.bio}
   </motion.div>
 )}
+
+{renderShareProfileButton(selectedPhotographer)}
 
 {formatPhoneDisplay(selectedPhotographer?.phone) && (
   <motion.div
@@ -5468,10 +8570,13 @@ const renderPhotographerProfile = () => {
 
       {renderPhotographerSocialLinks(selectedPhotographer)}
 
-      {selectedPhotographer?.subscription_benefits?.length > 0 && (
+      {(subscriptionQuotaLines(selectedPhotographer).length > 0 || selectedPhotographer?.subscription_benefits?.length > 0) && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 14, marginBottom: 20 }}>
           <div style={{ fontWeight: 700, fontSize: 12, textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 }}>Beneficios de suscripción</div>
-          {selectedPhotographer.subscription_benefits.map((b, i) => (
+          {subscriptionQuotaLines(selectedPhotographer).map((b, i) => (
+            <div key={`q${i}`} style={{ fontSize: 13, color: "var(--text)", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}><AppIcon name="check" size={12} color="var(--success)" /> {b}</div>
+          ))}
+          {(selectedPhotographer?.subscription_benefits || []).map((b, i) => (
             <div key={i} style={{ fontSize: 13, color: "var(--text)", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}><AppIcon name="check" size={12} color="var(--success)" /> {b}</div>
           ))}
         </div>
@@ -5498,7 +8603,7 @@ const renderPhotographerProfile = () => {
   onSearch={runProfileSearch}
   placeholder={
     profileMediaTab === "videos"
-      ? "Marca, modelo, color, sector, dorsal…"
+      ? "Marca, modelo, color, placa, sector…"
       : "Ubicación, marca, tags de IA…"
   }
 />
@@ -5517,7 +8622,7 @@ const renderPhotographerProfile = () => {
       </div>
     ) : (
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
-        {renderVideoCards(filteredProfileVideos)}
+        {renderVideoCards(filteredProfileVideos, { hidePhotographer: true })}
       </div>
     )}
     <div style={{ textAlign: "center", marginTop: 16 }}>
@@ -5767,6 +8872,7 @@ const renderPhotographerProfile = () => {
                 <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 28, color: "var(--text)" }}>
                   Q{photo.price}
                 </div>
+                {renderClaimButton("photo", photo.id, photo.photographer_id || selectedPhotographer?.id, { compact: true })}
                 <AppButton
                   className="card-buy"
                   onClick={() => handleBuy(photo)}
@@ -5820,9 +8926,18 @@ const renderPhotographerProfile = () => {
           )}
         {!isOwnPhoto(selected) && (
         !canDownloadPhoto(selected) ? (
-  <AppButton className="pay-btn" onClick={() => handleBuy(selected)}>
-    Comprar — Q{selected.price}
-  </AppButton>
+  <>
+    {renderClaimButton("photo", selected.id, selected.photographer?.id || selected.photographer_id)}
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <AddToCartButton
+        inCart={cart.isInCart("photo", selected.id)}
+        onClick={() => cart.addItem(photoToCartItem(selected))}
+      />
+      <AppButton className="pay-btn" onClick={() => handleBuy(selected)}>
+        Comprar — Q{selected.price}
+      </AppButton>
+    </div>
+  </>
 ) : (
   <AppButton className="download-btn" onClick={handleDownload}>
     <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} /> {isCEO && !purchased.includes(selected.id) ? "Descargar HD gratis (CEO)" : "Descarga en HD"}</span>
@@ -5852,10 +8967,18 @@ const renderPhotographerProfile = () => {
         file: f,
         status: "pending",
         error: null,
+        aiStatus: null,
+        aiTags: null,
+        aiProgress: null,
+        aiStep: null,
       }));
       if (!accepted.length) return;
 
       const merged = [...videoQueue, ...accepted];
+      const needsAnalysis = merged.filter(
+        (q) => !q.aiTags && q.aiStatus !== "done" && q.aiStatus !== "failed"
+      );
+      videoQueueRef.current = merged;
       setVideoQueue(merged);
 
       if (merged.length === 1) {
@@ -5865,27 +8988,33 @@ const renderPhotographerProfile = () => {
       } else {
         setAutoTags(null);
         setVideoDurationSeconds(null);
+        if (needsAnalysis.length) runBatchQueueAiAnalysis(needsAnalysis);
       }
     };
 
     const removeQueuedVideo = (id) => {
       if (videoUploadLoading) return;
+      const hadSingle = videoQueue.length === 1;
       setVideoQueue((prev) => {
         const next = prev.filter((i) => i.id !== id);
         if (next.length === 0) {
-          setAutoTags(null);
           setVideoDurationSeconds(null);
+          cancelBatchQueueAi();
         }
         return next;
       });
+      if (hadSingle || analyzingMedia) cancelVideoAiAnalysis();
     };
 
     const clearVideoQueue = () => {
       if (videoUploadLoading) return;
+      cancelVideoAiAnalysis();
+      cancelBatchQueueAi();
+      videoItemAiPromiseRef.current.clear();
+      setVideoBatchReviewing(false);
       setVideoQueue([]);
       setVideoThumbnailFile(null);
       setVideoDurationSeconds(null);
-      setAutoTags(null);
     };
 
     if (!user) {
@@ -5968,6 +9097,12 @@ const renderPhotographerProfile = () => {
           const queueFailed = videoQueue.filter((i) => i.status === "error").length;
           const queuePendingCount = videoQueue.filter((i) => i.status === "pending" || i.status === "error").length;
           const isSingle = queueTotal === 1;
+          const queueAiDone = videoQueue.filter((i) => i.aiStatus === "done" || i.aiStatus === "failed").length;
+          const queueAiAnalyzing = videoQueue.some((i) => i.aiStatus === "analyzing");
+          const allAiFinished = videoQueue.every((i) => i.aiStatus === "done" || i.aiStatus === "failed");
+          const analyzingItem = videoQueue.find((i) => i.aiStatus === "analyzing");
+          const analyzingIndex = queueAiAnalyzing ? queueAiDone + 1 : 0;
+          const batchAiActive = !isSingle && !videoBatchReviewing && !videoUploadLoading && !allAiFinished;
           const uploadingIndex = videoQueue.findIndex((i) => i.status === "uploading");
 
           return (
@@ -6051,11 +9186,29 @@ const renderPhotographerProfile = () => {
 
             {queueTotal > 0 && (
               <div style={{ marginBottom: 20 }}>
+                {videoBatchReviewing && !videoUploadLoading ? (
+                  <div style={{
+                    background: "rgba(255, 107, 0, 0.1)",
+                    border: "1px solid rgba(255, 107, 0, 0.35)",
+                    borderRadius: 12,
+                    padding: "12px 14px",
+                    marginBottom: 12,
+                  }}>
+                    <div style={{ color: "var(--orange)", fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                      <AppIcon name="search" size={16} color="var(--orange)" />
+                      Revisá los tags antes de publicar
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+                      Editá marca, modelo, colores o placa de cada video si la IA no los detectó bien.
+                      Cuando estés conforme, confirmá la subida.
+                    </div>
+                  </div>
+                ) : null}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <span style={{ fontSize: 12, color: "var(--muted)" }}>
                     {videoUploadLoading
                       ? `Subiendo ${Math.min(queueDone + 1, queueTotal)} de ${queueTotal}…`
-                      : `${queueTotal} en cola${queueDone ? ` · ${queueDone} subido(s)` : ""}${queueFailed ? ` · ${queueFailed} con error` : ""}`}
+                      : `${queueTotal} en cola${queueDone ? ` · ${queueDone} subido(s)` : ""}${queueFailed ? ` · ${queueFailed} con error` : ""}${!isSingle && queueAiDone > 0 ? ` · IA ${queueAiDone}/${queueTotal}` : ""}${!isSingle && queueAiAnalyzing ? " · analizando…" : ""}`}
                   </span>
                   {!videoUploadLoading && (
                     <AppButton className="nav-btn" style={{ fontSize: 11, padding: "4px 10px" }} onClick={clearVideoQueue}>
@@ -6072,7 +9225,13 @@ const renderPhotographerProfile = () => {
                   </div>
                 )}
                 <div className="video-queue">
-                  {videoQueue.map((item, idx) => (
+                  {videoQueue.map((item) => {
+                    const itemTags = isSingle && item.id === videoQueue[0]?.id
+                      ? autoTags
+                      : { ...emptyVideoAiTags(), ...(item.aiTags || {}) };
+                    const tagEntries = getVideoAiTagEntries(itemTags);
+                    const showTagEditor = videoBatchReviewing && !videoUploadLoading && item.status !== "done";
+                    return (
                     <div key={item.id} className={`video-queue-item video-queue-item--${item.status}`}>
                       <span className="video-queue-status">
                         {item.status === "uploading" ? (
@@ -6081,6 +9240,12 @@ const renderPhotographerProfile = () => {
                           <AppIcon name="check" size={16} color="var(--success)" />
                         ) : item.status === "error" ? (
                           <AppIcon name="alert" size={16} color="#ff4444" />
+                        ) : item.aiStatus === "analyzing" ? (
+                          <LoaderIcon size={16} />
+                        ) : item.aiStatus === "done" ? (
+                          <AppIcon name="check" size={16} color="var(--success)" />
+                        ) : item.aiStatus === "failed" ? (
+                          <AppIcon name="alert" size={16} color="var(--orange)" />
                         ) : (
                           <span className="video-queue-dot" />
                         )}
@@ -6088,14 +9253,52 @@ const renderPhotographerProfile = () => {
                       <div className="video-queue-info">
                         <div className="video-queue-name">{item.file.name}</div>
                         <div className="video-queue-meta">
-                          {formatFileSize(item.file.size)}
-                          {item.status === "uploading"
-                            ? (typeof item.progress === "number" && item.progress < 100
-                              ? ` · Subiendo… ${item.progress}%`
-                              : " · Procesando…")
-                            : ""}
-                          {item.status === "done" ? " · Subido" : ""}
-                          {item.status === "error" ? ` · ${item.error || "Error"}` : ""}
+                          <div className="video-queue-meta-line">
+                            <span>{formatFileSize(item.file.size)}</span>
+                            {item.aiStatus === "failed" && !tagEntries.length && item.status !== "uploading" ? (
+                              <IconText icon="alert" size={10} color="var(--orange)">Sin tags (se puede editar después)</IconText>
+                            ) : null}
+                            {item.status === "uploading" ? (
+                              <IconText icon="upload" size={10} color="var(--orange)">
+                                {typeof item.progress === "number" && item.progress > 0 && item.progress < 100
+                                  ? `Subiendo… ${item.progress}%`
+                                  : item.progress >= 100
+                                    ? "Procesando…"
+                                    : "Iniciando subida…"}
+                              </IconText>
+                            ) : null}
+                            {item.status === "done" ? (
+                              <IconText icon="check" size={10} color="var(--success)">Subido</IconText>
+                            ) : null}
+                            {item.status === "error" ? (
+                              <IconText icon="alert" size={10} color="#ff6b6b">{item.error || "Error"}</IconText>
+                            ) : null}
+                          </div>
+                          {tagEntries.length > 0 && !showTagEditor ? (
+                            <div className="video-queue-tags">
+                              {tagEntries.map(({ key, label, value }) => (
+                                <span key={key} className="video-queue-tag">
+                                  <span className="video-queue-tag-label">{label}</span>
+                                  <span className="video-queue-tag-value">{value}</span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                          {showTagEditor ? (
+                            <div className="video-queue-tag-editor">
+                              {VIDEO_AI_TAG_FIELDS.map(({ key, label }) => (
+                                <div key={key} className="video-queue-tag-field">
+                                  <label className="video-queue-tag-field-label">{label}</label>
+                                  <input
+                                    className="form-input"
+                                    placeholder={key === "dorsal" ? "Ej: P123ABC" : ""}
+                                    value={itemTags[key] || ""}
+                                    onChange={(e) => updateQueueItemTag(item.id, key, e.target.value)}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                       {!videoUploadLoading && item.status !== "done" && (
@@ -6109,14 +9312,17 @@ const renderPhotographerProfile = () => {
                         </button>
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
-                {queueTotal > 1 && (
+                {queueTotal > 1 && !videoBatchReviewing ? (
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
                     Los datos de abajo (sector, hora, precio, álbum) se aplican a todos los videos.
-                    La IA detecta marca y colores de cada video al subirlo. No cierres la app durante la carga.
+                    La IA analiza marca, colores y placa de cada video (uno por uno, misma precisión que subida individual).
+                    Cuando termine, podrás revisar y editar los tags antes de publicar.
+                    No cierres la app durante la carga.
                   </div>
-                )}
+                ) : null}
               </div>
             )}
 
@@ -6126,13 +9332,55 @@ const renderPhotographerProfile = () => {
               </div>
             ) : null}
 
-            {analyzingMedia && (
+            {analyzingMedia && isSingle && videoQueue.length > 0 && (
               <div className="empty" style={{ padding: "24px 0" }}>
                 <LoaderIcon size={36} />
-                <div>Analizando video con IA...</div>
-                <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>Detectando marca, modelo y colores</div>
+                <div style={{ fontWeight: 600, marginTop: 8 }}>
+                  Analizando video con IA… {aiAnalysisProgress}%
+                </div>
+                <div className="video-queue-progress" style={{ marginTop: 14, maxWidth: 280, marginLeft: "auto", marginRight: "auto" }}>
+                  <div
+                    className="video-queue-progress-bar"
+                    style={{ width: `${aiAnalysisProgress}%` }}
+                  />
+                </div>
+                {aiAnalysisStep ? (
+                  <div style={{ fontSize: 13, color: "var(--orange)", marginTop: 10 }}>{aiAnalysisStep}</div>
+                ) : null}
+                <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 8 }}>
+                  Análisis de alta precisión (marca, modelo, colores y placa) — puede tardar un poco más
+                </div>
               </div>
             )}
+
+            {!isSingle && batchAiActive ? (
+              <div className="empty" style={{ padding: "24px 0", marginBottom: 16 }}>
+                <LoaderIcon size={36} />
+                {analyzingItem ? (
+                  <>
+                    <div style={{ fontWeight: 600, marginTop: 8 }}>
+                      Analizando video con IA… {analyzingIndex} de {queueTotal} — {analyzingItem.aiProgress ?? 0}%
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, wordBreak: "break-all" }}>
+                      {analyzingItem.file.name}
+                    </div>
+                    <div className="video-queue-progress" style={{ marginTop: 14, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
+                      <div
+                        className="video-queue-progress-bar"
+                        style={{ width: `${analyzingItem.aiProgress ?? 0}%` }}
+                      />
+                    </div>
+                    {analyzingItem.aiStep ? (
+                      <div style={{ fontSize: 13, color: "var(--orange)", marginTop: 10 }}>{analyzingItem.aiStep}</div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div style={{ fontWeight: 600, marginTop: 8 }}>
+                    Preparando análisis de {queueTotal} videos con IA…
+                  </div>
+                )}
+              </div>
+            ) : null}
 
             {autoTags && !analyzingMedia && (
               <div style={{ background: "var(--card)", borderRadius: 12, padding: 16, marginBottom: 20, border: "1px solid var(--border)" }}>
@@ -6146,12 +9394,13 @@ const renderPhotographerProfile = () => {
                   { label: "Color moto", key: "moto_color" },
                   { label: "Color casco", key: "helmet_color" },
                   { label: "Color traje", key: "suit_color" },
-                  { label: "Dorsal", key: "dorsal" },
+                  { label: "Placa", key: "dorsal" },
                 ].map(({ label, key }) => (
                   <div key={key} className="form-group" style={{ marginBottom: 10 }}>
                     <label className="form-label">{label}</label>
                     <input
                       className="form-input"
+                      placeholder={key === "dorsal" ? "Ej: P123ABC" : ""}
                       value={autoTags[key] || ""}
                       onChange={(e) => setAutoTags({ ...autoTags, [key]: e.target.value })}
                     />
@@ -6197,20 +9446,39 @@ const renderPhotographerProfile = () => {
                 onChange={(e) => setVideoForm({ ...videoForm, price: e.target.value })}
               />
             </div>
+            {videoBatchReviewing && !isSingle && !videoUploadLoading ? (
+              <AppButton
+                className="nav-btn"
+                style={{ marginBottom: 12, width: "100%" }}
+                onClick={() => setVideoBatchReviewing(false)}
+              >
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="arrowRight" size={14} style={{ transform: "rotate(180deg)" }} /> Volver a la cola</span>
+              </AppButton>
+            ) : null}
             <AppButton
               className="pay-btn"
-              disabled={queuePendingCount === 0 || analyzingMedia || videoUploadLoading}
-              onClick={startVideoQueueUpload}
+              disabled={
+                queuePendingCount === 0
+                || (isSingle && analyzingMedia)
+                || videoUploadLoading
+                || (!isSingle && !videoBatchReviewing && queueAiAnalyzing)
+                || (!isSingle && !videoBatchReviewing && !allAiFinished)
+              }
+              onClick={handleVideoUploadAction}
             >
-              {analyzingMedia
+              {isSingle && analyzingMedia
                 ? "ANALIZANDO..."
                 : videoUploadLoading
                   ? `SUBIENDO ${Math.min(queueDone + 1, queueTotal)}/${queueTotal}...`
                   : queueFailed > 0 && queueDone > 0
                     ? `REINTENTAR ${queueFailed} FALLIDO${queueFailed !== 1 ? "S" : ""}`
-                    : queueTotal > 1
-                      ? `SUBIR ${queuePendingCount} VIDEOS`
-                      : "SUBIR VIDEO"}
+                    : !isSingle && videoBatchReviewing
+                      ? `CONFIRMAR Y SUBIR ${queuePendingCount} VIDEOS`
+                      : batchAiActive
+                        ? "ANALIZANDO..."
+                        : queueTotal > 1
+                          ? `REVISAR TAGS (${queuePendingCount})`
+                          : "SUBIR VIDEO"}
             </AppButton>
           </div>
           );
@@ -6365,306 +9633,6 @@ const renderPhotographerProfile = () => {
     );
   };
 
-  const renderVideoSearch = () => {
-    const getPreviewLimit = (duration) => {
-      if (!duration || !Number.isFinite(duration)) return 7;
-      return duration <= 7 ? 3 : 7;
-    };
-
-    const SearchVideoCard = ({ video, purchaseState }) => {
-      const [playing, setPlaying] = useState(false);
-      const [progress, setProgress] = useState(0);
-      const [durationSec, setDurationSec] = useState(video.duration_seconds || null);
-      const videoRef = useRef(null);
-      const previewLimitRef = useRef(7);
-      const durationLabel = formatVideoDuration(durationSec);
-
-      const stopAtPreviewLimit = (el) => {
-        if (!el) return;
-        const limit = getPreviewLimit(el.duration);
-        previewLimitRef.current = limit;
-        if (el.currentTime >= limit) {
-          el.pause();
-          el.currentTime = 0;
-          setPlaying(false);
-          setProgress(0);
-        }
-      };
-
-      const togglePlay = () => {
-        const el = videoRef.current;
-        if (!el) return;
-        if (!playing) {
-          el.currentTime = 0;
-          previewLimitRef.current = getPreviewLimit(el.duration);
-          el.play().catch(() => {});
-          setPlaying(true);
-          setProgress(0);
-        } else {
-          el.pause();
-          el.currentTime = 0;
-          setPlaying(false);
-          setProgress(0);
-        }
-      };
-
-      const posterUrl = video.thumbnail_url?.trim() || null;
-      const hasPoster = Boolean(posterUrl);
-      const photographerHandle = video.photographer?.handle || video.photographer?.name || "MOTOSHOT";
-      const watermarkText = `@${String(photographerHandle).replace(/^@/, "")} • MotoShot GT`;
-
-      return (
-        <div style={{ position: "relative", background: "var(--surface)", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
-          <div style={{ position: "relative", height: 180, background: "#0a0a0a" }}>
-            {!playing && (
-              hasPoster ? (
-                <img
-                  src={posterUrl}
-                  alt=""
-                  loading="eager"
-                  decoding="async"
-                  draggable={false}
-                  style={{ width: "100%", height: 180, objectFit: "cover", display: "block" }}
-                />
-              ) : (
-                <div
-                  style={{
-                    width: "100%",
-                    height: 180,
-                    background: "#1a1a1a",
-                    display: "grid",
-                    placeItems: "center",
-                  }}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#333" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M15 10l4.553-2.276A1 1 0 0 1 21 8.618v6.764a1 1 0 0 1-1.447.894L15 14" />
-                    <rect x="3" y="6" width="12" height="12" rx="2" ry="2" />
-                  </svg>
-                </div>
-              )
-            )}
-            <video
-              ref={videoRef}
-              src={video.preview_url}
-              poster={posterUrl || undefined}
-              muted
-              playsInline
-              preload="none"
-              style={{
-                width: "100%",
-                height: 180,
-                objectFit: "cover",
-                display: "block",
-                position: "absolute",
-                top: 0,
-                left: 0,
-                opacity: playing ? 1 : 0,
-                pointerEvents: playing ? "auto" : "none",
-              }}
-              onLoadedMetadata={(e) => {
-                const dur = Math.round(e.currentTarget.duration);
-                if (dur > 0) setDurationSec((prev) => prev || dur);
-                previewLimitRef.current = getPreviewLimit(e.currentTarget.duration);
-              }}
-              onTimeUpdate={(e) => {
-                const el = e.currentTarget;
-                const limit = getPreviewLimit(el.duration);
-                previewLimitRef.current = limit;
-                if (!limit) return;
-                setProgress(Math.min(1, el.currentTime / limit));
-                stopAtPreviewLimit(el);
-              }}
-            />
-            {playing && (
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  zIndex: 1,
-                  pointerEvents: "none",
-                  overflow: "hidden",
-                }}
-              >
-                <div
-                  style={{
-                    position: "absolute",
-                    top: "-40%",
-                    left: "-40%",
-                    width: "180%",
-                    height: "180%",
-                    display: "grid",
-                    gridTemplateColumns: "repeat(3, 1fr)",
-                    gap: "28px 20px",
-                    transform: "rotate(-30deg)",
-                    alignContent: "center",
-                    justifyItems: "center",
-                  }}
-                >
-                  {Array.from({ length: 18 }).map((_, i) => (
-                    <span
-                      key={i}
-                      style={{
-                        color: "rgba(255,255,255,0.5)",
-                        fontSize: 14,
-                        fontWeight: 700,
-                        whiteSpace: "nowrap",
-                        userSelect: "none",
-                      }}
-                    >
-                      {watermarkText}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-            <button
-              type="button"
-              aria-label={playing ? "Pausar video" : "Reproducir video"}
-              onClick={togglePlay}
-              style={{
-                position: "absolute",
-                zIndex: 2,
-                border: "none",
-                cursor: "pointer",
-                color: "#fff",
-                background: "rgba(0,0,0,0.55)",
-                display: "grid",
-                placeItems: "center",
-                padding: 0,
-                ...(playing
-                  ? { top: 8, right: 8, width: 32, height: 32, borderRadius: 6, fontSize: 14 }
-                  : { top: "50%", left: "50%", transform: "translate(-50%, -50%)", width: 56, height: 56, borderRadius: "50%", fontSize: 24 }),
-              }}
-            >
-              {playing ? "■" : "▶"}
-            </button>
-            {durationLabel && (
-              <div
-                style={{
-                  position: "absolute",
-                  bottom: 8,
-                  right: 8,
-                  zIndex: 3,
-                  background: "rgba(0,0,0,0.82)",
-                  color: "#fff",
-                  padding: "2px 6px",
-                  borderRadius: 4,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  pointerEvents: "none",
-                }}
-              >
-                {durationLabel}
-              </div>
-            )}
-          </div>
-          {playing && (
-            <div style={{ height: 3, background: "#333", width: "100%" }}>
-              <div style={{ height: 3, background: "#FF6B00", width: `${progress * 100}%` }} />
-            </div>
-          )}
-          <div style={{ padding: 12 }}>
-            {video.photographer?.name && (
-              <button
-                type="button"
-                onClick={(e) => openPhotographerFromVideo(video, e)}
-                style={{
-                  background: "none",
-                  border: "none",
-                  padding: 0,
-                  marginBottom: 8,
-                  color: "var(--orange)",
-                  fontSize: 13,
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  textAlign: "left",
-                  display: "block",
-                  maxWidth: "100%",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {video.photographer.name}
-                {video.photographer.handle && (
-                  <span style={{ marginLeft: 6, color: "var(--muted)", fontWeight: 500, fontSize: 12 }}>
-                    {video.photographer.handle.startsWith("@") ? video.photographer.handle : `@${video.photographer.handle}`}
-                  </span>
-                )}
-              </button>
-            )}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-              {video.moto_brand && (
-                <span className="tag active" style={{ fontSize: 11 }}>
-                  {video.moto_brand} {video.moto_model}
-                </span>
-              )}
-              {video.moto_color && <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>}
-              {video.sector && <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>}
-              {video.event_time_start && <span className="tag" style={{ fontSize: 11 }}>{video.event_time_start}</span>}
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ color: "var(--orange)", fontWeight: 700, fontSize: 18 }}>Q{video.price}</span>
-              <VideoPurchaseButton
-                video={video}
-                isOwn={isOwnVideo(video)}
-                purchaseState={purchaseState}
-                onBuy={handleBuyVideo}
-              />
-            </div>
-          </div>
-        </div>
-      );
-    };
-
-    return (
-    <div style={{ padding: "20px", paddingBottom: 100 }}>
-      <SectionTitleIcon icon="video">BUSCAR VIDEOS</SectionTitleIcon>
-      <div className="section-sub" style={{ marginBottom: 20 }}>
-        Escribí lo que buscás — marca, color, casco, sector, dorsal… Los tags los detecta la IA al subir el video.
-      </div>
-
-      <div style={{ background: "var(--surface)", borderRadius: 12, padding: 20, marginBottom: 24, border: "1px solid var(--border)" }}>
-        <input
-          className="search-input"
-          placeholder="Ej: Ducati roja casco negro curva 3"
-          value={videoSearchQuery}
-          onChange={(e) => setVideoSearchQuery(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") handleVideoSearch(); }}
-          style={{ marginBottom: 12 }}
-        />
-        <AppButton className="pay-btn" onClick={() => handleVideoSearch()}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-            <AppIcon name="search" size={16} /> BUSCAR VIDEOS
-          </span>
-        </AppButton>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 20 }}>
-        {videosLoading && !pullRefreshing ? (
-          <div className="empty" style={{ gridColumn: "1 / -1" }}>
-            <LoaderIcon size={44} />
-            <div>Cargando videos...</div>
-          </div>
-        ) : videos.length > 0 ? (
-          videos.map((video) => (
-            <SearchVideoCard
-              key={video.id}
-              video={video}
-              purchaseState={resolveVideoPurchaseState(video, videoPurchaseStatusById)}
-            />
-          ))
-        ) : (
-          <div className="empty" style={{ gridColumn: "1 / -1" }}>
-            <EmptyIcon name="video" />
-            <div>{videoSearchRan ? "No hay videos que coincidan con tu búsqueda." : "Todavía no hay videos publicados."}</div>
-          </div>
-        )}
-      </div>
-    </div>
-    );
-  };
-
   const renderPendingDeliveries = () => {
     const finishHqDelivery = (mediaType, itemId) => {
       showToast(mediaType === "video"
@@ -6672,6 +9640,7 @@ const renderPhotographerProfile = () => {
         : "Listo: foto HQ entregada. El comprador recibirá un email.");
       setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === mediaType && p.id === itemId)));
       setPendingDeliveryCount((prev) => Math.max(0, prev - 1));
+      fetchVendorDashboard({ reconcile: false, silent: true });
     };
 
     const setHqProgress = (key, progress, phase) => {
@@ -6965,7 +9934,14 @@ const renderPhotographerProfile = () => {
               {[
                 { label: "Fotos", value: vendorStats.stats.photos_count, icon: "camera" },
                 { label: "Ventas", value: vendorStats.stats.total_sales, icon: "purchases" },
-                { label: "Ingresos", value: `Q${vendorStats.stats.total_amount}`, icon: "money" },
+                { label: "Ingresos netos", value: `Q${Number(vendorStats.stats.total_amount || 0).toFixed(2)}`, icon: "money" },
+                ...(Number(vendorStats.stats.pending_delivery_count || 0) > 0
+                  ? [{
+                      label: "Pendiente entrega",
+                      value: `Q${Number(vendorStats.stats.pending_delivery_amount || 0).toFixed(2)}`,
+                      icon: "package",
+                    }]
+                  : []),
               ].map(s => (
                 <div key={s.label} style={{ padding: 14, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", textAlign: "center" }}>
                   <div style={{ marginBottom: 6, display: "grid", placeItems: "center" }}><AppIcon name={s.icon} size={28} color="var(--orange)" /></div>
@@ -6974,11 +9950,20 @@ const renderPhotographerProfile = () => {
                 </div>
               ))}
             </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5, marginBottom: 16 }}>
+              Ingresos netos tras entregar en Entregas. Fotos: Q3 fijos + {vendorStats.stats.recurrente_fee_percent ?? 4.5}% (MotoShot Q{vendorStats.stats.motoshot_photo_fee_gtq ?? 1} + Recurrente Q{vendorStats.stats.recurrente_photo_fixed_gtq ?? 2} + {vendorStats.stats.recurrente_fee_percent ?? 4.5}%). Videos: MotoShot {vendorStats.stats.motoshot_video_percent ?? 10}% + Recurrente {vendorStats.stats.recurrente_fee_percent ?? 4.5}% + Q{vendorStats.stats.recurrente_video_fixed_gtq ?? 3}.
+              {Number(vendorStats.stats.pending_delivery_count || 0) > 0 && (
+                <span> Tenés {vendorStats.stats.pending_delivery_count} venta(s) por entregar (Q{Number(vendorStats.stats.pending_delivery_amount || 0).toFixed(2)} netos pendientes).</span>
+              )}
+              {vendorStats.stats.total_gross > 0 && (
+                <span> Ventas brutas: Q{Number(vendorStats.stats.total_gross).toFixed(2)} · Comisiones totales: Q{Number(vendorStats.stats.total_fees || 0).toFixed(2)}.</span>
+              )}
+            </div>
   
             {/* Ventas por día */}
-<div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1, marginBottom: 12 }}>VENTAS POR DÍA</div>
+<div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1, marginBottom: 12 }}>VENTAS ACREDITADAS POR DÍA</div>
 {vendorStats.stats.daily_sales.length === 0 ? (
-  <div className="empty"><EmptyIcon name="receipt" /><div>Todavía no tenés ventas registradas.</div></div>
+  <div className="empty"><EmptyIcon name="receipt" /><div>{Number(vendorStats.stats.pending_delivery_count || 0) > 0 ? "Tenés ventas pendientes de entrega HQ." : "Todavía no tenés ventas acreditadas."}</div></div>
 ) : (
   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
     {vendorStats.stats.daily_sales.map(d => (
@@ -6987,7 +9972,12 @@ const renderPhotographerProfile = () => {
           <div style={{ fontWeight: 600 }}>{d.date}</div>
           <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 2 }}>{d.sales} venta(s)</div>
         </div>
-        <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, color: "var(--success)" }}>Q{d.amount}</div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, color: "var(--success)" }}>Q{Number(d.amount).toFixed(2)}</div>
+          {d.gross > 0 && d.gross !== d.amount && (
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>bruto Q{Number(d.gross).toFixed(2)}</div>
+          )}
+        </div>
       </div>
     ))}
   </div>
@@ -6997,9 +9987,8 @@ const renderPhotographerProfile = () => {
 <div style={{ marginTop: 28 }}>
   <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1, marginBottom: 12 }}>RETIROS</div>
   {(() => {
-    const totalEarned = vendorStats?.stats?.total_amount || 0;
-    const totalWithdrawn = withdrawals.filter(w => ["pending","paid"].includes(w.status)).reduce((sum, w) => sum + Number(w.amount || 0), 0);
-    const available = totalEarned - totalWithdrawn;
+    const available = Number(vendorStats?.stats?.available_balance ?? 0);
+    const pendingDeliveryNet = Number(vendorStats?.stats?.pending_delivery_amount ?? 0);
     const hasPending = withdrawals.some(w => w.status === "pending");
     const hasBankAccount = isStructuredBankAccount(profile?.bank_account);
     const savedBank = parseBankAccount(profile?.bank_account);
@@ -7224,12 +10213,26 @@ const renderPhotographerProfile = () => {
         )}
         <div style={{ padding: 16, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
-            <div style={{ fontSize: 12, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Balance disponible</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Balance disponible (neto)</div>
             <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 36, color: available >= 50 ? "var(--success)" : "var(--muted)", lineHeight: 1, marginTop: 4 }}>
               Q{available.toFixed(2)}
             </div>
             {available < 50 && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Mínimo Q50 para retirar</div>}
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, maxWidth: 220, lineHeight: 1.45 }}>
+              Solo ventas con HQ entregado en Entregas, neto de comisiones MotoShot y Recurrente.
+            </div>
           </div>
+          {pendingDeliveryNet > 0 && (
+            <div style={{ textAlign: "right", maxWidth: 180 }}>
+              <div style={{ fontSize: 11, color: "var(--orange)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Pendiente entrega</div>
+              <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 28, color: "var(--orange)", lineHeight: 1, marginTop: 4 }}>
+                Q{pendingDeliveryNet.toFixed(2)}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.4 }}>
+                Se acredita al subir HQ en Entregas.
+              </div>
+            </div>
+          )}
           {hasPending ? (
             <div style={{ textAlign: "right" }}>
               <div style={{ fontSize: 12, color: "var(--orange)", fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}><LoaderIcon size={14} /> Retiro pendiente</div>
@@ -7311,7 +10314,6 @@ const renderPhotographerProfile = () => {
   };
   
   const openVideoEdit = (video) => {
-    const price = Number(video.price);
     const original = {
       price: String(video.price ?? ""),
       moto_brand: video.moto_brand || "",
@@ -7326,17 +10328,7 @@ const renderPhotographerProfile = () => {
     };
     setEditingVideoId(video.id);
     setVideoEditOriginal(original);
-    setVideoEditPayPalDisclosureAccepted(Number.isFinite(price) && price >= RECURRENTE_MIN_GTQ);
     setVideoEditForm({ ...original });
-  };
-
-  const syncVideoEditPayPalDisclosure = (nextPrice) => {
-    const n = Number(nextPrice);
-    if (!String(nextPrice).trim() || !Number.isFinite(n) || n <= 0) {
-      setVideoEditPayPalDisclosureAccepted(false);
-      return;
-    }
-    setVideoEditPayPalDisclosureAccepted(n >= RECURRENTE_MIN_GTQ);
   };
 
   const getVideoEditSuccessMessage = (original, form) => {
@@ -7355,57 +10347,17 @@ const renderPhotographerProfile = () => {
     return "Video actualizado.";
   };
 
-  const renderVideoPayPalDisclosure = (needsDisclosure, accepted, saving) => {
-    if (!needsDisclosure) return null;
-    return (
-      <div
-        style={{
-          padding: "12px 14px",
-          borderRadius: 10,
-          background: "rgba(255,107,0,0.08)",
-          border: "1px solid rgba(255,107,0,0.35)",
-        }}
-      >
-        <p style={{ margin: 0, fontSize: 12, lineHeight: 1.55, color: "var(--text)" }}>
-          Los precios menores a Q{RECURRENTE_MIN_GTQ} no pueden cobrarse con Recurrente.
-          {" "}Si guardás este precio, los compradores{" "}
-          <strong style={{ color: "var(--orange)" }}>solo podrán pagar con PayPal</strong>.
-        </p>
-        {!accepted ? (
-          <AppButton
-            className="nav-btn primary"
-            style={{ marginTop: 10, width: "100%", fontSize: 12 }}
-            disabled={saving}
-            onClick={() => setVideoEditPayPalDisclosureAccepted(true)}
-          >
-            ACEPTAR
-          </AppButton>
-        ) : (
-          <div style={{ marginTop: 10, fontSize: 12, color: "var(--success)", fontWeight: 600 }}>
-            Aceptado — podés guardar los cambios.
-          </div>
-        )}
-      </div>
-    );
-  };
-
   const cancelVideoEdit = () => {
     setEditingVideoId(null);
     setVideoEditForm({});
     setVideoEditOriginal(null);
-    setVideoEditPayPalDisclosureAccepted(false);
   };
 
   const saveVideoEdit = async (videoId) => {
     if (!session?.access_token) return;
     const editPrice = Number(videoEditForm.price);
-    if (
-      Number.isFinite(editPrice)
-      && editPrice > 0
-      && editPrice < RECURRENTE_MIN_GTQ
-      && !videoEditPayPalDisclosureAccepted
-    ) {
-      showToast(`Aceptá el aviso de pago con PayPal para guardar un precio menor a Q${RECURRENTE_MIN_GTQ}.`);
+    if (Number.isFinite(editPrice) && editPrice > 0 && editPrice < RECURRENTE_MIN_GTQ) {
+      showToast(`Recurrente requiere un mínimo de Q${RECURRENTE_MIN_GTQ}. Ajustá el precio del video.`);
       return;
     }
     setVideoEditSaving(true);
@@ -7441,6 +10393,119 @@ const renderPhotographerProfile = () => {
     }
   };
 
+  const deleteVideoById = async (videoId) => {
+    const res = await fetch(apiUrl(`/api/videos/${videoId}`), {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${session?.access_token}` },
+    });
+    const data = await parseApiJson(res);
+    return { ok: res.ok, error: data.error };
+  };
+
+  const removeVideoFromState = (videoId) => {
+    setMyVideos((prev) => prev.filter((v) => v.id !== videoId));
+    setPhotographerVideos((prev) => prev.filter((v) => v.id !== videoId));
+    if (editingVideoId === videoId) cancelVideoEdit();
+  };
+
+  const openStorageManager = async () => {
+    setStorageManagerOpen(true);
+    await Promise.all([fetchStorageUsage(), fetchStorageItems()]);
+  };
+
+  const handleDeleteStorageItem = (item) => {
+    openConfirmDialog({
+      title: item.type === "video" ? "ELIMINAR VIDEO" : "ELIMINAR FOTO",
+      message: `¿Eliminar "${item.title}"? Liberarás ${item.storage_label} de almacenamiento.`,
+      confirmLabel: "SÍ, ELIMINAR",
+      cancelLabel: "NO",
+      destructive: true,
+      onConfirm: async () => {
+        try {
+          if (item.type === "video") {
+            const { ok, error } = await deleteVideoById(item.id);
+            if (!ok) throw new Error(error || "No se pudo eliminar el video.");
+            removeVideoFromState(item.id);
+            notifyGalleryVideoDeleted(1);
+            if (profile?.id) await fetchMyVideos(profile.id);
+          } else {
+            const res = await fetch(`/api/photos/${item.id}`, {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${session?.access_token}` },
+            });
+            const data = await parseApiJson(res);
+            if (!res.ok) throw new Error(data.error || "No se pudo eliminar la foto.");
+            notifyGalleryPhotoDeleted(1);
+          }
+          await Promise.all([fetchStorageUsage(), fetchStorageItems()]);
+          showToast("Contenido eliminado. Almacenamiento actualizado.");
+        } catch (err) {
+          showToast(err.message || "No se pudo eliminar.");
+        }
+      },
+    });
+  };
+
+  const cancelVideoSelection = () => {
+    setVideoSelectionMode(false);
+    setSelectedVideoIds(new Set());
+  };
+
+  const toggleVideoSelect = (videoId) => {
+    setSelectedVideoIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(videoId)) next.delete(videoId);
+      else next.add(videoId);
+      return next;
+    });
+  };
+
+  const handleBulkDeleteVideos = async () => {
+    const ids = [...selectedVideoIds];
+    if (ids.length === 0 || videoBulkDeleteProgress) return;
+
+    openConfirmDialog({
+      title: "ELIMINAR VIDEOS",
+      message: `¿Eliminar ${ids.length} video(s) seleccionado(s)? Esta acción no se puede deshacer.`,
+      confirmLabel: "SÍ, ELIMINAR",
+      cancelLabel: "NO",
+      destructive: true,
+      onConfirm: async () => {
+        setVideoBulkDeleteProgress({ current: 0, total: ids.length });
+        let succeeded = 0;
+        let failed = 0;
+
+        for (let i = 0; i < ids.length; i += 1) {
+          const videoId = ids[i];
+          setVideoBulkDeleteProgress({ current: i + 1, total: ids.length });
+          try {
+            const { ok } = await deleteVideoById(videoId);
+            if (ok) {
+              succeeded += 1;
+              removeVideoFromState(videoId);
+            } else {
+              failed += 1;
+            }
+          } catch (err) {
+            console.error("handleBulkDeleteVideos:", videoId, err);
+            failed += 1;
+          }
+        }
+
+        setVideoBulkDeleteProgress(null);
+        cancelVideoSelection();
+        if (profile?.id) await fetchMyVideos(profile.id);
+        if (succeeded > 0) notifyGalleryVideoDeleted(succeeded);
+
+        if (failed === 0) {
+          showToast(succeeded === 1 ? "Video eliminado." : `${succeeded} videos eliminados.`);
+        } else {
+          showToast(`${succeeded} de ${ids.length} videos eliminados. ${failed} falló.`);
+        }
+      },
+    });
+  };
+
   const handleDeleteVideo = (video) => {
     openConfirmDialog({
       title: "ELIMINAR VIDEO",
@@ -7449,37 +10514,552 @@ const renderPhotographerProfile = () => {
       cancelLabel: "NO",
       destructive: true,
       onConfirm: async () => {
-        const res = await fetch(apiUrl(`/api/videos/${video.id}`), {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${session?.access_token}` },
-        });
-        const data = await parseApiJson(res);
-        if (res.ok) {
-          setMyVideos((prev) => prev.filter((v) => v.id !== video.id));
-          setPhotographerVideos((prev) => prev.filter((v) => v.id !== video.id));
-          if (editingVideoId === video.id) cancelVideoEdit();
+        const { ok, error } = await deleteVideoById(video.id);
+        if (ok) {
+          removeVideoFromState(video.id);
+          notifyGalleryVideoDeleted(1);
           showToast("Video eliminado.");
         } else {
-          showToast(data.error || "No se pudo eliminar el video.");
+          showToast(error || "No se pudo eliminar el video.");
         }
       },
     });
   };
 
-  const renderMyVideoCard = (video, { editable = false } = {}) => {
+  const renderMyVideoListRow = (video, {
+    selectionMode = false,
+    isSelected = false,
+    onToggleSelect,
+  } = {}) => {
+    const isPreviewing = Boolean(videoPreviewActive[video.id]);
+    const previewProgress = videoPreviewProgress[video.id] || 0;
+    const posterSrc = getVideoThumbnail(video);
+    const previewLimit = video.duration_seconds || videoDurationCache[video.id];
+    const label = getVideoUploadName(video);
+    const dateLabel = formatVideoUploadDate(video.created_at);
+    const durationLabel = formatVideoDuration(video.duration_seconds || videoDurationCache[video.id]) || "—";
+    const handle = profile?.handle || video.photographer?.handle || "MOTOSHOT";
+    const watermarkText = `@${String(handle).replace(/^@/, "")} • MotoShot GT`;
+
+    const handleRowClick = () => {
+      if (selectionMode && onToggleSelect) {
+        onToggleSelect(video.id);
+        return;
+      }
+      playVideoPreview(video.id, previewLimit, video.preview_url);
+    };
+
+    return (
+      <motion.div
+        key={video.id}
+        layout
+        variants={GALLERY_VIDEO_ROW_VARIANTS}
+        style={{
+          borderBottom: "1px solid var(--border)",
+          background: isSelected ? "rgba(255,107,0,0.06)" : "transparent",
+        }}
+      >
+        {isPreviewing && (
+          <div
+            className="video-card-media"
+            style={{ position: "relative", aspectRatio: "16 / 9", background: "#0a0a0a", margin: "0 20px 8px", borderRadius: 8, overflow: "hidden" }}
+            onContextMenu={(e) => e.preventDefault()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <video
+              ref={(el) => { videoRefs.current[video.id] = el; }}
+              className="video-card-preview is-playing"
+              src={video.preview_url}
+              muted={isVideoPreviewMuted(video.id)}
+              playsInline
+              preload="metadata"
+              controls={false}
+              disablePictureInPicture
+            />
+            <div style={{ position: "absolute", inset: 0, zIndex: 9, pointerEvents: "none", overflow: "hidden" }}>
+              <div
+                style={{
+                  position: "absolute",
+                  top: "-40%",
+                  left: "-40%",
+                  width: "180%",
+                  height: "180%",
+                  display: "grid",
+                  gridTemplateColumns: "repeat(3, 1fr)",
+                  gap: "28px 20px",
+                  transform: "rotate(-30deg)",
+                  alignContent: "center",
+                  justifyItems: "center",
+                }}
+              >
+                {Array.from({ length: 12 }).map((_, i) => (
+                  <span key={i} style={{ color: "rgba(255,255,255,0.45)", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", userSelect: "none" }}>
+                    {watermarkText}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Pausar video"
+              onClick={() => playVideoPreview(video.id, previewLimit, video.preview_url)}
+              style={{
+                position: "absolute",
+                top: 8,
+                right: 8,
+                zIndex: 11,
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                border: "none",
+                cursor: "pointer",
+                color: "#fff",
+                background: "rgba(0,0,0,0.55)",
+                display: "grid",
+                placeItems: "center",
+                padding: 0,
+              }}
+            >
+              <VideoPauseIcon />
+            </button>
+            <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 3, zIndex: 12, background: "rgba(255,255,255,0.2)" }}>
+              <div style={{ width: `${previewProgress * 100}%`, height: "100%", background: "var(--orange)", transition: "width 0.08s linear" }} />
+            </div>
+          </div>
+        )}
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={handleRowClick}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              handleRowClick();
+            }
+          }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "10px 20px",
+            cursor: "pointer",
+          }}
+        >
+          <div
+            style={{
+              position: "relative",
+              width: 60,
+              height: 60,
+              flexShrink: 0,
+              borderRadius: 8,
+              overflow: "hidden",
+              background: "#0a0a0a",
+              outline: isSelected ? "2px solid var(--orange)" : "none",
+            }}
+          >
+            <VideoThumbnail video={video} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            {selectionMode && (
+              <div style={{
+                position: "absolute",
+                inset: 0,
+                display: "grid",
+                placeItems: "center",
+                background: isSelected ? "rgba(255,107,0,0.35)" : "rgba(0,0,0,0.25)",
+                pointerEvents: "none",
+              }}
+              >
+                {isSelected ? <AppIcon name="check" size={18} color="#fff" /> : null}
+              </div>
+            )}
+            {!selectionMode && !isPreviewing && (
+              <div style={{
+                position: "absolute",
+                inset: 0,
+                display: "grid",
+                placeItems: "center",
+                background: "rgba(0,0,0,0.2)",
+                pointerEvents: "none",
+              }}
+              >
+                <VideoPlayIcon />
+              </div>
+            )}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {label}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4, display: "flex", flexWrap: "wrap", gap: "4px 10px", alignItems: "center" }}>
+              <span>{dateLabel}</span>
+              <span>·</span>
+              <span>{durationLabel}</span>
+              {(Number(video.price) > 0) && (
+                <>
+                  <span>·</span>
+                  <span style={{ color: "var(--orange)", fontWeight: 700 }}>Q{video.price}</span>
+                </>
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, display: "flex", flexWrap: "wrap", gap: "8px 14px" }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <VideoPreviewViewsIcon size={13} />
+                {Number(video.preview_views) || 0} reproducciones
+              </span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <VideoSalesCountIcon size={13} />
+                {Number(video.purchases_count) || 0} ventas
+              </span>
+            </div>
+          </div>
+          {!selectionMode && (
+            <AppButton
+              style={{
+                flexShrink: 0,
+                background: "rgba(220,50,50,0.15)",
+                border: "1px solid rgba(220,50,50,0.45)",
+                color: "#ff5555",
+                borderRadius: 8,
+                padding: "8px 10px",
+                cursor: "pointer",
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteVideo(video);
+              }}
+            >
+              <AppIcon name="trash" size={16} />
+            </AppButton>
+          )}
+        </div>
+      </motion.div>
+    );
+  };
+
+  const getPhotoListLabel = (photo) => {
+    if (photo?.location) return photo.location;
+    const tags = Array.isArray(photo?.tags) ? photo.tags.filter(Boolean) : [];
+    if (tags.length) return tags.slice(0, 2).join(" · ");
+    if (photo?.id) return String(photo.id).slice(0, 8).toUpperCase();
+    return "Foto";
+  };
+
+  // Nombre del archivo con el que se subió la foto. Cae al label si no existe.
+  const getPhotoUploadName = (photo) => {
+    const raw = String(photo?.original_filename || "").trim();
+    if (raw) return raw;
+    return getPhotoListLabel(photo);
+  };
+
+  const renderMyPhotoListRow = (photo, {
+    selectionMode = false,
+    isSelected = false,
+    onToggleSelect,
+  } = {}) => {
+    const albumName = photo.album_id ? albums.find((a) => a.id === photo.album_id)?.name : null;
+    const label = getPhotoUploadName(photo);
+    const dateLabel = photo.ride_date || "";
+    const timeLabel = photo.time_start
+      ? `${photo.time_start}${photo.time_end ? `–${photo.time_end}` : ""}`
+      : "";
+    const salesCount = Number(photo.downloads_count) || 0;
+
+    const handleRowClick = () => {
+      if (selectionMode && onToggleSelect) {
+        onToggleSelect(photo.id);
+        return;
+      }
+      openPhotoDetail(photo, VIEWS.MY_GALLERY);
+    };
+
+    return (
+      <motion.div
+        key={photo.id}
+        layout
+        variants={GALLERY_VIDEO_ROW_VARIANTS}
+        style={{
+          borderBottom: "1px solid var(--border)",
+          background: isSelected ? "rgba(255,107,0,0.06)" : "transparent",
+        }}
+      >
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={handleRowClick}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              handleRowClick();
+            }
+          }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "10px 20px",
+            cursor: "pointer",
+          }}
+        >
+          <div
+            style={{
+              position: "relative",
+              width: 60,
+              height: 60,
+              flexShrink: 0,
+              borderRadius: 8,
+              overflow: "hidden",
+              background: "#0a0a0a",
+              outline: isSelected ? "2px solid var(--orange)" : "none",
+            }}
+          >
+            <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            {selectionMode && (
+              <div style={{
+                position: "absolute",
+                inset: 0,
+                display: "grid",
+                placeItems: "center",
+                background: isSelected ? "rgba(255,107,0,0.35)" : "rgba(0,0,0,0.25)",
+                pointerEvents: "none",
+              }}
+              >
+                {isSelected ? <AppIcon name="check" size={18} color="#fff" /> : null}
+              </div>
+            )}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {albumName && (
+              <div style={{ fontSize: 11, color: "var(--orange)", marginBottom: 2 }}>
+                <IconText icon="folder" size={12}>{albumName}</IconText>
+              </div>
+            )}
+            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {label}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4, display: "flex", flexWrap: "wrap", gap: "4px 10px" }}>
+              {dateLabel && <span>{dateLabel}</span>}
+              {dateLabel && timeLabel && <span>·</span>}
+              {timeLabel && <span>{timeLabel}</span>}
+            </div>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, display: "flex", flexWrap: "wrap", gap: "8px 14px", alignItems: "center" }}>
+              <span style={{ color: "var(--text)", fontWeight: 700 }}>Q{photo.price}</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <VideoSalesCountIcon size={13} />
+                {salesCount} venta{salesCount !== 1 ? "s" : ""}
+              </span>
+            </div>
+          </div>
+          {!selectionMode && (
+            <AppButton
+              style={{
+                flexShrink: 0,
+                background: "rgba(220,50,50,0.15)",
+                border: "1px solid rgba(220,50,50,0.45)",
+                color: "#ff5555",
+                borderRadius: 8,
+                padding: "8px 10px",
+                cursor: "pointer",
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                openConfirmDialog({
+                  title: "ELIMINAR FOTO",
+                  message: "¿Eliminar esta foto? Esta acción no se puede deshacer.",
+                  confirmLabel: "SÍ, ELIMINAR",
+                  cancelLabel: "NO",
+                  destructive: true,
+                  onConfirm: async () => {
+                    const res = await fetch(`/api/photos/${photo.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${session?.access_token}` } });
+                    if (res.ok) notifyGalleryPhotoDeleted(1);
+                  },
+                });
+              }}
+            >
+              <AppIcon name="trash" size={16} />
+            </AppButton>
+          )}
+        </div>
+      </motion.div>
+    );
+  };
+
+  const renderMyVideoCard = (video, {
+    editable = false,
+    selectionMode = false,
+    isSelected = false,
+    onToggleSelect,
+    compact = false,
+  } = {}) => {
     const label =
       [video.moto_brand, video.moto_model].filter(Boolean).join(" ") ||
       video.sector ||
+      getVideoUploadName(video) ||
       "Video";
     const hqReady = video.hq_status === "ready";
     const isEditing = editable && editingVideoId === video.id;
     const editPrice = Number.parseFloat(String(videoEditForm.price ?? "").replace(",", "."));
-    const needsPayPalDisclosure =
+    const priceBelowRecurrenteMin =
       isEditing
       && Number.isFinite(editPrice)
       && editPrice > 0
       && editPrice < RECURRENTE_MIN_GTQ;
-    const canSaveVideoEdit = !needsPayPalDisclosure || videoEditPayPalDisclosureAccepted;
+    const canSaveVideoEdit = !priceBelowRecurrenteMin;
+
+    const thumbnailBlock = (
+      <div
+        style={{
+          position: "relative",
+          width: "100%",
+          aspectRatio: compact ? "3/4" : "16/9",
+          background: "#0a0a0a",
+          overflow: "hidden",
+          cursor: selectionMode ? "pointer" : "default",
+        }}
+        onClick={() => {
+          if (selectionMode && onToggleSelect) onToggleSelect(video.id);
+        }}
+      >
+        <VideoThumbnail
+          video={video}
+          className="video-card-poster-cover gallery-video-poster"
+          style={{ position: "absolute", inset: 0 }}
+          loading="eager"
+          onLoad={() => markVideoMediaReady(video.id)}
+        />
+        {video.duration_seconds ? (
+          <div style={{
+            position: "absolute", bottom: compact ? 4 : 8, right: compact ? 4 : 8,
+            background: "rgba(0,0,0,0.8)", color: "#fff",
+            padding: compact ? "1px 4px" : "2px 6px", borderRadius: 4, fontSize: compact ? 9 : 11,
+          }}>
+            {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
+          </div>
+        ) : null}
+        {!compact && (
+          <div style={{
+            position: "absolute", top: 8, left: 8,
+            background: hqReady ? "rgba(0,200,100,0.85)" : "rgba(255,107,0,0.85)",
+            color: "#fff", padding: "3px 8px", borderRadius: 6, fontSize: 10, fontWeight: 700,
+            zIndex: 6,
+          }}>
+            {hqReady ? "HQ listo" : "Preview"}
+          </div>
+        )}
+        {compact && (
+          <div style={{
+            position: "absolute", top: 6, left: 6, zIndex: 6,
+            width: 7, height: 7, borderRadius: "50%",
+            background: hqReady ? "#4ade80" : "var(--orange)",
+            boxShadow: "0 0 8px rgba(0,0,0,0.45)",
+          }} title={hqReady ? "HQ listo" : "Preview"} />
+        )}
+        {selectionMode && (
+          <div style={{
+            position: "absolute",
+            top: compact ? 6 : 10,
+            right: compact ? 6 : 10,
+            zIndex: 10,
+            width: compact ? 20 : 24,
+            height: compact ? 20 : 24,
+            borderRadius: "50%",
+            border: `2px solid ${isSelected ? "var(--orange)" : "rgba(255,255,255,0.55)"}`,
+            background: isSelected ? "var(--orange)" : "transparent",
+            display: "grid", placeItems: "center",
+            transition: "all 0.15s",
+            pointerEvents: "none",
+          }}>
+            {isSelected ? <AppIcon name="check" size={compact ? 12 : 14} color="#fff" /> : null}
+          </div>
+        )}
+        {editable && !isEditing && !selectionMode && (
+          <AppButton
+            style={{
+              position: "absolute",
+              top: compact ? 4 : 8,
+              right: compact ? 4 : 8,
+              zIndex: 6,
+              background: "rgba(220,50,50,0.85)", border: "none",
+              color: "#fff", borderRadius: 6,
+              padding: compact ? "2px 6px" : "4px 10px",
+              fontSize: compact ? 9 : 11, fontWeight: 700, cursor: "pointer",
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleDeleteVideo(video);
+            }}
+          >
+            <AppIcon name="trash" size={compact ? 12 : 14} />
+          </AppButton>
+        )}
+        {compact && (
+          <div
+            className="gallery-video-card-overlay"
+            style={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 5,
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "flex-end",
+              padding: "28px 8px 8px",
+              background: "linear-gradient(180deg, transparent 35%, rgba(0,0,0,0.88) 100%)",
+              pointerEvents: "none",
+            }}
+          >
+            <div style={{
+              fontSize: 10,
+              fontWeight: 700,
+              color: "#fff",
+              lineHeight: 1.25,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}>
+              {label}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 3, gap: 6 }}>
+              <span style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 17, color: "var(--orange)", lineHeight: 1 }}>
+                Q{video.price}
+              </span>
+              {Number(video.purchases_count) > 0 && (
+                <span style={{ fontSize: 9, color: "rgba(255,255,255,0.7)", fontWeight: 600 }}>
+                  {video.purchases_count} venta{video.purchases_count !== 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+
+    if (compact) {
+      const uploadName = getVideoUploadName(video);
+      return (
+        <motion.div
+          key={video.id}
+          layout
+          variants={GALLERY_VIDEO_CARD_VARIANTS}
+          whileHover={{ y: -3, transition: { duration: 0.2 } }}
+          whileTap={{ scale: 0.97 }}
+          className="gallery-video-item"
+        >
+          <div
+            className="gallery-video-card"
+            style={{
+              overflow: "hidden",
+              position: "relative",
+              outline: isSelected ? "3px solid var(--orange)" : "none",
+              outlineOffset: -3,
+              cursor: selectionMode ? "pointer" : "default",
+            }}
+          >
+            {thumbnailBlock}
+          </div>
+          <div className="gallery-video-filename" title={uploadName}>
+            {uploadName}
+          </div>
+        </motion.div>
+      );
+    }
 
     return (
       <div
@@ -7488,47 +11068,10 @@ const renderPhotographerProfile = () => {
           borderRadius: 14,
           overflow: "hidden",
           background: "var(--surface)",
-          border: `1px solid ${isEditing ? "var(--orange)" : "var(--border)"}`,
+          border: `1px solid ${isEditing || (selectionMode && isSelected) ? "var(--orange)" : "var(--border)"}`,
         }}
       >
-        <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#0a0a0a", overflow: "hidden" }}>
-          <VideoThumbnail
-            video={video}
-            className="video-card-poster-cover gallery-video-poster"
-            style={{ position: "absolute", inset: 0 }}
-            loading="eager"
-            onLoad={() => markVideoMediaReady(video.id)}
-          />
-          {video.duration_seconds ? (
-            <div style={{
-              position: "absolute", bottom: 8, right: 8,
-              background: "rgba(0,0,0,0.8)", color: "#fff",
-              padding: "2px 6px", borderRadius: 4, fontSize: 11,
-            }}>
-              {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
-            </div>
-          ) : null}
-          <div style={{
-            position: "absolute", top: 8, left: 8,
-            background: hqReady ? "rgba(0,200,100,0.85)" : "rgba(255,107,0,0.85)",
-            color: "#fff", padding: "3px 8px", borderRadius: 6, fontSize: 10, fontWeight: 700,
-          }}>
-            {hqReady ? "HQ listo" : "Preview"}
-          </div>
-          {editable && !isEditing && (
-            <AppButton
-              style={{
-                position: "absolute", top: 8, right: 8, zIndex: 6,
-                background: "rgba(220,50,50,0.85)", border: "none",
-                color: "#fff", borderRadius: 6, padding: "4px 10px",
-                fontSize: 11, fontWeight: 700, cursor: "pointer",
-              }}
-              onClick={() => handleDeleteVideo(video)}
-            >
-              <AppIcon name="trash" size={14} />
-            </AppButton>
-          )}
-        </div>
+        {thumbnailBlock}
         <div style={{ padding: "12px 14px" }}>
           {isEditing ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -7539,31 +11082,24 @@ const renderPhotographerProfile = () => {
               <div>
                 <label className="form-label" style={{ fontSize: 10 }}>
                   Precio (Q)
-                  {needsPayPalDisclosure ? (
-                    <span style={{ marginLeft: 6, color: "var(--orange)", fontWeight: 600 }}>· solo PayPal</span>
+                  {priceBelowRecurrenteMin ? (
+                    <span style={{ marginLeft: 6, color: "var(--orange)", fontWeight: 600 }}>· mín. Q{RECURRENTE_MIN_GTQ}</span>
                   ) : null}
                 </label>
                 <input
                   className="form-input"
                   type="number"
-                  min="1"
+                  min={RECURRENTE_MIN_GTQ}
                   step="1"
                   inputMode="numeric"
                   style={{ fontSize: 12, padding: "8px 10px" }}
                   value={videoEditForm.price ?? ""}
                   disabled={videoEditSaving}
                   onChange={(e) => {
-                    const nextPrice = e.target.value;
-                    setVideoEditForm((prev) => ({ ...prev, price: nextPrice }));
-                    syncVideoEditPayPalDisclosure(nextPrice);
+                    setVideoEditForm((prev) => ({ ...prev, price: e.target.value }));
                   }}
                 />
               </div>
-              {renderVideoPayPalDisclosure(
-                needsPayPalDisclosure,
-                videoEditPayPalDisclosureAccepted,
-                videoEditSaving
-              )}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                 {[
                   { label: "Marca", key: "moto_brand" },
@@ -7571,7 +11107,7 @@ const renderPhotographerProfile = () => {
                   { label: "Color moto", key: "moto_color" },
                   { label: "Color casco", key: "helmet_color" },
                   { label: "Color traje", key: "suit_color" },
-                  { label: "Dorsal", key: "dorsal" },
+                  { label: "Placa", key: "dorsal" },
                 ].map(({ label: fieldLabel, key }) => (
                   <div key={key}>
                     <label className="form-label" style={{ fontSize: 10 }}>{fieldLabel}</label>
@@ -7645,35 +11181,25 @@ const renderPhotographerProfile = () => {
             </div>
           ) : (
             <>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                {video.moto_brand && (
-                  <span className="tag active" style={{ fontSize: 11 }}>{video.moto_brand} {video.moto_model}</span>
-                )}
-                {video.moto_color && (
-                  <span className="tag" style={{ fontSize: 11 }}>{video.moto_color}</span>
-                )}
-                {video.sector && (
-                  <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>
-                )}
-                {video.dorsal && (
-                  <span className="tag" style={{ fontSize: 11, color: "var(--orange)" }}>#{video.dorsal}</span>
-                )}
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                  {video.event_time_start ? `${video.event_time_start}${video.event_time_end ? `–${video.event_time_end}` : ""}` : ""}
-                  {video.purchases_count > 0 && (
-                    <span style={{ marginLeft: video.event_time_start ? 8 : 0 }}>
-                      · {video.purchases_count} venta{video.purchases_count !== 1 ? "s" : ""}
-                    </span>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 8 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, lineHeight: 1.25 }}>{label}</div>
+                  {video.sector && (
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{video.sector}</div>
                   )}
                 </div>
-                <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 24, color: "var(--orange)" }}>
+                <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 24, color: "var(--orange)", flexShrink: 0 }}>
                   Q{video.price}
                 </div>
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6, gap: 8 }}>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{label}</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                  {video.purchases_count > 0 && (
+                    <span>
+                      {video.purchases_count} venta{video.purchases_count !== 1 ? "s" : ""}
+                    </span>
+                  )}
+                </div>
                 {editable && (
                   <AppButton
                     className="nav-btn"
@@ -7719,15 +11245,16 @@ const renderPhotographerProfile = () => {
           cancelLabel: "NO",
           destructive: true,
           onConfirm: async () => {
-            await Promise.all([...selectedPhotos].map(id =>
+            const results = await Promise.all([...selectedPhotos].map((id) =>
               fetch(`/api/photos/${id}`, {
                 method: "DELETE",
                 headers: { Authorization: `Bearer ${session?.access_token}` },
               })
             ));
+            const deletedCount = results.filter((res) => res.ok).length;
             setSelectedPhotos(new Set());
             setSelectMode(false);
-            fetchPhotos();
+            notifyGalleryPhotoDeleted(deletedCount);
           },
         });
       };
@@ -7762,6 +11289,8 @@ const renderPhotographerProfile = () => {
             if (tab === "videos") {
               setSelectMode(false);
               setSelectedPhotos(new Set());
+            } else {
+              cancelVideoSelection();
             }
           }}
           style={{
@@ -7799,6 +11328,22 @@ const renderPhotographerProfile = () => {
                 {selectMode ? "Cancelar" : (<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="scissors" size={14} /> Seleccionar</span>)}
               </AppButton>
             )}
+            {myGalleryMediaTab === "videos" && myVideos.length > 0 && (
+              <AppButton
+                className={`nav-btn${videoSelectionMode ? " primary" : ""}`}
+                disabled={!!videoBulkDeleteProgress}
+                onClick={() => {
+                  if (videoSelectionMode) cancelVideoSelection();
+                  else setVideoSelectionMode(true);
+                }}
+              >
+                {videoSelectionMode ? "Cancelar" : (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <AppIcon name="scissors" size={14} /> Seleccionar
+                  </span>
+                )}
+              </AppButton>
+            )}
           </div>
 
           <div style={{ padding: "0 20px", marginTop: 16 }}>
@@ -7815,7 +11360,64 @@ const renderPhotographerProfile = () => {
             </div>
           </div>
   
-          {/* Barra de acciones al seleccionar */}
+          {/* Barra de acciones al seleccionar videos */}
+          {myGalleryMediaTab === "videos" && videoSelectionMode && myVideos.length > 0 && (
+            <div style={{
+              margin: "12px 20px 0",
+              padding: "12px 16px",
+              borderRadius: 10,
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 10,
+              flexWrap: "wrap",
+            }}
+            >
+              <div style={{ fontSize: 13, color: "var(--muted)" }}>
+                {videoBulkDeleteProgress
+                  ? `Eliminando ${videoBulkDeleteProgress.current} de ${videoBulkDeleteProgress.total}...`
+                  : selectedVideoIds.size > 0
+                    ? <><span style={{ color: "var(--text)", fontWeight: 700 }}>{selectedVideoIds.size}</span> seleccionado(s)</>
+                    : "Tocá los videos para seleccionar"}
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <AppButton
+                  className="nav-btn"
+                  style={{ fontSize: 12 }}
+                  disabled={!!videoBulkDeleteProgress}
+                  onClick={() => {
+                    if (selectedVideoIds.size === myVideos.length) {
+                      setSelectedVideoIds(new Set());
+                    } else {
+                      setSelectedVideoIds(new Set(myVideos.map((v) => v.id)));
+                    }
+                  }}
+                >
+                  {selectedVideoIds.size === myVideos.length ? "Deseleccionar todo" : "Seleccionar todo"}
+                </AppButton>
+                <AppButton
+                  className="nav-btn"
+                  style={{
+                    fontSize: 12,
+                    background: selectedVideoIds.size > 0 ? "rgba(220,50,50,0.15)" : "none",
+                    borderColor: selectedVideoIds.size > 0 ? "rgba(220,50,50,0.6)" : "var(--border)",
+                    color: selectedVideoIds.size > 0 ? "#ff4444" : "var(--muted)",
+                  }}
+                  disabled={selectedVideoIds.size === 0 || !!videoBulkDeleteProgress}
+                  onClick={handleBulkDeleteVideos}
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <AppIcon name="trash" size={14} />
+                    Eliminar{selectedVideoIds.size > 0 ? ` (${selectedVideoIds.size})` : ""}
+                  </span>
+                </AppButton>
+              </div>
+            </div>
+          )}
+
+          {/* Barra de acciones al seleccionar fotos */}
           {myGalleryMediaTab === "photos" && selectMode && (
             <div style={{ margin: "12px 20px 0", padding: "12px 16px", borderRadius: 10, background: "var(--surface)", border: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <div style={{ fontSize: 13, color: "var(--muted)" }}>
@@ -7900,14 +11502,14 @@ const renderPhotographerProfile = () => {
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 20px", marginTop: 16, marginBottom: 8 }}>
       <div style={{ fontSize: 13, color: "var(--muted)" }}>{displayPhotos.length} foto(s)</div>
       <div style={{ display: "flex", gap: 4 }}>
-        {[{ mode: "grid", iconName: "gallery" }, { mode: "feed", iconName: "feed" }].map(({ mode, iconName }) => (
+        {[{ mode: "grid", iconName: "gallery" }, { mode: "list", iconName: "list" }].map(({ mode, iconName }) => (
           <AppButton
             key={mode}
-            onClick={() => setPhotoViewMode(mode)}
+            onClick={() => setGalleryPhotoViewMode(mode)}
             style={{
-              background: photoViewMode === mode ? "var(--orange)" : "var(--surface)",
-              border: `1px solid ${photoViewMode === mode ? "var(--orange)" : "var(--border)"}`,
-              color: photoViewMode === mode ? "#fff" : "var(--muted)",
+              background: galleryPhotoViewMode === mode ? "var(--orange)" : "var(--surface)",
+              border: `1px solid ${galleryPhotoViewMode === mode ? "var(--orange)" : "var(--border)"}`,
+              color: galleryPhotoViewMode === mode ? "#fff" : "var(--muted)",
               borderRadius: 8, padding: "6px 10px", cursor: "pointer",
               fontSize: 16, transition: "all 0.2s",
             }}
@@ -7916,66 +11518,44 @@ const renderPhotographerProfile = () => {
       </div>
     </div>
 
-    {photoViewMode === "grid" ? (
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 2 }}>
+    {galleryPhotoViewMode === "grid" ? (
+      <motion.div
+        className="gallery-video-grid"
+        initial="hidden"
+        animate="visible"
+        variants={GALLERY_VIDEO_GRID_VARIANTS}
+      >
         {displayPhotos.map(photo => {
           const isSelected = selectedPhotos.has(photo.id);
-          const albumName = photo.album_id ? albums.find(a => a.id === photo.album_id)?.name : null;
+          const uploadName = getPhotoUploadName(photo);
           return (
-            <div
+            <motion.div
               key={photo.id}
-              onClick={() => selectMode ? toggleSelect(photo.id) : null}
-              style={{ aspectRatio: "1", overflow: "hidden", position: "relative", background: "var(--card)", outline: isSelected ? "3px solid var(--orange)" : "none", outlineOffset: -3, cursor: selectMode ? "pointer" : "default" }}
+              layout
+              variants={GALLERY_VIDEO_CARD_VARIANTS}
+              whileHover={{ y: -3, transition: { duration: 0.2 } }}
+              whileTap={{ scale: 0.97 }}
+              className="gallery-video-item"
             >
-              {selectMode && (
-                <div style={{ position: "absolute", top: 6, left: 6, zIndex: 10, width: 20, height: 20, borderRadius: 5, border: `2px solid ${isSelected ? "var(--orange)" : "rgba(255,255,255,0.7)"}`, background: isSelected ? "var(--orange)" : "rgba(0,0,0,0.5)", display: "grid", placeItems: "center", fontSize: 12, color: "#fff", transition: "all 0.15s" }}>
-                  {isSelected ? <AppIcon name="check" size={14} color="#fff" /> : null}
-                </div>
-              )}
-              {!selectMode && (
-                <AppButton
-                  style={{ position: "absolute", top: 6, right: 6, zIndex: 6, background: "rgba(220,50,50,0.85)", border: "none", color: "#fff", borderRadius: 6, padding: "3px 7px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}
-                  onClick={e => {
-                    e.stopPropagation();
-                    openConfirmDialog({
-                      title: "ELIMINAR FOTO",
-                      message: "¿Eliminar esta foto? Esta acción no se puede deshacer.",
-                      confirmLabel: "SÍ, ELIMINAR",
-                      cancelLabel: "NO",
-                      destructive: true,
-                      onConfirm: async () => {
-                        const res = await fetch(`/api/photos/${photo.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${session?.access_token}` } });
-                        if (res.ok) fetchPhotos();
-                      },
-                    });
-                  }}
-                ><AppIcon name="trash" size={14} /></AppButton>
-              )}
-              <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            </div>
-          );
-        })}
-      </div>
-    ) : (
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: "0 20px" }}>
-        {displayPhotos.map(photo => {
-          const isSelected = selectedPhotos.has(photo.id);
-          const albumName = photo.album_id ? albums.find(a => a.id === photo.album_id)?.name : null;
-          return (
-            <div
-              key={photo.id}
-              style={{ borderRadius: 14, overflow: "hidden", background: "var(--surface)", border: `1px solid ${isSelected ? "var(--orange)" : "var(--border)"}`, cursor: selectMode ? "pointer" : "default" }}
-              onClick={() => selectMode ? toggleSelect(photo.id) : null}
-            >
-              <div style={{ width: "100%", aspectRatio: "4/3", overflow: "hidden", position: "relative" }}>
+              <div
+                onClick={() => selectMode ? toggleSelect(photo.id) : null}
+                className="gallery-video-card"
+                style={{
+                  aspectRatio: "1",
+                  position: "relative",
+                  outline: isSelected ? "3px solid var(--orange)" : "none",
+                  outlineOffset: -3,
+                  cursor: selectMode ? "pointer" : "default",
+                }}
+              >
                 {selectMode && (
-                  <div style={{ position: "absolute", top: 10, left: 10, zIndex: 10, width: 24, height: 24, borderRadius: 6, border: `2px solid ${isSelected ? "var(--orange)" : "rgba(255,255,255,0.7)"}`, background: isSelected ? "var(--orange)" : "rgba(0,0,0,0.5)", display: "grid", placeItems: "center", fontSize: 14, color: "#fff" }}>
+                  <div style={{ position: "absolute", top: 6, left: 6, zIndex: 10, width: 20, height: 20, borderRadius: 5, border: `2px solid ${isSelected ? "var(--orange)" : "rgba(255,255,255,0.7)"}`, background: isSelected ? "var(--orange)" : "rgba(0,0,0,0.5)", display: "grid", placeItems: "center", fontSize: 12, color: "#fff", transition: "all 0.15s" }}>
                     {isSelected ? <AppIcon name="check" size={14} color="#fff" /> : null}
                   </div>
                 )}
                 {!selectMode && (
                   <AppButton
-                    style={{ position: "absolute", top: 10, right: 10, zIndex: 6, background: "rgba(220,50,50,0.85)", border: "none", color: "#fff", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                    style={{ position: "absolute", top: 6, right: 6, zIndex: 6, background: "rgba(220,50,50,0.85)", border: "none", color: "#fff", borderRadius: 6, padding: "3px 7px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}
                     onClick={e => {
                       e.stopPropagation();
                       openConfirmDialog({
@@ -7986,34 +11566,34 @@ const renderPhotographerProfile = () => {
                         destructive: true,
                         onConfirm: async () => {
                           const res = await fetch(`/api/photos/${photo.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${session?.access_token}` } });
-                          if (res.ok) fetchPhotos();
+                          if (res.ok) notifyGalleryPhotoDeleted(1);
                         },
                       });
                     }}
                   ><AppIcon name="trash" size={14} /></AppButton>
                 )}
-                <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
               </div>
-              <div style={{ padding: "10px 14px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div>
-                    {albumName && <div style={{ fontSize: 11, color: "var(--orange)", marginBottom: 2 }}><IconText icon="folder" size={12}>{albumName}</IconText></div>}
-                    <div style={{ fontSize: 13, fontWeight: 700 }}><IconText icon="pin" size={12}>{photo.location}</IconText></div>
-                    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
-                      {photo.ride_date || ""}
-                      {photo.time_start ? ` · ${photo.time_start}${photo.time_end ? `–${photo.time_end}` : ""}` : ""}
-                    </div>
-                  </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 26, color: "var(--text)" }}>Q{photo.price}</div>
-                    <div style={{ fontSize: 10, background: "var(--success)", color: "#000", padding: "3px 8px", borderRadius: 6, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="check" size={10} color="#000" /> Publicada</div>
-                  </div>
-                </div>
+              <div className="gallery-video-filename" title={uploadName}>
+                {uploadName}
               </div>
-            </div>
+            </motion.div>
           );
         })}
-      </div>
+      </motion.div>
+    ) : (
+      <motion.div
+        initial="hidden"
+        animate="visible"
+        variants={GALLERY_VIDEO_LIST_VARIANTS}
+        style={{ display: "flex", flexDirection: "column", borderTop: "1px solid var(--border)" }}
+      >
+        {displayPhotos.map(photo => renderMyPhotoListRow(photo, {
+          selectionMode: selectMode,
+          isSelected: selectedPhotos.has(photo.id),
+          onToggleSelect: toggleSelect,
+        }))}
+      </motion.div>
     )}
   </>
 )}
@@ -8021,14 +11601,14 @@ const renderPhotographerProfile = () => {
           )}
 
           {myGalleryMediaTab === "videos" && (
-            <div style={{ padding: "16px 20px 0" }}>
+            <>
               {myVideosLoading ? (
-                <div className="empty" style={{ padding: "24px 0" }}>
+                <div className="empty" style={{ padding: "24px 20px 0" }}>
                   <LoaderIcon size={36} />
                   <div style={{ fontSize: 13, color: "var(--muted)" }}>Cargando videos...</div>
                 </div>
               ) : myVideos.length === 0 ? (
-                <div className="empty">
+                <div className="empty" style={{ padding: "16px 20px 0" }}>
                   <EmptyIcon name="video" />
                   <div>Todavía no subiste videos.</div>
                   <AppButton
@@ -8040,10 +11620,103 @@ const renderPhotographerProfile = () => {
                   </AppButton>
                 </div>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                  {myVideos.map((video) => renderMyVideoCard(video, { editable: true }))}
-                </div>
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: videoSelectionMode && myVideos.length > 0 ? "0 20px" : "16px 20px 0", marginBottom: 8 }}>
+                    <div style={{ fontSize: 13, color: "var(--muted)" }}>{myVideos.length} video(s)</div>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      {[
+                        { mode: "grid", iconName: "gallery" },
+                        { mode: "list", iconName: "list" },
+                      ].map(({ mode, iconName }) => (
+                        <AppButton
+                          key={mode}
+                          onClick={() => setVideoViewMode(mode)}
+                          style={{
+                            background: videoViewMode === mode ? "var(--orange)" : "var(--surface)",
+                            border: `1px solid ${videoViewMode === mode ? "var(--orange)" : "var(--border)"}`,
+                            color: videoViewMode === mode ? "#fff" : "var(--muted)",
+                            borderRadius: 8, padding: "6px 10px", cursor: "pointer",
+                            fontSize: 16, transition: "all 0.2s",
+                          }}
+                        ><AppIcon name={iconName} size={16} /></AppButton>
+                      ))}
+                    </div>
+                  </div>
+                  {videoViewMode === "grid" ? (
+                    <motion.div
+                      className="gallery-video-grid"
+                      initial="hidden"
+                      animate="visible"
+                      variants={GALLERY_VIDEO_GRID_VARIANTS}
+                    >
+                      {myVideos.map((video) => (
+                        renderMyVideoCard(video, {
+                          editable: true,
+                          selectionMode: videoSelectionMode,
+                          isSelected: selectedVideoIds.has(video.id),
+                          onToggleSelect: toggleVideoSelect,
+                          compact: true,
+                        })
+                      ))}
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      initial="hidden"
+                      animate="visible"
+                      variants={GALLERY_VIDEO_LIST_VARIANTS}
+                      style={{ display: "flex", flexDirection: "column", borderTop: "1px solid var(--border)" }}
+                    >
+                      {myVideos.map((video) => renderMyVideoListRow(video, {
+                        selectionMode: videoSelectionMode,
+                        isSelected: selectedVideoIds.has(video.id),
+                        onToggleSelect: toggleVideoSelect,
+                      }))}
+                    </motion.div>
+                  )}
+                </>
               )}
+              {videoSelectionMode && selectedVideoIds.size > 0 && (
+                <div aria-hidden style={{ height: 96 }} />
+              )}
+            </>
+          )}
+
+          {myGalleryMediaTab === "videos" && videoSelectionMode && selectedVideoIds.size > 0 && (
+            <div style={{
+              position: "fixed",
+              bottom: "calc(78px + env(safe-area-inset-bottom, 0px))",
+              left: 0,
+              right: 0,
+              zIndex: 200,
+              padding: "12px 20px",
+              background: "rgba(12,12,12,0.96)",
+              borderTop: "1px solid var(--border)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              backdropFilter: "blur(8px)",
+            }}>
+              <div style={{ fontSize: 13, color: "var(--muted)", flexShrink: 0 }}>
+                {videoBulkDeleteProgress
+                  ? `Eliminando ${videoBulkDeleteProgress.current} de ${videoBulkDeleteProgress.total}...`
+                  : <><span style={{ color: "var(--text)", fontWeight: 700 }}>{selectedVideoIds.size}</span> seleccionado(s)</>}
+              </div>
+              <AppButton
+                className="nav-btn"
+                style={{
+                  fontSize: 12,
+                  background: "rgba(220,50,50,0.2)",
+                  borderColor: "rgba(220,50,50,0.7)",
+                  color: "#ff5555",
+                }}
+                disabled={!!videoBulkDeleteProgress}
+                onClick={handleBulkDeleteVideos}
+              >
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <AppIcon name="trash" size={14} /> Eliminar ({selectedVideoIds.size})
+                </span>
+              </AppButton>
             </div>
           )}
       </div>
@@ -8051,20 +11724,100 @@ const renderPhotographerProfile = () => {
   }
   
     // ── COMPRADOR ──────────────────────────────────────────────────
-    const buyerGalleryItems = [
-      ...purchases.map((p) => ({
-        type: "photo",
-        key: `photo-${p.id}`,
-        purchase: p,
-        completed_at: p.completed_at,
-      })),
-      ...videoPurchases.map((v) => ({
-        type: "video",
-        key: `video-${v.id}`,
-        purchase: v,
-        completed_at: v.completed_at,
-      })),
-    ].sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
+    const buyerPhotoItems = purchases.map((p) => ({
+      type: "photo",
+      key: `photo-${p.id}`,
+      purchase: p,
+      completed_at: p.completed_at,
+    })).sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
+
+    const buyerVideoItems = videoPurchases.map((v) => ({
+      type: "video",
+      key: `video-${v.id}`,
+      purchase: v,
+      completed_at: v.completed_at,
+    })).sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
+
+    const buyerGalleryItems = [...buyerPhotoItems, ...buyerVideoItems]
+      .sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0));
+
+    const displayBuyerGalleryItems = buyerGalleryMediaTab === "photos" ? buyerPhotoItems : buyerVideoItems;
+
+    const getBuyerItemPhotographer = (item) => (
+      item.type === "photo" ? item.purchase.photo?.photographer : item.purchase.video?.photographer
+    );
+
+    const photographerGroupKey = (ph) => {
+      const handle = String(ph?.handle || "").replace(/^@/, "").trim().toLowerCase();
+      const name = String(ph?.name || "").trim().toLowerCase();
+      return handle || name || "desconocido";
+    };
+
+    const groupBuyerItemsByPhotographer = (items) => {
+      const groups = new Map();
+      for (const item of items) {
+        const ph = getBuyerItemPhotographer(item);
+        const key = photographerGroupKey(ph);
+        if (!groups.has(key)) {
+          groups.set(key, { photographer: ph, items: [], latestAt: 0 });
+        }
+        const group = groups.get(key);
+        group.items.push(item);
+        const ts = new Date(item.completed_at || 0).getTime();
+        if (ts > group.latestAt) group.latestAt = ts;
+      }
+      return [...groups.values()]
+        .sort((a, b) => b.latestAt - a.latestAt)
+        .map((group) => ({
+          ...group,
+          key: photographerGroupKey(group.photographer),
+          items: group.items.sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0)),
+        }));
+    };
+
+    const buyerGalleryGroups = groupBuyerItemsByPhotographer(displayBuyerGalleryItems);
+
+    const getBuyerItemLabel = (item) => {
+      if (item.type === "photo") {
+        return item.purchase.photo?.location || "Foto";
+      }
+      const video = item.purchase.video;
+      const parts = [video?.sector, video?.moto_brand, video?.moto_model].filter(Boolean);
+      return parts.length ? parts.join(" · ") : "Video";
+    };
+
+    const getBuyerItemSubLabel = (item) => {
+      if (item.type === "photo") {
+        return item.purchase.photo?.ride_date || "";
+      }
+      const handle = getBuyerItemPhotographer(item)?.handle;
+      return handle ? `@${String(handle).replace(/^@/, "")}` : "";
+    };
+
+    const openBuyerGalleryItem = (item) => {
+      const idx = displayBuyerGalleryItems.findIndex((entry) => entry.key === item.key);
+      if (idx >= 0) setBuyerGalleryModalIdx(idx);
+    };
+
+    const openBuyerGalleryPhotographer = (photographer) => {
+      const handle = photographer?.handle || photographer?.name;
+      if (!handle) return;
+      loadPhotographerByHandle(handle);
+    };
+
+    const buyerGalleryStatusBadgeStyle = {
+      position: "absolute",
+      top: 6,
+      left: 6,
+      padding: "2px 6px",
+      borderRadius: 4,
+      fontSize: 9,
+      fontWeight: 800,
+      letterSpacing: 0.3,
+      lineHeight: 1.2,
+      pointerEvents: "none",
+      textTransform: "uppercase",
+    };
 
     const downloadBuyerGalleryItem = async (item) => {
       if (!session?.access_token) return;
@@ -8118,7 +11871,7 @@ const renderPhotographerProfile = () => {
       }
     };
 
-    const modalItem = buyerGalleryModalIdx !== null ? buyerGalleryItems[buyerGalleryModalIdx] : null;
+    const modalItem = buyerGalleryModalIdx !== null ? displayBuyerGalleryItems[buyerGalleryModalIdx] : null;
 
     const HQ_GALLERY_WAIT_MS = 24 * 60 * 60 * 1000;
     const HQ_GALLERY_REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -8154,6 +11907,38 @@ const renderPhotographerProfile = () => {
         pending,
         ready: purchase.video?.hq_status === "ready" && !purchase.hq_downloaded_at,
       };
+    };
+
+    const renderBuyerGalleryStatusBadge = (item, { inline = false } = {}) => {
+      const { downloaded, pending, ready } = getBuyerGalleryItemState(item);
+      const base = inline
+        ? { padding: "3px 8px", borderRadius: 6, fontSize: 10, fontWeight: 700, letterSpacing: 0.3, textTransform: "uppercase", flexShrink: 0 }
+        : buyerGalleryStatusBadgeStyle;
+      if (downloaded) {
+        return <span style={{ ...base, background: "rgba(255,255,255,0.12)", color: "var(--muted)" }}>Descargado</span>;
+      }
+      if (ready) {
+        return <span style={{ ...base, background: "var(--orange)", color: "#000" }}>Listo</span>;
+      }
+      if (pending) {
+        return <span style={{ ...base, background: "rgba(255,255,255,0.15)", color: "#ddd" }}>Pendiente</span>;
+      }
+      return null;
+    };
+
+    const renderBuyerGalleryThumb = (item) => {
+      if (item.type === "photo") {
+        const thumb = item.purchase.photo?.watermark_url;
+        return thumb ? (
+          <img
+            src={thumb}
+            alt=""
+            loading="lazy"
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+        ) : null;
+      }
+      return <VideoThumbnail video={item.purchase.video} loading="lazy" />;
     };
 
     const canGalleryRequestHq = (purchase, completedAt) =>
@@ -8208,24 +11993,27 @@ const renderPhotographerProfile = () => {
       }
     };
 
-    const renderBuyerGalleryModalAction = (item) => {
+    const renderBuyerGalleryAction = (item, { compact = false } = {}) => {
       void purchasesCountdownTick;
       const purchase = item.purchase;
       const { purchaseId, downloaded, pending, ready } = getBuyerGalleryItemState(item);
       const resendKey = `${item.type}-${purchaseId}`;
       const loading = hqResendLoadingId === resendKey;
-      const requestLabel = item.type === "video" ? "Solicitar Video" : "Solicitar Foto";
+      const requestLabel = item.type === "video" ? "Solicitar video" : "Solicitar foto";
       const canRequest = canGalleryRequestHq(purchase, item.completed_at);
       const canResend = canGalleryResendHq(purchase);
       const hasReminder = Boolean(purchase.hq_reminder_sent_at);
       const countdown = formatGalleryCountdown(purchase.hq_reminder_sent_at);
+      const btnStyle = compact
+        ? { fontSize: 11, padding: "6px 12px", minWidth: 0, flexShrink: 0 }
+        : { maxWidth: 320, width: "100%" };
 
       if (downloaded) {
         return (
           <AppButton
-            className="pay-btn"
+            className="nav-btn"
             disabled
-            style={{ maxWidth: 320, width: "100%", opacity: 0.85, cursor: "not-allowed" }}
+            style={{ ...btnStyle, opacity: 0.7, cursor: "not-allowed" }}
           >
             Descargado
           </AppButton>
@@ -8235,12 +12023,15 @@ const renderPhotographerProfile = () => {
       if (ready) {
         return (
           <AppButton
-            className="pay-btn"
-            style={{ maxWidth: 320, width: "100%" }}
-            onClick={() => downloadBuyerGalleryItem(item)}
+            className={compact ? "nav-btn primary" : "pay-btn"}
+            style={btnStyle}
+            onClick={(e) => {
+              e?.stopPropagation();
+              downloadBuyerGalleryItem(item);
+            }}
           >
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <AppIcon name="arrowRight" size={14} style={{ transform: "rotate(90deg)" }} />
+            <span style={{ display: "inline-flex", alignItems: "center", gap: compact ? 4 : 6 }}>
+              {!compact && <AppIcon name="arrowRight" size={14} style={{ transform: "rotate(90deg)" }} />}
               Descargar
             </span>
           </AppButton>
@@ -8249,7 +12040,9 @@ const renderPhotographerProfile = () => {
 
       if (pending) {
         if (hasReminder && !canResend) {
-          return (
+          return compact ? (
+            <span style={{ fontSize: 11, color: "var(--muted)", flexShrink: 0 }}>Solicitud enviada</span>
+          ) : (
             <div style={{ maxWidth: 320, width: "100%", textAlign: "center" }}>
               <AppButton
                 className="pay-btn"
@@ -8269,35 +12062,71 @@ const renderPhotographerProfile = () => {
 
         return (
           <AppButton
-            className="pay-btn"
-            style={{ maxWidth: 320, width: "100%" }}
+            className={compact ? "nav-btn" : "pay-btn"}
+            style={btnStyle}
             disabled={loading || !canRequest}
-            onClick={() => handleGalleryHqRequest(item)}
+            onClick={(e) => {
+              e?.stopPropagation();
+              handleGalleryHqRequest(item);
+            }}
           >
-            {loading ? "Enviando solicitud..." : requestLabel}
+            {loading ? "Enviando..." : requestLabel}
           </AppButton>
         );
       }
 
       return (
         <AppButton
-          className="pay-btn"
-          style={{ maxWidth: 320, width: "100%" }}
-          onClick={() => downloadBuyerGalleryItem(item)}
+          className={compact ? "nav-btn primary" : "pay-btn"}
+          style={btnStyle}
+          onClick={(e) => {
+            e?.stopPropagation();
+            downloadBuyerGalleryItem(item);
+          }}
         >
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <AppIcon name="arrowRight" size={14} style={{ transform: "rotate(90deg)" }} />
+          <span style={{ display: "inline-flex", alignItems: "center", gap: compact ? 4 : 6 }}>
+            {!compact && <AppIcon name="arrowRight" size={14} style={{ transform: "rotate(90deg)" }} />}
             Descargar
           </span>
         </AppButton>
       );
     };
 
+    const renderBuyerGalleryModalAction = (item) => renderBuyerGalleryAction(item);
+
+    const buyerGalleryTabBtn = (tab, label, count) => (
+      <button
+        type="button"
+        onClick={() => {
+          setBuyerGalleryMediaTab(tab);
+          setBuyerGalleryModalIdx(null);
+        }}
+        style={{
+          fontFamily: "'Bebas Neue', sans-serif",
+          fontSize: 16,
+          letterSpacing: 1,
+          padding: "12px 8px",
+          background: "none",
+          border: "none",
+          borderBottom: buyerGalleryMediaTab === tab ? "2px solid var(--orange)" : "2px solid transparent",
+          color: buyerGalleryMediaTab === tab ? "var(--orange)" : "var(--muted)",
+          cursor: "pointer",
+          width: "100%",
+        }}
+      >
+        {label} · {count}
+      </button>
+    );
+
     return (
       <div style={{ paddingBottom: 100 }}>
         <div className="upload-view" style={{ paddingBottom: 12 }}>
           <SectionTitleIcon icon="gallery">Mi Galeria</SectionTitleIcon>
-          <div className="section-sub">Fotos y videos que compraste — tocá para ver en grande.</div>
+          <div className="section-sub">
+            {buyerGalleryItems.length > 0
+              ? `${buyerPhotoItems.length} foto(s) · ${buyerVideoItems.length} video(s) comprados`
+              : "Fotos y videos que compraste — tocá para ver en grande."}
+          </div>
         </div>
         {!user ? (
           <div className="empty"><EmptyIcon name="lock" /><div>Iniciá sesión para ver tu galería.</div></div>
@@ -8312,93 +12141,213 @@ const renderPhotographerProfile = () => {
             </AppButton>
           </div>
         ) : (
-          <div
-            style={{
+          <div style={{ maxWidth: 540, margin: "0 auto", padding: "0 20px" }}>
+            <div style={{
               display: "grid",
-              gridTemplateColumns: "repeat(3, 1fr)",
-              gap: 2,
-              width: "100%",
+              gridTemplateColumns: "1fr 1fr",
+              borderBottom: "1px solid var(--border)",
+              marginBottom: 16,
             }}
-          >
-            {buyerGalleryItems.map((item, idx) => {
-              const thumb = item.type === "photo"
-                ? item.purchase.photo?.watermark_url
-                : getVideoThumbnail(item.purchase.video);
-              return (
-                <button
-                  key={item.key}
-                  type="button"
-                  aria-label={item.type === "video" ? "Abrir video comprado" : "Abrir foto comprada"}
-                  onClick={() => setBuyerGalleryModalIdx(idx)}
-                  style={{
-                    position: "relative",
-                    aspectRatio: "1 / 1",
-                    padding: 0,
-                    border: "none",
-                    cursor: "pointer",
-                    background: "#0a0a0a",
-                    overflow: "hidden",
-                    display: "block",
-                    width: "100%",
-                  }}
-                >
-                  {item.type === "photo" ? (
-                    thumb ? (
-                      <img
-                        src={thumb}
-                        alt=""
-                        loading="lazy"
-                        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                      />
-                    ) : null
-                  ) : (
-                    <VideoThumbnail video={item.purchase.video} loading="lazy" />
-                  )}
-                  {item.type === "video" && (
-                    <span
-                      style={{
-                        position: "absolute",
-                        top: 6,
-                        right: 6,
-                        width: 22,
-                        height: 22,
-                        borderRadius: 4,
-                        background: "rgba(0,0,0,0.55)",
-                        color: "#fff",
-                        fontSize: 10,
-                        display: "grid",
-                        placeItems: "center",
-                        lineHeight: 1,
-                        pointerEvents: "none",
-                      }}
-                    >
-                      ▶
-                    </span>
-                  )}
-                  <span
-                    style={{
-                      position: "absolute",
-                      bottom: 6,
-                      right: 6,
-                      minWidth: 18,
-                      height: 18,
-                      padding: "0 4px",
-                      borderRadius: 4,
-                      background: "#FF6B00",
-                      color: "#000",
-                      fontSize: 11,
-                      fontWeight: 800,
-                      display: "grid",
-                      placeItems: "center",
-                      lineHeight: 1,
-                      pointerEvents: "none",
-                    }}
-                  >
-                    ✓
-                  </span>
-                </button>
-              );
-            })}
+            >
+              <div style={{ borderRight: "1px solid var(--border)" }}>
+                {buyerGalleryTabBtn("photos", "FOTOS", buyerPhotoItems.length)}
+              </div>
+              {buyerGalleryTabBtn("videos", "VIDEOS", buyerVideoItems.length)}
+            </div>
+
+            {displayBuyerGalleryItems.length === 0 ? (
+              <div className="empty" style={{ padding: "32px 0" }}>
+                <EmptyIcon name={buyerGalleryMediaTab === "photos" ? "image" : "video"} />
+                <div>
+                  {buyerGalleryMediaTab === "photos"
+                    ? "Todavía no compraste fotos."
+                    : "Todavía no compraste videos."}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                  <div style={{ fontSize: 13, color: "var(--muted)" }}>
+                    {displayBuyerGalleryItems.length} {buyerGalleryMediaTab === "photos" ? "foto(s)" : "video(s)"}
+                    {" · "}
+                    {buyerGalleryGroups.length} fotógrafo(s)
+                  </div>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {[{ mode: "grid", iconName: "gallery" }, { mode: "feed", iconName: "feed" }].map(({ mode, iconName }) => (
+                      <AppButton
+                        key={mode}
+                        onClick={() => setBuyerGalleryViewMode(mode)}
+                        style={{
+                          background: buyerGalleryViewMode === mode ? "var(--orange)" : "var(--surface)",
+                          border: `1px solid ${buyerGalleryViewMode === mode ? "var(--orange)" : "var(--border)"}`,
+                          color: buyerGalleryViewMode === mode ? "#fff" : "var(--muted)",
+                          borderRadius: 8,
+                          padding: "6px 10px",
+                          cursor: "pointer",
+                          fontSize: 16,
+                          transition: "all 0.2s",
+                        }}
+                      >
+                        <AppIcon name={iconName} size={16} />
+                      </AppButton>
+                    ))}
+                  </div>
+                </div>
+
+                {buyerGalleryGroups.map((group) => {
+                  const ph = group.photographer;
+                  const phName = ph?.name || "Fotógrafo";
+                  const phHandle = ph?.handle ? `@${String(ph.handle).replace(/^@/, "")}` : null;
+                  const mediaLabel = buyerGalleryMediaTab === "photos"
+                    ? `${group.items.length} foto${group.items.length === 1 ? "" : "s"}`
+                    : `${group.items.length} video${group.items.length === 1 ? "" : "s"}`;
+
+                  return (
+                    <section key={group.key} style={{ marginBottom: 28 }}>
+                      <button
+                        type="button"
+                        onClick={() => openBuyerGalleryPhotographer(ph)}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 10,
+                          width: "100%",
+                          marginBottom: 10,
+                          padding: "10px 12px",
+                          borderRadius: 10,
+                          border: "1px solid var(--border)",
+                          background: "var(--surface)",
+                          cursor: ph?.handle || ph?.name ? "pointer" : "default",
+                          textAlign: "left",
+                        }}
+                      >
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--orange)" }}>{phName}</div>
+                          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+                            {phHandle ? <>{phHandle} · </> : null}
+                            {mediaLabel}
+                          </div>
+                        </div>
+                        {(ph?.handle || ph?.name) && (
+                          <AppIcon name="arrowRight" size={14} color="var(--muted)" />
+                        )}
+                      </button>
+
+                      {buyerGalleryViewMode === "grid" ? (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 2 }}>
+                          {group.items.map((item) => (
+                            <button
+                              key={item.key}
+                              type="button"
+                              aria-label={item.type === "video" ? "Abrir video comprado" : "Abrir foto comprada"}
+                              onClick={() => openBuyerGalleryItem(item)}
+                              style={{
+                                position: "relative",
+                                aspectRatio: "1 / 1",
+                                padding: 0,
+                                border: "none",
+                                cursor: "pointer",
+                                background: "#0a0a0a",
+                                overflow: "hidden",
+                                display: "block",
+                                width: "100%",
+                              }}
+                            >
+                              {renderBuyerGalleryThumb(item)}
+                              {renderBuyerGalleryStatusBadge(item)}
+                              {item.type === "video" && (
+                                <span
+                                  style={{
+                                    position: "absolute",
+                                    top: 6,
+                                    right: 6,
+                                    width: 22,
+                                    height: 22,
+                                    borderRadius: 4,
+                                    background: "rgba(0,0,0,0.55)",
+                                    color: "#fff",
+                                    display: "grid",
+                                    placeItems: "center",
+                                    pointerEvents: "none",
+                                  }}
+                                >
+                                  <AppIcon name="video" size={12} />
+                                </span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          {group.items.map((item) => (
+                            <div
+                              key={item.key}
+                              style={{
+                                display: "flex",
+                                gap: 12,
+                                alignItems: "center",
+                                padding: 10,
+                                borderRadius: 10,
+                                border: "1px solid var(--border)",
+                                background: "var(--surface)",
+                              }}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => openBuyerGalleryItem(item)}
+                                style={{
+                                  position: "relative",
+                                  width: 72,
+                                  height: 72,
+                                  flexShrink: 0,
+                                  padding: 0,
+                                  border: "none",
+                                  borderRadius: 8,
+                                  overflow: "hidden",
+                                  cursor: "pointer",
+                                  background: "#0a0a0a",
+                                }}
+                              >
+                                {renderBuyerGalleryThumb(item)}
+                                {item.type === "video" && (
+                                  <span
+                                    style={{
+                                      position: "absolute",
+                                      inset: 0,
+                                      display: "grid",
+                                      placeItems: "center",
+                                      background: "rgba(0,0,0,0.25)",
+                                      pointerEvents: "none",
+                                    }}
+                                  >
+                                    <AppIcon name="video" size={18} color="#fff" />
+                                  </span>
+                                )}
+                              </button>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                  {getBuyerItemLabel(item)}
+                                </div>
+                                {getBuyerItemSubLabel(item) && (
+                                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+                                    {getBuyerItemSubLabel(item)}
+                                  </div>
+                                )}
+                                <div style={{ marginTop: 6 }}>
+                                  {renderBuyerGalleryStatusBadge(item, { inline: true })}
+                                </div>
+                              </div>
+                              {renderBuyerGalleryAction(item, { compact: true })}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  );
+                })}
+              </>
+            )}
           </div>
         )}
 
@@ -8442,7 +12391,7 @@ const renderPhotographerProfile = () => {
                 const dx = endX - startX;
                 if (dx > 55 && buyerGalleryModalIdx > 0) {
                   setBuyerGalleryModalIdx((i) => i - 1);
-                } else if (dx < -55 && buyerGalleryModalIdx < buyerGalleryItems.length - 1) {
+                } else if (dx < -55 && buyerGalleryModalIdx < displayBuyerGalleryItems.length - 1) {
                   setBuyerGalleryModalIdx((i) => i + 1);
                 }
               }}
@@ -9098,6 +13047,269 @@ const subscriptionsListScrollStyle = {
   paddingRight: 4,
 };
 
+const renderMembershipPlansSection = ({
+  footerNote,
+  showRequestButton,
+  title = "ELEGÍ TU MEMBRESÍA",
+  subtitle = "Planes mensuales · deslizá para comparar",
+  currentPlanId = null,
+  fadeBg = "var(--bg)",
+  embedded = false,
+  onPlanSelect,
+  saving = false,
+} = {}) => (
+  <motion.div
+    initial={{ opacity: 0, y: 16 }}
+    animate={{ opacity: 1, y: 0 }}
+    transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+    style={{ marginBottom: embedded ? 0 : 20 }}
+  >
+    <div style={{ marginBottom: 12 }}>
+      <motion.div
+        initial={{ opacity: 0, x: -12 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ duration: 0.4, delay: 0.05 }}
+        style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 20, letterSpacing: 1, marginBottom: 4 }}
+      >
+        {title}
+      </motion.div>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.4, delay: 0.12 }}
+        style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}
+      >
+        {subtitle}
+      </motion.div>
+    </div>
+
+    <div style={{ position: "relative", margin: "0 -4px" }}>
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          bottom: 6,
+          width: 28,
+          zIndex: 2,
+          background: `linear-gradient(90deg, ${fadeBg} 20%, transparent 100%)`,
+          pointerEvents: "none",
+        }}
+      />
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          right: 0,
+          top: 0,
+          bottom: 6,
+          width: 28,
+          zIndex: 2,
+          background: `linear-gradient(270deg, ${fadeBg} 20%, transparent 100%)`,
+          pointerEvents: "none",
+        }}
+      />
+
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.35, delay: 0.15 }}
+        style={{
+          display: "flex",
+          gap: 10,
+          overflowX: "auto",
+          overflowY: "hidden",
+          scrollSnapType: "x mandatory",
+          WebkitOverflowScrolling: "touch",
+          scrollbarWidth: "none",
+          padding: "4px 4px 10px",
+          msOverflowStyle: "none",
+        }}
+      >
+        {MEMBERSHIP_PLANS.map((plan, index) => {
+          const isCurrentPlan = currentPlanId && plan.id === currentPlanId;
+          return (
+          <motion.div
+            key={plan.id}
+            custom={index}
+            initial={{ opacity: 0, x: 32, scale: 0.92 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            transition={{
+              delay: 0.1 + index * 0.07,
+              duration: 0.45,
+              ease: [0.22, 1, 0.36, 1],
+            }}
+            whileHover={{ y: -5, scale: 1.02 }}
+            whileTap={{ scale: 0.97 }}
+            style={{
+              position: "relative",
+              flex: "0 0 188px",
+              width: 188,
+              scrollSnapAlign: "start",
+              display: "flex",
+              flexDirection: "column",
+              borderRadius: 12,
+              overflow: "hidden",
+              background: "var(--surface)",
+              border: isCurrentPlan
+                ? "2px solid #4ade80"
+                : plan.featured
+                  ? "2px solid var(--orange)"
+                  : "1px solid var(--border)",
+              boxShadow: isCurrentPlan
+                ? "0 0 18px rgba(74,222,128,0.2)"
+                : plan.featured
+                  ? "0 0 18px rgba(255,107,0,0.2)"
+                  : "0 2px 10px rgba(0,0,0,0.25)",
+              cursor: "pointer",
+            }}
+            onClick={() => {
+              if (saving) return;
+              (onPlanSelect || handleMembershipPlanSelect)(plan);
+            }}
+          >
+            {isCurrentPlan && (
+              <div style={{
+                position: "absolute",
+                top: 8,
+                left: 8,
+                zIndex: 3,
+                background: "#4ade80",
+                color: "#0a1a0f",
+                fontSize: 8,
+                fontWeight: 800,
+                letterSpacing: 0.5,
+                padding: "3px 6px",
+                borderRadius: 5,
+                textTransform: "uppercase",
+              }}>
+                Tu plan
+              </div>
+            )}
+            {plan.featured && !isCurrentPlan && (
+              <motion.div
+                animate={{
+                  boxShadow: [
+                    "0 0 0 rgba(255,107,0,0)",
+                    "0 0 14px rgba(255,107,0,0.45)",
+                    "0 0 0 rgba(255,107,0,0)",
+                  ],
+                }}
+                transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  borderRadius: 12,
+                  pointerEvents: "none",
+                  zIndex: 1,
+                }}
+              />
+            )}
+            {plan.featured && (
+              <div style={{
+                position: "absolute",
+                top: 8,
+                right: 8,
+                zIndex: 3,
+                background: "var(--orange)",
+                color: "#000",
+                fontSize: 8,
+                fontWeight: 800,
+                letterSpacing: 0.5,
+                padding: "3px 6px",
+                borderRadius: 5,
+                textTransform: "uppercase",
+              }}>
+                Popular
+              </div>
+            )}
+            <div style={{ position: "relative", width: "100%", height: 88, background: "#000", flexShrink: 0 }}>
+              <motion.img
+                src={plan.image}
+                alt={plan.name}
+                initial={{ scale: 1.08 }}
+                animate={{ scale: 1 }}
+                transition={{ duration: 0.6, delay: 0.15 + index * 0.07 }}
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+              />
+            </div>
+            <div style={{ padding: "10px 10px 11px", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+              <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 15, letterSpacing: 0.6, marginBottom: 2, lineHeight: 1.1 }}>
+                {plan.name.replace("Plan ", "")}
+              </div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 3, marginBottom: 4 }}>
+                <span style={{ color: "var(--orange)", fontWeight: 800, fontSize: 20, lineHeight: 1 }}>Q{plan.price}</span>
+                <span style={{ color: "var(--muted)", fontSize: 10, fontWeight: 600 }}>/mes</span>
+              </div>
+              <div style={{ fontSize: 10, color: "var(--text)", fontWeight: 600, marginBottom: 8 }}>
+                {plan.storageGB} GB
+              </div>
+              <ul style={{ listStyle: "none", margin: "0 0 10px", padding: 0, display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+                {plan.benefits.slice(0, 3).map((benefit, benefitIndex) => (
+                  <motion.li
+                    key={benefit}
+                    initial={{ opacity: 0, x: -6 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 0.22 + index * 0.07 + benefitIndex * 0.04, duration: 0.3 }}
+                    style={{ display: "flex", alignItems: "flex-start", gap: 5, fontSize: 9.5, color: "var(--muted)", lineHeight: 1.35 }}
+                  >
+                    <AppIcon name="check" size={10} color="var(--orange)" style={{ flexShrink: 0, marginTop: 1 }} />
+                    <span>{benefit}</span>
+                  </motion.li>
+                ))}
+              </ul>
+              <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.96 }}>
+                <AppButton
+                  className={plan.featured ? "upload-btn" : "nav-btn"}
+                  style={{ width: "100%", fontSize: 10, padding: "7px 8px", minHeight: 0 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (saving) return;
+                    (onPlanSelect || handleMembershipPlanSelect)(plan);
+                  }}
+                  disabled={saving}
+                >
+                  {saving
+                    ? "Procesando…"
+                    : isCurrentPlan
+                      ? "Plan actual"
+                      : `Elegir ${plan.name.replace("Plan ", "")}`}
+                </AppButton>
+              </motion.div>
+            </div>
+          </motion.div>
+        );
+        })}
+      </motion.div>
+    </div>
+
+    {footerNote && (
+      <motion.p
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.45, duration: 0.35 }}
+        style={{ marginTop: 10, fontSize: 11, color: "var(--muted)", lineHeight: 1.5, textAlign: "center" }}
+      >
+        {footerNote}
+      </motion.p>
+    )}
+
+    {showRequestButton && (
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.5, duration: 0.4 }}
+        style={{ marginTop: 14, textAlign: "center" }}
+      >
+        <AppButton className="upload-btn" onClick={() => setProfile({ _requestMode: true })}>
+          Solicitar perfil profesional
+        </AppButton>
+      </motion.div>
+    )}
+  </motion.div>
+);
+
 const renderMySubscriptionsSection = () => (
   <div style={{ marginBottom: 28, padding: 20, borderRadius: 14, background: "var(--surface)", border: "1px solid var(--border)" }}>
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 12 }}>
@@ -9320,7 +13532,7 @@ const renderVendorRequest = () => {
       const { countryCode, localNumber } = parsePhoneNumber(profile.phone);
       setPhoneCountry(countryCode);
       setPhoneLocal(localNumber);
-      setEditMode(!editMode);
+      setEditMode(true);
       setEditForm({
         name: profile.name || "",
         bio: profile.bio || "",
@@ -9334,18 +13546,19 @@ const renderVendorRequest = () => {
       });
     }}
     style={{
-      background: editMode ? "rgba(255,68,68,0.1)" : "rgba(255,255,255,0.06)",
-      border: `1px solid ${editMode ? "rgba(255,68,68,0.5)" : "rgba(255,255,255,0.15)"}`,
-      color: editMode ? "#ff4444" : "var(--text)",
+      background: "rgba(255,255,255,0.06)",
+      border: "1px solid rgba(255,255,255,0.15)",
+      color: "var(--text)",
       padding: "8px 16px",
       borderRadius: 10,
       fontSize: 13,
       fontWeight: 700,
       cursor: "pointer",
       fontFamily: "'DM Sans', sans-serif",
+      display: editMode ? "none" : "inline-flex",
     }}
   >
-    {editMode ? (<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="x" size={14} /> Cancelar</span>) : (<span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="edit" size={14} /> Editar Perfil</span>)}
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="edit" size={14} /> Editar Perfil</span>
   </AppButton>
 </div>
 </div>
@@ -9355,10 +13568,11 @@ const renderVendorRequest = () => {
                 <VerifiedBadge size={16} />
               </div>
               {profile.bio && (
-                <div style={{ color: "var(--muted)", fontSize: 13, marginBottom: formatPhoneDisplay(profile.phone) ? 8 : 20, lineHeight: 1.6, textAlign: "center" }}>
+                <div style={{ color: "var(--muted)", fontSize: 13, marginBottom: 12, lineHeight: 1.6, textAlign: "center" }}>
                   {profile.bio}
                 </div>
               )}
+              {!editMode && renderShareProfileButton(profile)}
               {formatPhoneDisplay(profile.phone) && (
                 <div style={{ color: "var(--muted)", fontSize: 13, marginBottom: 20, lineHeight: 1.6, textAlign: "center" }}>
                   Tel: {formatPhoneDisplay(profile.phone)}
@@ -9470,7 +13684,7 @@ const renderVendorRequest = () => {
                 <input className="form-input" value={editForm.name} onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
               </div>
               <div className="form-group">
-    <label className="form-label">Handle</label>
+    <label className="form-label">Usuario</label>
   <div style={{ position: "relative" }}>
     <input 
       className="form-input" 
@@ -9525,10 +13739,10 @@ const renderVendorRequest = () => {
               </div>
               <div className="form-group">
                 <label className="form-label">Teléfono</label>
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <select
                     className="form-input"
-                    style={{ width: "auto", flexShrink: 0 }}
+                    style={{ width: "100%" }}
                     value={phoneCountry}
                     onChange={e => {
                       const code = e.target.value;
@@ -9547,6 +13761,7 @@ const renderVendorRequest = () => {
                     placeholder="4444-4444"
                     value={phoneLocal}
                     onChange={e => setPhoneLocal(normalizePhoneLocal(e.target.value, phoneCountry))}
+                    style={{ width: "100%" }}
                   />
                 </div>
               </div>
@@ -9616,6 +13831,197 @@ const renderVendorRequest = () => {
                 {editLoading ? "GUARDANDO..." : "GUARDAR CAMBIOS"}
               </AppButton>
 
+              <div id="storage-section" style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 14 }}>
+                  <div>
+                    <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1, marginBottom: 4 }}>ALMACENAMIENTO</div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+                      {storageUsage?.plan_name || membershipPlanLabel(storageUsage?.membership_plan) || "Plan Básico"}
+                      {storageUsage?.staff_complimentary || isStaff
+                        ? " · Activo · Admin"
+                        : storageUsage?.membership_status === "active"
+                          ? " · Activo"
+                          : " · Membresía pendiente"}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "right", flexShrink: 0 }}>
+                    {storageUsage ? (
+                      <>
+                        <div style={{ color: "var(--text)", fontWeight: 700 }}>
+                          {formatStorageGb(storageUsage.used_gb)} / {storageUsage.limit_gb} GB
+                        </div>
+                        <div>{Math.round(storageUsage.percent)}% usado</div>
+                      </>
+                    ) : storageLoading ? "Calculando..." : "—"}
+                  </div>
+                </div>
+
+                <div style={{ height: 10, borderRadius: 999, background: "var(--card)", border: "1px solid var(--border)", overflow: "hidden", marginBottom: 12 }}>
+                  <motion.div
+                    initial={{ width: 0 }}
+                    animate={{ width: `${Math.min(100, storageUsage?.percent || 0)}%` }}
+                    transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+                    style={{
+                      height: "100%",
+                      borderRadius: 999,
+                      background: (storageUsage?.percent || 0) >= 90
+                        ? "linear-gradient(90deg, #ff4444, #ff6b6b)"
+                        : "linear-gradient(90deg, var(--orange), #ffb347)",
+                    }}
+                  />
+                </div>
+
+                {storageUsage && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 12, fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <PhotographerPhotoCountIcon />
+                      Fotos: <strong style={{ color: "var(--text)" }}>{storageUsage.photos.label}</strong>
+                      <span>({storageUsage.photos.count})</span>
+                    </span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <PhotographerVideoCountIcon />
+                      Videos: <strong style={{ color: "var(--text)" }}>{storageUsage.videos.label}</strong>
+                      <span>({storageUsage.videos.count})</span>
+                    </span>
+                    <span>
+                      Disponible: <strong style={{ color: "var(--orange)" }}>{formatStorageGb(storageUsage.available_gb)}</strong>
+                    </span>
+                  </div>
+                )}
+
+                <AppButton
+                  className="nav-btn"
+                  style={{ width: "100%", marginBottom: storageManagerOpen ? 14 : 10 }}
+                  onClick={() => (storageManagerOpen ? setStorageManagerOpen(false) : openStorageManager())}
+                >
+                  {storageManagerOpen ? "Ocultar gestión" : "Manejar almacenamiento"}
+                </AppButton>
+
+                <AppButton
+                  className="nav-btn primary"
+                  style={{ width: "100%", marginBottom: editMembershipOpen ? 14 : 0 }}
+                  onClick={() => setEditMembershipOpen((prev) => !prev)}
+                  disabled={membershipSaving}
+                >
+                  {editMembershipOpen ? "Ocultar membresía" : "Editar membresía"}
+                </AppButton>
+
+                {editMembershipOpen && (
+                  <div style={{ marginTop: 4 }}>
+                    {renderMembershipPlansSection({
+                      title: "EDITAR MEMBRESÍA",
+                      subtitle: isStaff || storageUsage?.staff_complimentary
+                        ? "Cuenta admin · cambiá de plan sin cargo"
+                        : "Cambiá de plan o cancelá tu membresía",
+                      currentPlanId: storageUsage?.membership_plan || "basico",
+                      fadeBg: "var(--surface)",
+                      embedded: true,
+                      onPlanSelect: saveMembershipPlan,
+                      saving: membershipSaving,
+                      footerNote: isStaff || storageUsage?.staff_complimentary
+                        ? "Tu plan admin es sin cargo. Elegí otro plan para ajustar tu almacenamiento."
+                        : "Seleccioná un plan para cambiar tu membresía mensual.",
+                    })}
+                    <AppButton
+                      className="nav-btn"
+                      style={{
+                        width: "100%",
+                        marginTop: 12,
+                        color: "#ff6b6b",
+                        borderColor: "rgba(255,107,107,0.4)",
+                      }}
+                      onClick={cancelMembership}
+                      disabled={membershipSaving}
+                    >
+                      {membershipSaving ? "Procesando…" : "Cancelar membresía"}
+                    </AppButton>
+                  </div>
+                )}
+
+                {storageManagerOpen && (
+                  <div style={{ marginTop: 4, padding: 12, borderRadius: 12, background: "var(--card)", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                      {[
+                        { id: "photos", label: `Fotos (${storageItems.photos.length})` },
+                        { id: "videos", label: `Videos (${storageItems.videos.length})` },
+                      ].map((tab) => (
+                        <AppButton
+                          key={tab.id}
+                          className={storageTab === tab.id ? "nav-btn primary" : "nav-btn"}
+                          style={{ flex: 1, fontSize: 11, padding: "8px 10px" }}
+                          onClick={() => setStorageTab(tab.id)}
+                        >
+                          {tab.label}
+                        </AppButton>
+                      ))}
+                    </div>
+
+                    {storageLoading ? (
+                      <div className="empty" style={{ padding: "20px 0" }}><LoaderIcon size={32} /><div style={{ fontSize: 12, color: "var(--muted)" }}>Cargando contenido...</div></div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto" }}>
+                        {(storageTab === "photos" ? storageItems.photos : storageItems.videos).length === 0 ? (
+                          <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: "16px 8px" }}>
+                            No hay {storageTab === "photos" ? "fotos" : "videos"} publicados.
+                          </div>
+                        ) : (
+                          (storageTab === "photos" ? storageItems.photos : storageItems.videos).map((item) => (
+                            <div
+                              key={`${item.type}-${item.id}`}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 10,
+                                padding: 10,
+                                borderRadius: 10,
+                                background: "var(--surface)",
+                                border: "1px solid var(--border)",
+                              }}
+                            >
+                              <div style={{ width: 52, height: 52, borderRadius: 8, overflow: "hidden", background: "#111", flexShrink: 0, position: "relative" }}>
+                                {item.thumb_url ? (
+                                  <img src={item.thumb_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                                ) : (
+                                  <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}>
+                                    <AppIcon name={item.type === "video" ? "video" : "camera"} size={18} color="var(--muted)" />
+                                  </div>
+                                )}
+                                {item.type === "video" && item.thumb_url && (
+                                  <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.25)" }}>
+                                    <AppIcon name="video" size={14} color="#fff" />
+                                  </div>
+                                )}
+                              </div>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</div>
+                                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                                  {item.storage_label} · Q{item.price}
+                                </div>
+                              </div>
+                              <AppButton
+                                onClick={() => handleDeleteStorageItem(item)}
+                                style={{
+                                  background: "rgba(255,68,68,0.1)",
+                                  border: "1px solid rgba(255,68,68,0.45)",
+                                  color: "#ff6b6b",
+                                  borderRadius: 8,
+                                  padding: "6px 10px",
+                                  fontSize: 11,
+                                  fontWeight: 700,
+                                  flexShrink: 0,
+                                }}
+                              >
+                                Eliminar
+                              </AppButton>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
              {/* Suscripción */}
 <div id="subscription-section" style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
   <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 18, letterSpacing: 1, marginBottom: 14 }}>SUSCRIPCIÓN</div>
@@ -9623,25 +14029,128 @@ const renderVendorRequest = () => {
     <label className="form-label">Precio mensual (Q) — 0 = sin suscripción</label>
     <input className="form-input" type="number" placeholder="0" defaultValue={profile.subscription_price || ""} id="sub-price-input" />
   </div>
-  <div className="form-group">
-    <label className="form-label">Beneficios (uno por línea)</label>
-    <textarea className="form-input" rows={3} defaultValue={(profile.subscription_benefits || []).join("\n")} id="sub-benefits-input" style={{ resize: "vertical", lineHeight: 1.6 }} />
+
+  <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
+    Definí cuánto contenido puede reclamar gratis cada suscriptor por mes. Al agotar su cupo, deberá comprar de forma individual.
   </div>
-  <AppButton className="nav-btn primary" onClick={async () => {
+
+  {(() => {
+    const quotaMode = (q) => (q === -1 ? "unlimited" : (Number(q) > 0 ? "limited" : "none"));
+    const quotaNum = (q) => (Number(q) > 0 ? q : 5);
+    const photoQ = profile.subscription_photo_quota;
+    const videoQ = profile.subscription_video_quota;
+    const QuotaRow = ({ label, modeId, numId, initMode, initNum }) => (
+      <div className="form-group">
+        <label className="form-label">{label}</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          <select
+            className="form-input"
+            id={modeId}
+            defaultValue={initMode}
+            style={{ flex: 1 }}
+            onChange={(e) => {
+              const numEl = document.getElementById(numId);
+              if (numEl) {
+                numEl.disabled = e.target.value !== "limited";
+                numEl.style.opacity = e.target.value === "limited" ? "1" : "0.4";
+              }
+            }}
+          >
+            <option value="none">No incluido</option>
+            <option value="limited">Cantidad fija al mes</option>
+            <option value="unlimited">Ilimitado</option>
+          </select>
+          <input
+            className="form-input"
+            type="number"
+            min="1"
+            id={numId}
+            defaultValue={initNum}
+            disabled={initMode !== "limited"}
+            style={{ width: 110, opacity: initMode === "limited" ? 1 : 0.4 }}
+            placeholder="cant."
+          />
+        </div>
+      </div>
+    );
+    return (
+      <>
+        <QuotaRow label="Fotos por mes incluidas" modeId="sub-photo-mode" numId="sub-photo-num" initMode={quotaMode(photoQ)} initNum={quotaNum(photoQ)} />
+        <QuotaRow label="Videos por mes incluidos" modeId="sub-video-mode" numId="sub-video-num" initMode={quotaMode(videoQ)} initNum={quotaNum(videoQ)} />
+      </>
+    );
+  })()}
+
+  <div className="form-group">
+    <label className="form-label">Beneficios extra (uno por línea, opcional)</label>
+    <textarea className="form-input" rows={3} defaultValue={(profile.subscription_benefits || []).join("\n")} id="sub-benefits-input" style={{ resize: "vertical", lineHeight: 1.6 }} placeholder={"con edición incluida\nacceso anticipado"} />
+  </div>
+  <AppButton className="nav-btn primary" style={{ width: "100%" }} onClick={async () => {
     const price = document.getElementById("sub-price-input").value;
     const benefits = document.getElementById("sub-benefits-input").value.split("\n").map(b => b.trim()).filter(Boolean);
+    const readQuota = (modeId, numId) => {
+      const mode = document.getElementById(modeId)?.value;
+      if (mode === "unlimited") return -1;
+      if (mode === "none") return 0;
+      const n = parseInt(document.getElementById(numId)?.value, 10);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    };
+    const subscription_photo_quota = readQuota("sub-photo-mode", "sub-photo-num");
+    const subscription_video_quota = readQuota("sub-video-mode", "sub-video-num");
     const res = await fetch("/api/auth/subscription-settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-      body: JSON.stringify({ subscription_price: price ? parseFloat(price) : null, subscription_benefits: benefits }),
+      body: JSON.stringify({ subscription_price: price ? parseFloat(price) : null, subscription_benefits: benefits, subscription_photo_quota, subscription_video_quota }),
     });
     const data = await res.json();
     if (res.ok) {
-      setProfile(prev => ({ ...prev, subscription_price: data.photographer.subscription_price, subscription_benefits: data.photographer.subscription_benefits }));
+      setProfile(prev => ({
+        ...prev,
+        subscription_price: data.photographer.subscription_price,
+        subscription_benefits: data.photographer.subscription_benefits,
+        subscription_photo_quota: data.photographer.subscription_photo_quota ?? subscription_photo_quota,
+        subscription_video_quota: data.photographer.subscription_video_quota ?? subscription_video_quota,
+      }));
       showToast("Listo: Configuración de suscripción guardada.");
     } else showToast(data.error || "No se pudo guardar.");
   }}>
     Guardar configuración
+  </AppButton>
+  <AppButton
+    className="close-btn-secondary"
+    style={{
+      marginTop: 10,
+      width: "100%",
+      background: "rgba(255,68,68,0.1)",
+      border: "1px solid rgba(255,68,68,0.5)",
+      color: "#ff4444",
+    }}
+    onClick={() => {
+      const { countryCode, localNumber } = parsePhoneNumber(profile.phone);
+      setPhoneCountry(countryCode);
+      setPhoneLocal(localNumber);
+      setEditMode(false);
+      setEditForm({
+        name: profile.name || "",
+        bio: profile.bio || "",
+        handle: profile.handle || "",
+        phone: localNumber,
+        instagram: profile.instagram || "",
+        tiktok: profile.tiktok || "",
+        facebook: profile.facebook || "",
+        telegram: profile.telegram || "",
+        whatsapp: profile.whatsapp || "",
+      });
+    }}
+  >
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="x" size={14} /> Cancelar</span>
+  </AppButton>
+  <AppButton
+    className="close-btn-secondary"
+    style={{ marginTop: 10, width: "100%" }}
+    onClick={handleLogout}
+  >
+    Cerrar sesión
   </AppButton>
 </div>
 </div>
@@ -9950,9 +14459,13 @@ const renderVendorRequest = () => {
                 </>
               )}
 
-              {myProfileMediaTab === "videos" && (
+              {myProfileMediaTab === "videos" && (() => {
+        const filteredMyVideos = myProfileSearchQuery
+          ? myVideos.filter((v) => videoMatchesProfileSearch(v, myProfileSearchQuery))
+          : myVideos;
+        return (
         <div>
-          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 12 }}>
             <AppButton
               className="nav-btn primary"
               style={{ fontSize: 11, padding: "6px 12px" }}
@@ -9961,6 +14474,15 @@ const renderVendorRequest = () => {
               Subir video
             </AppButton>
           </div>
+
+          {myVideos.length > 0 && (
+            <ProfileSearchBar
+              value={myProfileSearchInput}
+              onChange={setMyProfileSearchInput}
+              onSearch={() => setMyProfileSearchQuery(myProfileSearchInput.trim())}
+              placeholder="Marca, modelo, color, placa, sector…"
+            />
+          )}
 
           {myVideosLoading ? (
             <div className="empty" style={{ padding: "24px 0" }}>
@@ -9979,77 +14501,19 @@ const renderVendorRequest = () => {
                 Subir primer video
               </AppButton>
             </div>
+          ) : filteredMyVideos.length === 0 ? (
+            <div className="empty" style={{ padding: "32px 16px" }}>
+              <EmptyIcon name="search" />
+              <div>No hay videos que coincidan con tu búsqueda.</div>
+            </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {myVideos.map((video) => {
-                const label =
-                  [video.moto_brand, video.moto_model].filter(Boolean).join(" ") ||
-                  video.sector ||
-                  "Video";
-                const hqReady = video.hq_status === "ready";
-                return (
-                  <div
-                    key={video.id}
-                    style={{
-                      borderRadius: 14,
-                      overflow: "hidden",
-                      background: "var(--surface)",
-                      border: "1px solid var(--border)",
-                    }}
-                  >
-                    <div style={{ position: "relative", width: "100%", aspectRatio: "16/9", background: "#0a0a0a", overflow: "hidden" }}>
-                      <VideoThumbnail video={video} loading="lazy" />
-                      {video.duration_seconds ? (
-                        <div style={{
-                          position: "absolute", bottom: 8, right: 8,
-                          background: "rgba(0,0,0,0.8)", color: "#fff",
-                          padding: "2px 6px", borderRadius: 4, fontSize: 11,
-                        }}>
-                          {`${Math.floor(video.duration_seconds / 60)}:${String(video.duration_seconds % 60).padStart(2, "0")}`}
-                        </div>
-                      ) : null}
-                      <div style={{
-                        position: "absolute", top: 8, left: 8,
-                        background: hqReady ? "rgba(0,200,100,0.85)" : "rgba(255,107,0,0.85)",
-                        color: "#fff", padding: "3px 8px", borderRadius: 6, fontSize: 10, fontWeight: 700,
-                      }}>
-                        {hqReady ? "HQ listo" : "Preview"}
-                      </div>
-                    </div>
-                    <div style={{ padding: "12px 14px" }}>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                        {video.moto_brand && (
-                          <span className="tag active" style={{ fontSize: 11 }}>{video.moto_brand} {video.moto_model}</span>
-                        )}
-                        {video.sector && (
-                          <span className="tag" style={{ fontSize: 11 }}><IconText icon="pin" size={10}>{video.sector}</IconText></span>
-                        )}
-                        {video.dorsal && (
-                          <span className="tag" style={{ fontSize: 11, color: "var(--orange)" }}>#{video.dorsal}</span>
-                        )}
-                      </div>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                        <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                          {video.event_time_start ? `${video.event_time_start}${video.event_time_end ? `–${video.event_time_end}` : ""}` : ""}
-                          {video.purchases_count > 0 && (
-                            <span style={{ marginLeft: video.event_time_start ? 8 : 0 }}>
-                              · {video.purchases_count} venta{video.purchases_count !== 1 ? "s" : ""}
-                            </span>
-                          )}
-                        </div>
-                        <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 24, color: "var(--orange)" }}>
-                          Q{video.price}
-                        </div>
-                      </div>
-                      <div style={{ fontSize: 13, fontWeight: 600, marginTop: 6 }}>{label}</div>
-                    </div>
-                  </div>
-                );
-              })}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16, marginBottom: 28 }}>
+              {renderVideoCards(filteredMyVideos, { hidePurchase: true, hidePhotographer: true })}
             </div>
           )}
         </div>
-              )}
+        );
+              })()}
             </>
           );
         })()}
@@ -10083,16 +14547,31 @@ const renderVendorRequest = () => {
 
         {renderMySubscriptionsSection()}
 
-        {/* CTA fotógrafo */}
-        <div style={{ background: "linear-gradient(135deg, rgba(255,107,0,0.1), rgba(255,107,0,0.04))", border: "1px solid var(--orange)", borderRadius: 14, padding: 20, marginBottom: 28 }}>
-          <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, letterSpacing: 1, marginBottom: 8 }}>¿SOS FOTÓGRAFO?</div>
-          <div style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.6, marginBottom: 16 }}>
-            Creá tu perfil verificado, subí tus fotos de rodada y empezá a vender. El proceso es rápido y gratuito.
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+          style={{
+            marginBottom: 20,
+            padding: 24,
+            borderRadius: 14,
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 22, letterSpacing: 1, marginBottom: 8 }}>
+            ¿QUERÉS VENDER TUS FOTOS Y VIDEOS?
           </div>
-          <AppButton className="upload-btn" onClick={() => setProfile({ _requestMode: true })}>
-            QUIERO SER FOTÓGRAFO
-          </AppButton>
-        </div>
+          <p style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.6, margin: "0 auto 18px", maxWidth: 360 }}>
+            Solicitá tu perfil profesional para empezar. Tu perfil quedará <strong style={{ color: "var(--orange)" }}>pendiente</strong> hasta que actives tu membresía mensual.
+          </p>
+          <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.96 }}>
+            <AppButton className="upload-btn" onClick={() => setProfile({ _requestMode: true })}>
+              Solicitar perfil profesional
+            </AppButton>
+          </motion.div>
+        </motion.div>
 
         <AppButton className="close-btn-secondary" onClick={handleLogout}>Cerrar sesión</AppButton>
       </div>
@@ -10111,7 +14590,7 @@ const renderVendorRequest = () => {
           <input className="form-input" value={vendorForm.name} onChange={e => setVendorForm({ ...vendorForm, name: e.target.value })} placeholder="Juan Pérez" />
         </div>
         <div className="form-group">
-          <label className="form-label">Handle público</label>
+          <label className="form-label">Usuario</label>
           <input className="form-input" value={vendorForm.handle} onChange={e => setVendorForm({ ...vendorForm, handle: e.target.value })} placeholder="@juanmotos" />
         </div>
         <div className="form-group">
@@ -10212,16 +14691,22 @@ const renderVendorRequest = () => {
           <input className="form-input" value={vendorForm.bio} onChange={e => setVendorForm({ ...vendorForm, bio: e.target.value })} placeholder="Fotógrafo de rodadas en Guatemala" />
         </div>
         <AppButton className="upload-btn"
-  disabled={!vendorForm.name || !vendorForm.handle || !((() => {
+  disabled={!vendorForm.name || !((() => {
     if (vendorForm.doc_type === "dpi") return /^\d{4}-\d{5}-\d{4}$/.test(vendorForm.verification_id);
     if (vendorForm.doc_type === "licencia") return /^[A-Za-z]\d{6}$/.test(vendorForm.verification_id);
     if (vendorForm.doc_type === "pasaporte") return /^[A-Za-z]\d{7}$/.test(vendorForm.verification_id);
   })()) || !vendorForm.doc_front || !vendorForm.doc_back}
-  style={{ opacity: (!vendorForm.name || !vendorForm.handle || !vendorForm.doc_front || !vendorForm.doc_back) ? 0.5 : 1 }}
+  style={{ opacity: (!vendorForm.name || !vendorForm.doc_front || !vendorForm.doc_back) ? 0.5 : 1 }}
   onClick={handleRequestVendor}>
   ENVIAR SOLICITUD
 </AppButton>
         <AppButton className="close-btn-secondary" style={{ marginTop: 12 }} onClick={() => setProfile(null)}><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="arrowRight" size={14} style={{ transform: "rotate(180deg)" }} /> Volver</span></AppButton>
+
+        <div style={{ marginTop: 32, paddingTop: 24, borderTop: "1px solid var(--border)" }}>
+          {renderMembershipPlansSection({
+            footerNote: "Una vez aprobada tu solicitud, elegí tu plan de membresía aquí abajo.",
+          })}
+        </div>
       </div>
     );
   }
@@ -10240,6 +14725,9 @@ const renderVendorRequest = () => {
         <LoaderIcon size={44} />
         <div>Tu solicitud está <strong style={{ color: "var(--orange)" }}>{profile.verification_status}</strong>.<br />Esperá la aprobación del administrador.</div>
       </div>
+      {renderMembershipPlansSection({
+        footerNote: "Cuando tu solicitud sea aprobada, elegí tu plan y activá tu membresía mensual.",
+      })}
       <AppButton className="close-btn-secondary" style={{ marginTop: 12 }} onClick={handleLogout}>Cerrar sesión</AppButton>
     </div>
   );
@@ -10248,11 +14736,13 @@ const renderVendorRequest = () => {
   const css = `
     @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700&family=Fugaz+One&display=swap');
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root { --bg: #0c0c0c; --surface: #161616; --card: #1c1c1c; --border: #2a2a2a;
+    :root { color-scheme: dark; --bg: #0c0c0c; --surface: #161616; --card: #1c1c1c; --border: #2a2a2a;
       --orange: #ff6b00; --orange-light: #ffb347; --orange-glow: rgba(255,107,0,0.18);
       --text: #f0ece4; --muted: #6a6a6a; --success: #ff9a3c; --success-glow: rgba(255,107,0,0.22); }
+    html { color-scheme: dark; background: #0c0c0c; }
     body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
-    button, a { -webkit-tap-highlight-color: transparent; tap-highlight-color: transparent; }
+    button, input, select, textarea, a { -webkit-tap-highlight-color: transparent; tap-highlight-color: transparent; }
+    button, input, select, textarea { -webkit-appearance: none; appearance: none; color-scheme: dark; }
     .app { min-height: 100vh; display: flex; flex-direction: column; }
     .ptr-indicator {
       position: fixed; top: 58px; left: 0; right: 0; z-index: 99;
@@ -10370,7 +14860,7 @@ const renderVendorRequest = () => {
       font-family: 'DM Sans', sans-serif; font-size: 13px; cursor: pointer; transition: border-color 0.2s, color 0.2s, background 0.2s; }
     .nav-btn-sm { padding: 5px 10px; font-size: 11px; border-radius: 7px; white-space: nowrap; line-height: 1.15; letter-spacing: 0.2px; }
     .nav-btn:hover { border-color: var(--orange); color: var(--text); }
-    .nav-btn.primary { background: var(--orange); border-color: var(--orange); color: #fff; font-weight: 700; }
+    .nav-btn.primary { background-color: #ff6b00; background: var(--orange); border-color: #ff6b00; border-color: var(--orange); color: #fff; font-weight: 700; }
     .nav-btn.primary:hover { background: #e55e00; }
     .nav-role-btn { font-size: 11px !important; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; padding: 5px 12px !important; border-radius: 999px !important; line-height: 1.2; }
     .nav-role-admin { color: #d4c4a8 !important; border-color: rgba(212, 196, 168, 0.35) !important; background: rgba(212, 196, 168, 0.06) !important; }
@@ -10406,6 +14896,519 @@ const renderVendorRequest = () => {
     @media (max-width: 520px) {
       .ceo-payroll-totals { grid-template-columns: 1fr; }
     }
+    .shopping-cart-fab {
+      position: fixed;
+      right: max(16px, env(safe-area-inset-right));
+      bottom: calc(88px + env(safe-area-inset-bottom));
+      z-index: 10040;
+      width: 58px;
+      height: 58px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,107,0,0.55);
+      background: linear-gradient(145deg, rgba(255,107,0,0.95), rgba(220,80,0,0.98));
+      color: #1a1008;
+      box-shadow: 0 10px 28px rgba(255,107,0,0.35), 0 4px 12px rgba(0,0,0,0.35);
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      padding: 0;
+      overflow: visible;
+    }
+    .shopping-cart-fab-glow {
+      position: absolute;
+      inset: -8px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(255,107,0,0.35) 0%, transparent 70%);
+      pointer-events: none;
+      animation: cart-glow-pulse 2.2s ease-in-out infinite;
+    }
+    @keyframes cart-glow-pulse {
+      0%, 100% { opacity: 0.55; transform: scale(0.95); }
+      50% { opacity: 1; transform: scale(1.05); }
+    }
+    .shopping-cart-fab-badge {
+      position: absolute;
+      top: -4px;
+      right: -4px;
+      min-width: 22px;
+      height: 22px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: #111;
+      color: #fff;
+      border: 2px solid var(--orange);
+      font-size: 11px;
+      font-weight: 800;
+      display: grid;
+      place-items: center;
+      line-height: 1;
+    }
+    .shopping-cart-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 10045;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(4px);
+      border: none;
+      padding: 0;
+      cursor: pointer;
+    }
+    .shopping-cart-panel {
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 10046;
+      width: min(420px, 100vw);
+      background: linear-gradient(180deg, rgba(18,18,18,0.98), rgba(10,10,10,0.99));
+      border-left: 1px solid rgba(255,107,0,0.25);
+      box-shadow: -12px 0 40px rgba(0,0,0,0.45);
+      display: flex;
+      flex-direction: column;
+      padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    }
+    .shopping-cart-panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .shopping-cart-panel-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 28px;
+      letter-spacing: 1px;
+      color: var(--orange);
+      line-height: 1;
+    }
+    .shopping-cart-panel-sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 6px;
+      line-height: 1.45;
+    }
+    .shopping-cart-empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      color: var(--muted);
+      text-align: center;
+      padding: 24px;
+    }
+    .shopping-cart-empty-hint {
+      font-size: 12px;
+      line-height: 1.5;
+      max-width: 260px;
+    }
+    .shopping-cart-items {
+      flex: 1;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-right: 2px;
+    }
+    .shopping-cart-item {
+      display: grid;
+      grid-template-columns: 72px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      border-radius: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+    }
+    .shopping-cart-item-thumb-wrap {
+      position: relative;
+      width: 72px;
+      height: 72px;
+      border-radius: 10px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.04);
+    }
+    .shopping-cart-item-thumb {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .shopping-cart-item-thumb-fallback {
+      display: grid;
+      place-items: center;
+    }
+    .shopping-cart-item-type {
+      position: absolute;
+      left: 4px;
+      bottom: 4px;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: rgba(0,0,0,0.72);
+      color: #fff;
+    }
+    .shopping-cart-item-type.video { color: #ffb86b; }
+    .shopping-cart-item-body { min-width: 0; }
+    .shopping-cart-item-title {
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .shopping-cart-item-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .shopping-cart-item-price {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 22px;
+      color: var(--success);
+      margin-top: 4px;
+      line-height: 1;
+    }
+    .shopping-cart-item-remove {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,68,68,0.35);
+      background: rgba(255,68,68,0.08);
+      color: #ff6b6b;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      padding: 0;
+    }
+    .shopping-cart-footer {
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+      margin-top: 8px;
+    }
+    .shopping-cart-total-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 10px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .shopping-cart-total-value {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 34px;
+      line-height: 1;
+    }
+    .shopping-cart-min-note {
+      font-size: 11px;
+      color: var(--orange);
+      margin-bottom: 10px;
+      line-height: 1.45;
+    }
+    .shopping-cart-footer-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .shopping-cart-checkout-btn { flex: 1; }
+    .add-to-cart-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,107,0,0.45);
+      background: rgba(255,107,0,0.12);
+      color: var(--orange-light);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 8px 10px;
+      cursor: pointer;
+      font-family: 'DM Sans', sans-serif;
+    }
+    .add-to-cart-btn.is-compact {
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      border-radius: 8px;
+    }
+    .add-to-cart-btn.is-in-cart {
+      border-color: rgba(255,107,0,0.25);
+      background: rgba(255,107,0,0.06);
+      color: var(--success);
+      cursor: default;
+    }
+    .add-to-cart-btn:disabled { opacity: 0.85; }
+    .guest-checkout-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 10070;
+      border: 0;
+      background: rgba(0,0,0,0.82);
+      backdrop-filter: blur(10px);
+      cursor: pointer;
+    }
+    .guest-checkout-shell {
+      position: fixed;
+      inset: 0;
+      z-index: 10075;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+      pointer-events: none;
+      overflow-y: auto;
+    }
+    .guest-checkout-modal {
+      position: relative;
+      pointer-events: auto;
+      width: min(460px, 100%);
+      max-height: none;
+      overflow: visible;
+      background: linear-gradient(180deg, #171717 0%, #101010 100%);
+      border: 1px solid rgba(255,107,0,0.42);
+      border-radius: 20px;
+      padding: 22px 22px 18px;
+      margin: auto 0;
+      box-shadow: 0 28px 90px rgba(0,0,0,0.62), 0 0 0 1px rgba(255,107,0,0.1) inset;
+    }
+    .guest-checkout-close {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 2;
+    }
+    .guest-checkout-icon-wrap {
+      display: grid;
+      place-items: center;
+      color: var(--orange);
+      margin-bottom: 4px;
+    }
+    .guest-checkout-icon-wrap svg { width: 60px; height: 60px; }
+    .guest-checkout-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 28px;
+      letter-spacing: 1px;
+      text-align: center;
+      color: #fff;
+    }
+    .guest-checkout-sub {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+      margin: 8px 0 18px;
+      padding: 0 4px;
+    }
+    .guest-checkout-form { display: flex; flex-direction: column; gap: 12px; }
+    .guest-checkout-label {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+    }
+    .guest-checkout-input { margin-bottom: 0 !important; }
+    .guest-checkout-error {
+      color: #ff6b6b;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+    }
+    .guest-checkout-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .guest-checkout-actions .pay-btn { flex: 1; }
+    .guest-checkout-footnote {
+      margin-top: 12px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--muted);
+      text-align: center;
+    }
+    @media (max-height: 720px) {
+      .guest-checkout-modal { padding: 16px 16px 14px; }
+      .guest-checkout-title { font-size: 24px; }
+      .guest-checkout-icon-wrap svg { width: 48px; height: 48px; }
+      .guest-checkout-footnote { display: none; }
+    }
+    .guest-success-page {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 28px 18px 80px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .guest-success-loading, .guest-success-error {
+      min-height: 50vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .guest-success-hero {
+      text-align: center;
+      padding: 18px 12px 8px;
+      background: radial-gradient(circle at center, rgba(255,107,0,0.12), transparent 70%);
+      border-radius: 16px;
+    }
+    .guest-success-hero h1 {
+      margin: 10px 0 8px;
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 38px;
+      letter-spacing: 1.5px;
+      color: var(--orange);
+    }
+    .guest-success-hero p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+    }
+    .guest-success-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .guest-success-card-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 24px;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+    .guest-success-items { display: flex; flex-direction: column; gap: 10px; }
+    .guest-success-item {
+      display: grid;
+      grid-template-columns: 64px 1fr;
+      gap: 10px;
+      align-items: center;
+    }
+    .guest-success-item-thumb {
+      width: 64px;
+      height: 48px;
+      border-radius: 8px;
+      object-fit: cover;
+      background: #111;
+    }
+    .guest-success-item-thumb-fallback {
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--border);
+    }
+    .guest-success-item-label { font-weight: 700; font-size: 14px; }
+    .guest-success-item-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .guest-success-steps {
+      background: rgba(255,107,0,0.06);
+      border: 1px solid rgba(255,107,0,0.22);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .guest-success-steps-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 22px;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+      color: var(--orange);
+    }
+    .guest-success-step {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .guest-success-step:last-child { border-bottom: 0; }
+    .guest-success-step span {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: rgba(255,107,0,0.14);
+      border: 1px solid rgba(255,107,0,0.35);
+      color: var(--orange);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .guest-photographer-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .guest-photographer-head {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .guest-photographer-avatar {
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 2px solid rgba(255,107,0,0.35);
+    }
+    .guest-photographer-avatar-fallback {
+      display: grid;
+      place-items: center;
+      background: #111;
+    }
+    .guest-photographer-name { font-weight: 800; font-size: 16px; }
+    .guest-photographer-handle { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .guest-photographer-note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    .guest-photographer-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .guest-social-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 14px;
+      border-radius: 10px;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      background: #222;
+      border: 1px solid #333;
+    }
+    .guest-social-btn-whatsapp {
+      background: linear-gradient(135deg, #2bd672, #1ebe57);
+      border-color: rgba(37,211,102,0.5);
+      color: #06240f;
+    }
+    .guest-success-continue { width: 100%; max-width: 360px; margin: 8px auto 0; }
     .pending-delivery-list {
       display: flex;
       flex-direction: column;
@@ -10544,7 +15547,7 @@ const renderVendorRequest = () => {
     }
     .video-queue-item {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 10px;
       background: var(--card);
       border: 1px solid var(--border);
@@ -10581,6 +15584,66 @@ const renderVendorRequest = () => {
       color: var(--muted);
       margin-top: 2px;
       overflow-wrap: anywhere;
+    }
+    .video-queue-meta-line {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 10px;
+    }
+    .video-queue-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 6px;
+      margin-top: 6px;
+    }
+    .video-queue-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10px;
+      background: rgba(255, 107, 0, 0.08);
+      border: 1px solid rgba(255, 107, 0, 0.22);
+      border-radius: 6px;
+      padding: 3px 7px;
+      line-height: 1.3;
+    }
+    .video-queue-tag-label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.35px;
+      font-size: 9px;
+      font-weight: 600;
+    }
+    .video-queue-tag-value {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .video-queue-tag-editor {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .video-queue-tag-field {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+    }
+    .video-queue-tag-field-label {
+      font-size: 9px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.35px;
+      font-weight: 600;
+    }
+    .video-queue-tag-field .form-input {
+      font-size: 11px;
+      padding: 6px 8px;
+    }
+    @media (max-width: 480px) {
+      .video-queue-tag-editor { grid-template-columns: 1fr; }
     }
     .video-queue-item--error .video-queue-meta { color: #ff6b6b; }
     .video-queue-remove {
@@ -10786,21 +15849,56 @@ const renderVendorRequest = () => {
     .video-card-preview {
       position: absolute; inset: 0; width: 100%; height: 100%;
       object-fit: cover; background: transparent; z-index: 2;
-      opacity: 0; pointer-events: none;
+      opacity: 0; visibility: hidden; pointer-events: none;
       transition: opacity 0.25s ease;
       -webkit-tap-highlight-color: transparent;
+      -webkit-appearance: none;
+      appearance: none;
     }
-    .video-card-preview.is-playing { opacity: 1; z-index: 8; pointer-events: auto; }
-    .video-card-preview::-webkit-media-controls { display: none !important; }
-    .video-card-preview::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
-    .video-card-preview::-webkit-media-controls-overlay-play-button { display: none !important; }
+    .video-card-preview.is-playing { opacity: 1; visibility: visible; z-index: 8; pointer-events: auto; }
+    .video-card-preview::-webkit-media-controls { display: none !important; -webkit-appearance: none; }
+    .video-card-preview::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; opacity: 0 !important; pointer-events: none !important; }
+    .video-card-preview::-webkit-media-controls-overlay-play-button { display: none !important; -webkit-appearance: none; opacity: 0 !important; pointer-events: none !important; }
     .video-card-preview::-webkit-media-controls-panel { display: none !important; }
+    .video-card-preview::-webkit-media-controls-enclosure { display: none !important; }
     .video-card-poster-cover {
       position: absolute; inset: 0; width: 100%; height: 100%;
       object-fit: cover; z-index: 4; pointer-events: none;
       opacity: 1;
     }
     .gallery-video-poster { opacity: 1; }
+    .gallery-video-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      padding: 0 20px 8px;
+    }
+    .gallery-video-item {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      min-width: 0;
+    }
+    .gallery-video-card {
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--card);
+      border: 1px solid var(--border);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+      transition: box-shadow 0.25s ease;
+    }
+    .gallery-video-card:hover {
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+    }
+    .gallery-video-filename {
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      padding: 0 2px;
+    }
     .modal-photo img, .modal-photo .video-thumbnail-fallback, .success-page-photo img, .success-page-photo .video-thumbnail-fallback {
       width: 100%; height: 100%; object-fit: cover; display: block;
     }
@@ -10809,6 +15907,50 @@ const renderVendorRequest = () => {
       border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 14px; outline: none; transition: border-color 0.2s; }
     .search-input:focus { border-color: var(--orange); }
     .search-input::placeholder { color: var(--muted); }
+    .unified-search-wrap { margin-bottom: 16px; }
+    .unified-search-bar {
+      display: flex; align-items: stretch; gap: 0;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; overflow: hidden; transition: border-color 0.2s;
+    }
+    .unified-search-bar:focus-within { border-color: rgba(255,107,0,0.55); box-shadow: 0 0 0 1px rgba(255,107,0,0.15); }
+    .unified-search-camera {
+      flex-shrink: 0; width: 44px; border: none; background: transparent;
+      display: grid; place-items: center; cursor: pointer; color: var(--orange);
+      border-right: 1px solid var(--border);
+    }
+    .unified-search-camera:disabled { opacity: 0.45; cursor: wait; }
+    .unified-search-input {
+      flex: 1; min-width: 0; border: none !important; border-radius: 0 !important;
+      background: transparent !important; padding: 12px 10px !important; margin: 0 !important;
+    }
+    .unified-search-clear {
+      flex-shrink: 0; width: 32px; border: none; background: transparent;
+      display: grid; place-items: center; cursor: pointer; color: var(--muted);
+    }
+    .unified-search-submit {
+      flex-shrink: 0; width: 44px; border: none; cursor: pointer;
+      background: linear-gradient(145deg, rgba(255,140,50,0.95), var(--orange));
+      color: #1a1008; display: grid; place-items: center;
+      transition: opacity 0.15s ease;
+    }
+    .unified-search-submit:disabled { opacity: 0.35; cursor: default; }
+    .unified-search-photo-chip {
+      display: flex; align-items: center; gap: 10px; margin-top: 10px;
+      padding: 8px 10px; border-radius: 10px;
+      background: rgba(255,107,0,0.08); border: 1px solid rgba(255,107,0,0.22);
+    }
+    .unified-search-photo-chip img {
+      width: 44px; height: 44px; border-radius: 8px; object-fit: cover; flex-shrink: 0;
+    }
+    .unified-search-photo-chip__meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .unified-search-photo-chip__label { font-size: 12px; font-weight: 700; color: var(--text); }
+    .unified-search-photo-chip__status { font-size: 11px; color: var(--orange); font-weight: 600; }
+    .unified-search-photo-chip__remove {
+      flex-shrink: 0; width: 28px; height: 28px; border-radius: 8px; border: none;
+      background: rgba(0,0,0,0.25); color: var(--muted); display: grid; place-items: center; cursor: pointer;
+    }
+    .unified-search-photo-chip__remove:disabled { opacity: 0.4; cursor: wait; }
     .search-results-heading {
       font-family: 'Bebas Neue', sans-serif; font-size: 16px; letter-spacing: 1.5px;
       color: var(--muted); margin-bottom: 10px;
@@ -10847,7 +15989,7 @@ const renderVendorRequest = () => {
     .card-location { font-size: 11px; color: rgba(240,236,228,0.7); margin-top: 2px; }
     .card-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
     .card-price { font-family: 'Bebas Neue', sans-serif; font-size: 22px; color: #fff; letter-spacing: 1px; }
-    .card-buy { background: var(--orange); color: #fff; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 700; cursor: pointer; transition: background 0.2s; font-family: 'DM Sans', sans-serif; }
+    .card-buy { background-color: #ff6b00; background: var(--orange); color: #fff; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 700; cursor: pointer; transition: background 0.2s; font-family: 'DM Sans', sans-serif; -webkit-appearance: none; appearance: none; }
     .card-buy:hover { background: #e55e00; }
     .card-bought-badge, .card-ceo-badge { position: absolute; top: 10px; right: 10px; background: linear-gradient(135deg, var(--orange-light), var(--orange)); color: #000; font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 20px; z-index: 5; box-shadow: 0 0 12px var(--success-glow); }
     .card-buy-download { background: linear-gradient(135deg, var(--orange-light), var(--orange)) !important; color: #000 !important; }
@@ -10879,7 +16021,8 @@ const renderVendorRequest = () => {
       border-radius: 10px; padding: 12px 14px; color: var(--text); font-size: 14px; }
     .pay-method-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--orange); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
     .pay-method-dot::after { content: ''; display: block; width: 8px; height: 8px; border-radius: 50%; background: var(--orange); }
-    .pay-btn, .upload-btn { width: 100%; padding: 14px; background: var(--orange); border: none; border-radius: 10px; color: #fff;
+    .pay-btn, .upload-btn { width: 100%; padding: 14px; background-color: #ff6b00; background: var(--orange); border: none; border-radius: 10px; color: #fff;
+      -webkit-appearance: none; appearance: none;
       font-family: 'Bebas Neue', sans-serif; font-size: 18px; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; }
     .pay-btn:hover:not(:disabled), .upload-btn:hover:not(:disabled) { background: #e55e00; }
     .pay-btn:disabled, .upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -10933,10 +16076,11 @@ const renderVendorRequest = () => {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
       height: 78px; padding-bottom: env(safe-area-inset-bottom, 0);
       pointer-events: none;
+      box-shadow: 0 -8px 24px rgba(0,0,0,0.55);
     }
     .bnav-curve {
-      position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 78px;
-      filter: drop-shadow(0 -8px 24px rgba(0,0,0,0.55));
+      position: absolute; left: 0; bottom: 0; width: 100%; height: 72px;
+      display: block; overflow: visible;
     }
     .bnav-bubble {
       position: absolute; top: 6px; width: 46px; height: 46px;
@@ -12006,12 +17150,12 @@ const renderVendorRequest = () => {
               <div style={{ fontSize: 12, color: "var(--muted)" }}>{selectedPhotographer?.handle}</div>
             </div>
           </div>
-          {selectedPhotographer?.subscription_benefits?.length > 0 && (
+          {(subscriptionQuotaLines(selectedPhotographer).length > 0 || selectedPhotographer?.subscription_benefits?.length > 0) && (
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 12 }}>
                 Suscribite y obtené estas ventajas:
               </div>
-              {selectedPhotographer?.subscription_benefits?.map((b, i) => (
+              {[...subscriptionQuotaLines(selectedPhotographer), ...(selectedPhotographer?.subscription_benefits || [])].map((b, i) => (
                 <motion.div
                   key={i}
                   initial={{ opacity: 0, x: -10 }}
@@ -12023,6 +17167,9 @@ const renderVendorRequest = () => {
                   <span>{b}</span>
                 </motion.div>
               ))}
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 }}>
+                Reclamás ese contenido gratis cada mes; al agotar tu cupo podés comprar más de forma individual.
+              </div>
             </div>
           )}
           <AppButton
@@ -12039,7 +17186,7 @@ const renderVendorRequest = () => {
             }}
           >
             {subPayLoading
-              ? "REDIRIGIENDO A PAYPAL..."
+              ? "REDIRIGIENDO A RECURRENTE..."
               : isSubscribedToPhotographer(selectedPhotographer?.id)
                 ? "SUSCRITO"
                 : `SUSCRIBIRME · Q${selectedPhotographer?.subscription_price}/MES`}
@@ -12192,6 +17339,7 @@ const renderVendorRequest = () => {
   setEmailAlreadyExists(false);
   setResendCount(0);
   setResendCooldown(0);
+  clearHomeUrl();
 }}>
   <MotoShotBrandMark variant="nav" />
 </div>
@@ -12242,7 +17390,9 @@ const renderVendorRequest = () => {
             </span>
           )}
         </button>
-        <AppButton className="nav-btn nav-btn-sm primary" onClick={handleLogout}>Cerrar sesión</AppButton>
+        {profile?.verification_status !== "approved" && (
+          <AppButton className="nav-btn nav-btn-sm primary" onClick={handleLogout}>Cerrar sesión</AppButton>
+        )}
       </>
     ) : (
       <AppButton className="nav-btn nav-btn-sm primary" onClick={() => {
@@ -12282,11 +17432,37 @@ const renderVendorRequest = () => {
           {view === VIEWS.GALLERY && renderGallery()}
           {view === VIEWS.DETAIL && renderDetail()}
           {(view === VIEWS.UPLOAD || view === VIEWS.UPLOAD_VIDEO) && renderUpload()}
-          {view === VIEWS.VIDEO_SEARCH && renderVideoSearch()}
+          {view === VIEWS.VIDEO_SEARCH && (
+            <FeaturedVideoFeed
+              session={session}
+              isLoggedIn={isLoggedIn}
+              onRequireAuth={() => setView(VIEWS.AUTH)}
+              purchaseRows={videoPurchases}
+              purchaseStatusById={videoPurchaseStatusById}
+              cart={cart}
+              onOpenCart={openCart}
+              isOwnVideo={isOwnVideo}
+              renderClaimButton={renderClaimButton}
+              onOpenPhotographer={openPhotographerFromVideo}
+              showToast={showToast}
+              refreshToken={videoFeedRefreshToken}
+              focusVideoId={feedFocusVideoId}
+            />
+          )}
           {view === VIEWS.PENDING_DELIVERIES && renderPendingDeliveries()}
           {view === VIEWS.AUTH && renderAuth()}
           {view === VIEWS.VENDOR_REQUEST && renderVendorRequest()}
           {view === VIEWS.SUCCESS && renderSuccessPage()}
+          {view === VIEWS.GUEST_SUCCESS && (
+            <GuestSuccessPage
+              claimToken={guestClaimToken}
+              onContinue={() => {
+                setGuestClaimToken(null);
+                setActiveTab("feed");
+                setView(VIEWS.PHOTOGRAPHERS);
+              }}
+            />
+          )}
           {view === VIEWS.MY_PURCHASES && renderMyPurchases()}
           {view === VIEWS.PHOTOGRAPHERS && renderPhotographers()}
           {view === VIEWS.PHOTOGRAPHER_PROFILE && renderPhotographerProfile()}
@@ -12369,33 +17545,27 @@ const renderVendorRequest = () => {
             <>
               <div className="pay-label">Método de pago</div>
               {selectedVideo ? (
-                Number(selectedVideo.price) < RECURRENTE_MIN_GTQ ? (
-                  <>
+                <>
+                  {Number(selectedVideo.price) < RECURRENTE_MIN_GTQ && (
                     <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>
-                      Recurrente acepta pagos desde Q{RECURRENTE_MIN_GTQ}. Para Q{selectedVideo.price} usá PayPal.
+                      Recurrente acepta pagos desde Q{RECURRENTE_MIN_GTQ}. Este video no está disponible para compra con el precio actual.
                     </div>
-                    <AppButton className="pay-btn" onClick={handleVideoPayPalPayment}>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                        <AppIcon name="creditCard" size={14} /> PAGAR Q{selectedVideo.price} CON PAYPAL
-                      </span>
-                    </AppButton>
-                  </>
-                ) : (
-                  <>
-                    <AppButton className="pay-btn" onClick={handleVideoPayment} style={{ marginBottom: 10 }}>
-                      PAGAR Q{selectedVideo.price} CON RECURRENTE
-                    </AppButton>
-                    <AppButton
-                      className="close-btn-secondary"
-                      onClick={handleVideoPayPalPayment}
-                      style={{ width: "100%" }}
-                    >
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                        <AppIcon name="creditCard" size={14} /> Pagar con PayPal
-                      </span>
-                    </AppButton>
-                  </>
-                )
+                  )}
+                  <div className="pay-methods">
+                    <div className="pay-method">
+                      <div className="pay-method-dot"></div>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="creditCard" size={14} /> Recurrente</span>
+                    </div>
+                  </div>
+                  <AppButton
+                    className="pay-btn"
+                    onClick={handleVideoPayment}
+                    disabled={Number(selectedVideo.price) < RECURRENTE_MIN_GTQ}
+                    style={Number(selectedVideo.price) < RECURRENTE_MIN_GTQ ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
+                  >
+                    PAGAR Q{selectedVideo.price} CON RECURRENTE
+                  </AppButton>
+                </>
               ) : (
                 <>
                   {Number(selected?.price) < RECURRENTE_MIN_GTQ && (
@@ -12450,6 +17620,9 @@ const renderVendorRequest = () => {
         onSelect={(item) => {
           setActiveTab(item.id);
           setView(item.v);
+          if (item.id === "feed" || item.v === VIEWS.PHOTOGRAPHERS) {
+            clearHomeUrl();
+          }
         }}
       />
     ) : (
@@ -12472,6 +17645,9 @@ const renderVendorRequest = () => {
           setActiveTab(item.id);
           if (item.id === "upload") setUploadMediaTab("video");
           setView(item.v);
+          if (item.id === "feed" || item.v === VIEWS.PHOTOGRAPHERS) {
+            clearHomeUrl();
+          }
         }}
       />
     )
@@ -12523,7 +17699,35 @@ const renderVendorRequest = () => {
             </div>
           </div>
         )}
+      <ShoppingCartWidget
+        cart={cart}
+        minCheckoutGtq={RECURRENTE_MIN_GTQ}
+        checkoutLoading={cartCheckoutLoading}
+        onCheckout={handleCartCheckout}
+        isLoggedIn={isLoggedIn}
+        panelSuppressed={guestCheckoutOpen}
+        hidden={view === VIEWS.AUTH || view === VIEWS.GUEST_SUCCESS}
+        fabHidden={view === VIEWS.VIDEO_SEARCH || videoSelectionMode}
+        openSignal={cartOpenSignal}
+        onRequireLogin={() => {
+          setAuthMode("login");
+          setView(VIEWS.AUTH);
+        }}
+      />
+      <GuestCheckoutModal
+        open={guestCheckoutOpen}
+        loading={guestCheckoutLoading}
+        initialName={readGuestCheckoutDraft()?.guest_name || ""}
+        initialEmail={readGuestCheckoutDraft()?.guest_email || ""}
+        onClose={handleGuestCheckoutClose}
+        onSubmit={handleGuestCheckoutSubmit}
+      />
       </div>
     </>
   );
 }
+
+/*
+ * Migración: motoshot-backend/migrations/photographer_membership_storage.sql
+ * Columnas: photographers.membership_* + storage_limit_gb, photos/videos.storage_bytes
+ */
