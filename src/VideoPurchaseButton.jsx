@@ -1,4 +1,5 @@
 import { AppButton } from "./icons";
+import { BuyCartButton } from "./ShoppingCart.jsx";
 
 const BTN_DISABLED = {
   background: "var(--surface)",
@@ -8,7 +9,7 @@ const BTN_DISABLED = {
   cursor: "not-allowed",
 };
 
-export function VideoPurchaseButton({ purchaseState, onBuy, video, isOwn = false }) {
+export function VideoPurchaseButton({ purchaseState, onAdd, inCart = false, video, isOwn = false }) {
   const state = purchaseState ?? video?.buyer_purchase_status ?? null;
 
   if (isOwn) {
@@ -34,14 +35,11 @@ export function VideoPurchaseButton({ purchaseState, onBuy, video, isOwn = false
     );
   }
   return (
-    <AppButton
+    <BuyCartButton
+      compact
       className="card-buy"
-      onClick={(e) => {
-        e.stopPropagation();
-        onBuy?.(video);
-      }}
-    >
-      Comprar
-    </AppButton>
+      inCart={inCart}
+      onAdd={() => onAdd?.(video)}
+    />
   );
 }

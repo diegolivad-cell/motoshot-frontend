@@ -320,3 +320,87 @@ export function AddToCartButton({ inCart, onClick, compact = false, disabled = f
     </motion.button>
   );
 }
+
+const FACE_STYLE = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 7,
+  whiteSpace: "nowrap",
+  lineHeight: 1,
+};
+
+/**
+ * Botón único que reemplaza el par "Comprar" + "Agregar al carrito".
+ * Al tocarlo agrega al carrito con una animación satisfactoria y luego
+ * queda en estado "En carrito". Reutiliza las clases visuales existentes
+ * (card-buy / pay-btn) para no romper el layout.
+ */
+export function BuyCartButton({
+  inCart = false,
+  onAdd,
+  price = null,
+  label = "Comprar",
+  addedLabel = "En carrito",
+  className = "card-buy",
+  compact = false,
+  disabled = false,
+  style,
+}) {
+  const size = compact ? 15 : 17;
+  const blocked = disabled || inCart;
+
+  return (
+    <motion.button
+      type="button"
+      className={`buy-cart-btn ${className}${inCart ? " is-in-cart" : ""}`}
+      aria-label={inCart ? addedLabel : "Agregar al carrito"}
+      disabled={blocked}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (blocked) return;
+        onAdd?.(e);
+      }}
+      style={style}
+      whileHover={blocked ? undefined : { scale: 1.04, y: -1 }}
+      whileTap={blocked ? undefined : { scale: 0.92 }}
+      animate={inCart ? { scale: [1, 1.1, 1] } : { scale: 1 }}
+      transition={{ type: "spring", stiffness: 480, damping: 18 }}
+    >
+      <AnimatePresence mode="wait" initial={false}>
+        {inCart ? (
+          <motion.span
+            key="added"
+            style={FACE_STYLE}
+            initial={{ opacity: 0, y: 12, filter: "blur(3px)" }}
+            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+            exit={{ opacity: 0, y: -12, filter: "blur(3px)" }}
+            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+          >
+            <motion.span
+              style={{ display: "inline-flex" }}
+              initial={{ scale: 0, rotate: -45 }}
+              animate={{ scale: 1, rotate: 0 }}
+              transition={{ type: "spring", stiffness: 620, damping: 16, delay: 0.04 }}
+            >
+              <AppIcon name="check" size={size} />
+            </motion.span>
+            <span>{addedLabel}</span>
+          </motion.span>
+        ) : (
+          <motion.span
+            key="buy"
+            style={FACE_STYLE}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12 }}
+            transition={{ duration: 0.2 }}
+          >
+            <CartSvgIcon size={size + 4} />
+            <span>{price != null ? `${label} — Q${price}` : label}</span>
+          </motion.span>
+        )}
+      </AnimatePresence>
+    </motion.button>
+  );
+}

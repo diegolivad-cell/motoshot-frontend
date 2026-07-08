@@ -12,7 +12,7 @@ import { Capacitor } from "@capacitor/core";
 import { Filesystem, Directory } from "@capacitor/filesystem";
 import { pickVisualSearchPhotoFromGallery } from "./visualSearchCapture";
 import { photoToCartItem, videoToCartItem } from "./shoppingCart";
-import { useShoppingCart, ShoppingCartWidget, AddToCartButton } from "./ShoppingCart.jsx";
+import { useShoppingCart, ShoppingCartWidget, BuyCartButton } from "./ShoppingCart.jsx";
 import {
   GuestCheckoutModal,
   readGuestCheckoutDraft,
@@ -2608,6 +2608,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const videoPreviewHandlers = useRef({});
   const videoPurchasesRef = useRef([]);
   const videoAiAnalysisGenRef = useRef(0);
+  const resetBuyerRef = useRef(null);
 
   useEffect(() => {
     videoPurchasesRef.current = videoPurchases;
@@ -3460,7 +3461,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
         setUser(null);
         setProfile(null);
         setUserRole(null);
-        setMySubscriptions([]);
+        // Limpiar TODO el estado del comprador en el único punto por el que
+        // pasan todos los cierres de sesión (botón, expiración de token, etc.).
+        resetBuyerRef.current?.();
         return;
       }
       if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
@@ -6494,18 +6497,12 @@ useEffect(() => {
             {!hidePurchase && (
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {!isOwnVideo(video) && renderClaimButton("video", video.id, video.photographer?.id)}
-                {!isOwnVideo(video) && !resolveVideoPurchaseState(video, videoPurchaseStatusById) && (
-                  <AddToCartButton
-                    compact
-                    inCart={cart.isInCart("video", video.id)}
-                    onClick={() => cart.addItem(videoToCartItem(video))}
-                  />
-                )}
                 <VideoPurchaseButton
                   video={video}
                   isOwn={isOwnVideo(video)}
                   purchaseState={resolveVideoPurchaseState(video, videoPurchaseStatusById)}
-                  onBuy={handleBuyVideo}
+                  inCart={cart.isInCart("video", video.id)}
+                  onAdd={(v) => cart.addItem(videoToCartItem(v))}
                 />
               </div>
             )}
@@ -6879,12 +6876,10 @@ useEffect(() => {
     }
   };
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    setUser(null); setProfile(null); setSession(null);
-
-    // Limpiar TODO el estado ligado al comprador para que el siguiente
-    // usuario (o el estado de invitado) no herede compras/estados previos.
+  // Limpia TODO el estado ligado al comprador para que, al cerrar sesión, el
+  // siguiente usuario (o el estado de invitado) no herede compras ni estados
+  // previos. Se llama desde handleLogout y desde el listener SIGNED_OUT.
+  const resetBuyerScopedState = useCallback(() => {
     setPurchased([]);
     setPurchasedVideos([]);
     setPurchases([]);
@@ -6899,8 +6894,18 @@ useEffect(() => {
         : list;
     setVideos((prev) => stripPurchaseStatus(prev));
     setPhotographerVideos((prev) => stripPurchaseStatus(prev));
+    setMyVideos((prev) => stripPurchaseStatus(prev));
     try { cart.clearCart(); } catch (_) { /* ignore */ }
+  }, [cart]);
 
+  // Mantener el ref siempre apuntando a la última versión, para que el
+  // listener SIGNED_OUT (definido antes) pueda invocarla sin closures viejos.
+  resetBuyerRef.current = resetBuyerScopedState;
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setUser(null); setProfile(null); setSession(null);
+    resetBuyerScopedState();
     setActiveTab("feed");
     setView(VIEWS.PHOTOGRAPHERS);
   };
@@ -7233,17 +7238,12 @@ useEffect(() => {
             !canDownloadPhoto(photo) ? (
             <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
             {renderClaimButton("photo", photo.id, photo.photographer?.id, { compact: true })}
-            <AddToCartButton
+            <BuyCartButton
               compact
+              className="card-buy"
               inCart={cart.isInCart("photo", photo.id)}
-              onClick={() => cart.addItem(photoToCartItem(photo))}
+              onAdd={() => cart.addItem(photoToCartItem(photo))}
             />
-            <AppButton
-            className="card-buy"
-            onClick={e => { e.stopPropagation(); handleBuy(photo); }}
-          >
-            Comprar
-          </AppButton>
           </div>
   ) : (
     <AppButton
@@ -8873,12 +8873,12 @@ const renderPhotographerProfile = () => {
                   Q{photo.price}
                 </div>
                 {renderClaimButton("photo", photo.id, photo.photographer_id || selectedPhotographer?.id, { compact: true })}
-                <AppButton
+                <BuyCartButton
+                  compact
                   className="card-buy"
-                  onClick={() => handleBuy(photo)}
-                >
-                  Comprar
-                </AppButton>
+                  inCart={cart.isInCart("photo", photo.id)}
+                  onAdd={() => cart.addItem(photoToCartItem(photo))}
+                />
               </div>
             </div>
           </div>
@@ -8928,15 +8928,13 @@ const renderPhotographerProfile = () => {
         !canDownloadPhoto(selected) ? (
   <>
     {renderClaimButton("photo", selected.id, selected.photographer?.id || selected.photographer_id)}
-    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-      <AddToCartButton
-        inCart={cart.isInCart("photo", selected.id)}
-        onClick={() => cart.addItem(photoToCartItem(selected))}
-      />
-      <AppButton className="pay-btn" onClick={() => handleBuy(selected)}>
-        Comprar — Q{selected.price}
-      </AppButton>
-    </div>
+    <BuyCartButton
+      className="pay-btn"
+      style={{ width: "100%" }}
+      price={selected.price}
+      inCart={cart.isInCart("photo", selected.id)}
+      onAdd={() => cart.addItem(photoToCartItem(selected))}
+    />
   </>
 ) : (
   <AppButton className="download-btn" onClick={handleDownload}>
@@ -17434,6 +17432,7 @@ const renderVendorRequest = () => {
           {(view === VIEWS.UPLOAD || view === VIEWS.UPLOAD_VIDEO) && renderUpload()}
           {view === VIEWS.VIDEO_SEARCH && (
             <FeaturedVideoFeed
+              key={`feed-${user?.id || "anon"}`}
               session={session}
               isLoggedIn={isLoggedIn}
               onRequireAuth={() => setView(VIEWS.AUTH)}
