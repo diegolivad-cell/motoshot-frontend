@@ -20,6 +20,7 @@ import {
   clearGuestCheckoutDraft,
 } from "./GuestCheckout.jsx";
 import { GuestSuccessPage } from "./GuestSuccessPage.jsx";
+import { ReceiptPreviewModal } from "./ReceiptPreviewModal.jsx";
 import { signInWithGoogleNative } from "./googleNativeAuth.js";
 import {
   writePendingPayment,
@@ -2268,6 +2269,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
   const [hqResendLoadingId, setHqResendLoadingId] = useState(null);
   const [downloading, setDownloading] = useState(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
+  const [receiptPreview, setReceiptPreview] = useState(null);
+  const [receiptSaving, setReceiptSaving] = useState(false);
   const [purchasesCountdownTick, setPurchasesCountdownTick] = useState(0);
   const [vendorStats, setVendorStats] = useState(null);
   const [vendorStatsLoading, setVendorStatsLoading] = useState(false);
@@ -3878,8 +3881,8 @@ const downloadFromSignedUrl = async (url, filename) => {
 
 // Compras listas para descargar y aún no reclamadas (badge estilo Facebook)
 const unclaimedPurchasesCount =
-  purchases.filter((p) => p.photo?.hq_status === "ready" && !p.hq_downloaded_at).length +
-  videoPurchases.filter((v) => v.video?.hq_status === "ready" && !v.hq_downloaded_at).length;
+  purchases.filter((p) => p.photo?.hq_status === "ready" && !p.buyer_confirmed_at && p.photo?.hq_path).length +
+  videoPurchases.filter((v) => v.video?.hq_status === "ready" && !v.buyer_confirmed_at).length;
 const fetchNotifications = async () => {
   if (!session?.access_token || !profile?.id) return;
   try {
@@ -9632,12 +9635,12 @@ const renderPhotographerProfile = () => {
   };
 
   const renderPendingDeliveries = () => {
-    const finishHqDelivery = (mediaType, itemId) => {
+    const finishHqDelivery = (mediaType) => {
       showToast(mediaType === "video"
-        ? "Listo: video HQ entregado. El comprador recibirá un email."
-        : "Listo: foto HQ entregada. El comprador recibirá un email.");
-      setPendingDeliveries((prev) => prev.filter((p) => !(p.media_type === mediaType && p.id === itemId)));
-      setPendingDeliveryCount((prev) => Math.max(0, prev - 1));
+        ? "Archivo subido. Quedará aquí hasta que el comprador marque Recibido."
+        : "Archivo subido. Quedará aquí hasta que el comprador marque Recibido.");
+      fetchPendingDeliveries();
+      fetchPendingDeliveryCount();
       fetchVendorDashboard({ reconcile: false, silent: true });
     };
 
@@ -9681,7 +9684,7 @@ const renderPhotographerProfile = () => {
 
         clearHqUpload(key);
         if (res.ok) {
-          finishHqDelivery("video", itemId);
+          finishHqDelivery("video");
         } else {
           removeFromSupabaseStorage("videos-hq", storagePath);
           showToast(data?.error || "No se pudo entregar el video.");
@@ -9712,7 +9715,7 @@ const renderPhotographerProfile = () => {
       xhr.onload = () => {
         clearHqUpload(key);
         if (xhr.status >= 200 && xhr.status < 300) {
-          finishHqDelivery("photo", itemId);
+          finishHqDelivery("photo");
         } else {
           let msg = "No se pudo entregar la foto.";
           try {
@@ -9774,7 +9777,7 @@ const renderPhotographerProfile = () => {
               : [
                 photoCount > 0 ? `${photoCount} foto${photoCount !== 1 ? "s" : ""}` : null,
                 videoCount > 0 ? `${videoCount} video${videoCount !== 1 ? "s" : ""}` : null,
-              ].filter(Boolean).join(" · ") + " pendiente(s) de entrega HQ"}
+              ].filter(Boolean).join(" · ") + " en curso (subida o confirmación del comprador)"}
         </div>
 
         {pendingDeliveriesLoading ? (
@@ -9791,6 +9794,7 @@ const renderPhotographerProfile = () => {
           <div className="pending-delivery-list">
             {pendingDeliveries.map((item) => {
               const isVideo = item.media_type === "video";
+              const awaitingBuyer = item.delivery_status === "awaiting_buyer_confirmation";
               const title = isVideo
                 ? (item.label || [item.moto_brand, item.moto_model].filter(Boolean).join(" ") || item.sector || "Video")
                 : (item.location || "Sin ubicación");
@@ -9815,6 +9819,11 @@ const renderPhotographerProfile = () => {
                       </div>
                       <div className="pending-delivery-meta">Comprador: {item.buyer_email || "—"}</div>
                       <div className="pending-delivery-time">Vendido {getTimeSince(item.completed_at)}</div>
+                      {awaitingBuyer && (
+                        <div style={{ marginTop: 8, color: "var(--success)", fontSize: 12, fontWeight: 600 }}>
+                          Archivo subido · Esperando Recibido del comprador
+                        </div>
+                      )}
                       {isVideo && (
                         item.editing_notes?.trim() ? (
                           <div style={{ marginTop: 10 }}>
@@ -9857,6 +9866,15 @@ const renderPhotographerProfile = () => {
                           : `Subiendo archivo... ${upload.progress}%`}
                       </div>
                     </div>
+                  ) : awaitingBuyer ? (
+                    <AppButton
+                      type="button"
+                      className="pending-delivery-btn"
+                      style={{ background: "var(--surface)", color: "var(--muted)", border: "1px solid var(--border)", cursor: "default" }}
+                      disabled
+                    >
+                      <AppIcon name="clock" size={14} /> Esperando Recibido
+                    </AppButton>
                   ) : (
                     <AppButton
                       type="button"
@@ -9947,15 +9965,6 @@ const renderPhotographerProfile = () => {
                   <div style={{ fontSize: 10, textTransform: "uppercase", color: "var(--muted)", letterSpacing: 0.5, marginTop: 4 }}>{s.label}</div>
                 </div>
               ))}
-            </div>
-            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5, marginBottom: 16 }}>
-              Ingresos netos tras entregar en Entregas. Fotos: Q3 fijos + {vendorStats.stats.recurrente_fee_percent ?? 4.5}% (MotoShot Q{vendorStats.stats.motoshot_photo_fee_gtq ?? 1} + Recurrente Q{vendorStats.stats.recurrente_photo_fixed_gtq ?? 2} + {vendorStats.stats.recurrente_fee_percent ?? 4.5}%). Videos: MotoShot {vendorStats.stats.motoshot_video_percent ?? 10}% + Recurrente {vendorStats.stats.recurrente_fee_percent ?? 4.5}% + Q{vendorStats.stats.recurrente_video_fixed_gtq ?? 3}.
-              {Number(vendorStats.stats.pending_delivery_count || 0) > 0 && (
-                <span> Tenés {vendorStats.stats.pending_delivery_count} venta(s) por entregar (Q{Number(vendorStats.stats.pending_delivery_amount || 0).toFixed(2)} netos pendientes).</span>
-              )}
-              {vendorStats.stats.total_gross > 0 && (
-                <span> Ventas brutas: Q{Number(vendorStats.stats.total_gross).toFixed(2)} · Comisiones totales: Q{Number(vendorStats.stats.total_fees || 0).toFixed(2)}.</span>
-              )}
             </div>
   
             {/* Ventas por día */}
@@ -10217,17 +10226,17 @@ const renderPhotographerProfile = () => {
             </div>
             {available < 50 && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Mínimo Q50 para retirar</div>}
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6, maxWidth: 220, lineHeight: 1.45 }}>
-              Solo ventas con HQ entregado en Entregas, neto de comisiones MotoShot y Recurrente.
+              Solo ventas confirmadas por el comprador, neto de comisiones MotoShot y Recurrente.
             </div>
           </div>
           {pendingDeliveryNet > 0 && (
             <div style={{ textAlign: "right", maxWidth: 180 }}>
-              <div style={{ fontSize: 11, color: "var(--orange)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Pendiente entrega</div>
+              <div style={{ fontSize: 11, color: "var(--orange)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Pendiente</div>
               <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 28, color: "var(--orange)", lineHeight: 1, marginTop: 4 }}>
                 Q{pendingDeliveryNet.toFixed(2)}
               </div>
               <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.4 }}>
-                Se acredita al subir HQ en Entregas.
+                Ventas con cuenta: se acredita cuando el comprador marque Recibido. Invitados: al instante.
               </div>
             </div>
           )}
@@ -12418,6 +12427,278 @@ const renderPhotographerProfile = () => {
     );
   };
 
+  const isHqCloudExpired = (media) => {
+    const expiresAt = media?.hq_expires_at;
+    if (!expiresAt) return false;
+    const ts = new Date(expiresAt).getTime();
+    return Number.isFinite(ts) && Date.now() > ts;
+  };
+
+  const isPhotoCloudGone = (p) => {
+    const photo = p.photo;
+    if (!photo) return true;
+    if (isHqCloudExpired(photo)) return true;
+    if (photo.hq_status === "downloaded" && !photo.hq_path) return true;
+    return false;
+  };
+
+  const isVideoCloudGone = (v) => {
+    const video = v.video;
+    if (!video) return true;
+    if (isHqCloudExpired(video)) return true;
+    if ((video.hq_status === "downloaded" || video.hq_status === "deleted") && !video.hq_url) return true;
+    return false;
+  };
+
+  const handleDownloadVideoPurchase = async (purchase) => {
+    const videoId = purchase.video_id || purchase.video?.id;
+    if (!videoId || !session?.access_token) return;
+    setDownloading(purchase.id);
+    setDownloadProgress(0);
+
+    try {
+      const res = await fetch(apiUrl(`/api/videos/${videoId}/download`), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al descargar");
+      if (data.status === "pending") {
+        showToast(data.message || "El fotógrafo está preparando tu video.");
+        fetchPurchases({ silent: true });
+        return;
+      }
+      if (data.status === "expired") {
+        showToast(data.message || "El archivo expiró. Pedile al fotógrafo que lo vuelva a subir.");
+        fetchPurchases({ silent: true });
+        return;
+      }
+      if (data.status === "needs_confirmation") {
+        showToast(data.message || "Confirmá Recibido antes de guardar.");
+        return;
+      }
+      if (data.status === "downloaded") {
+        showToast(data.message || "Ya descargaste este video.");
+        fetchPurchases({ silent: true });
+        return;
+      }
+
+      const url = data.download_url || data.url;
+      if (!url) throw new Error("No se recibió la URL de descarga");
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error("El archivo ya no está disponible. Pedile al fotógrafo que lo vuelva a subir.");
+      }
+
+      const contentLength = response.headers.get("content-length");
+      const total = parseInt(contentLength, 10);
+      let loaded = 0;
+      const chunks = [];
+
+      if (response.body) {
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          loaded += value.length;
+          if (Number.isFinite(total) && total > 0) {
+            setDownloadProgress(Math.min(100, Math.round((loaded / total) * 100)));
+          }
+        }
+      } else {
+        const fallbackBlob = await response.blob();
+        chunks.push(new Uint8Array(await fallbackBlob.arrayBuffer()));
+        loaded = fallbackBlob.size;
+      }
+
+      if (!Number.isFinite(total) || total <= 0) {
+        setDownloadProgress(100);
+      }
+
+      const blob = new Blob(chunks, { type: "video/mp4" });
+      const fileName = data.filename || `MotoShot_${videoId}.mp4`;
+
+      if (Capacitor.isNativePlatform()) {
+        const base64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const result = reader.result;
+            if (typeof result !== "string") {
+              reject(new Error("No se pudo leer el archivo del video"));
+              return;
+            }
+            resolve(result.split(",")[1]);
+          };
+          reader.onerror = () => reject(reader.error || new Error("Error al leer el video"));
+          reader.readAsDataURL(blob);
+        });
+
+        await Filesystem.writeFile({
+          path: `MotoShot/${fileName}`,
+          data: base64,
+          directory: Directory.Documents,
+          recursive: true,
+        });
+
+        alert(`Video guardado en Documentos/MotoShot/${fileName}`);
+      } else {
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = blobUrl;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+      }
+
+      setDownloadProgress(100);
+      setVideoPurchases((prev) => prev.map((row) => (
+        row.id === purchase.id
+          ? {
+            ...row,
+            hq_downloaded_at: row.hq_downloaded_at || new Date().toISOString(),
+          }
+          : row
+      )));
+      fetchPurchases({ silent: true });
+    } catch (err) {
+      console.error("Error descargando video:", err);
+      showToast(err.message || "Error al descargar el video. Intentá de nuevo.");
+    } finally {
+      setDownloading(null);
+      setDownloadProgress(0);
+    }
+  };
+
+  const openReceiptPreview = async (type, purchase, label) => {
+    const mediaId = type === "photo"
+      ? purchase.photo?.id
+      : (purchase.video_id || purchase.video?.id);
+    if (!mediaId || !session?.access_token) return;
+
+    setReceiptPreview({ type, purchase, label, loading: true, confirming: false });
+    try {
+      const endpoint = type === "photo"
+        ? apiUrl(`/api/downloads/${mediaId}?preview=1`)
+        : apiUrl(`/api/videos/${mediaId}/download?preview=1`);
+      const res = await fetch(endpoint, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "No se pudo cargar el archivo");
+      if (data.status === "pending" || data.status === "expired") {
+        showToast(data.message || "El archivo no está disponible.");
+        setReceiptPreview(null);
+        fetchPurchases({ silent: true });
+        return;
+      }
+      setReceiptPreview({
+        type,
+        purchase,
+        label,
+        previewUrl: data.download_url,
+        filename: data.filename,
+        loading: false,
+        confirming: false,
+      });
+    } catch (err) {
+      showToast(err.message || "Error al cargar la vista previa.");
+      setReceiptPreview(null);
+    }
+  };
+
+  const confirmReceiptFromPreview = async () => {
+    if (!receiptPreview?.purchase?.id || !session?.access_token) return;
+    setReceiptPreview((prev) => (prev ? { ...prev, confirming: true } : prev));
+    try {
+      const { res, data } = await apiJson("/api/payments/confirm-receipt", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          type: receiptPreview.type,
+          purchase_id: receiptPreview.purchase.id,
+        }),
+      });
+      if (!res.ok) throw new Error(data.error || "No se pudo confirmar la recepción");
+      const confirmedAt = data.buyer_confirmed_at || new Date().toISOString();
+      if (receiptPreview.type === "photo") {
+        setPurchases((prev) => prev.map((row) => (
+          row.id === receiptPreview.purchase.id
+            ? { ...row, buyer_confirmed_at: confirmedAt }
+            : row
+        )));
+      } else {
+        setVideoPurchases((prev) => prev.map((row) => (
+          row.id === receiptPreview.purchase.id
+            ? { ...row, buyer_confirmed_at: confirmedAt }
+            : row
+        )));
+      }
+      setReceiptPreview((prev) => (
+        prev
+          ? {
+            ...prev,
+            confirming: false,
+            purchase: { ...prev.purchase, buyer_confirmed_at: confirmedAt },
+          }
+          : prev
+      ));
+      showToast("Recibido confirmado. Ya podés guardar el archivo en tu dispositivo.");
+    } catch (err) {
+      setReceiptPreview((prev) => (prev ? { ...prev, confirming: false } : prev));
+      showToast(err.message || "Error al confirmar.");
+    }
+  };
+
+  const saveReceiptToDevice = async () => {
+    if (!receiptPreview || !session?.access_token) return;
+    const { type, purchase, filename: previewFilename } = receiptPreview;
+    const mediaId = type === "photo"
+      ? purchase.photo?.id
+      : (purchase.video_id || purchase.video?.id);
+    if (!mediaId) return;
+
+    setReceiptSaving(true);
+    try {
+      if (type === "video") {
+        await handleDownloadVideoPurchase({ ...purchase, id: purchase.id });
+      } else {
+        const res = await fetch(apiUrl(`/api/downloads/${mediaId}`), {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Error al descargar");
+        if (data.status === "needs_confirmation") {
+          throw new Error(data.message || "Confirmá Recibido antes de guardar.");
+        }
+        if (data.status === "expired" || data.status === "pending") {
+          showToast(data.message || "El archivo ya no está disponible.");
+          fetchPurchases({ silent: true });
+          setReceiptPreview(null);
+          return;
+        }
+        await downloadFromSignedUrl(data.download_url, data.filename || previewFilename);
+        setPurchases((prev) => prev.map((row) => (
+          row.id === purchase.id
+            ? { ...row, hq_downloaded_at: row.hq_downloaded_at || new Date().toISOString() }
+            : row
+        )));
+        fetchPurchases({ silent: true });
+      }
+      setReceiptPreview(null);
+      showToast("Archivo guardado en tu dispositivo.");
+    } catch (err) {
+      showToast(err.message || "Error al guardar el archivo.");
+    } finally {
+      setReceiptSaving(false);
+    }
+  };
+
   const renderMyPurchases = () => {
     void purchasesCountdownTick;
 
@@ -12556,131 +12837,6 @@ const renderPhotographerProfile = () => {
       whiteSpace: "normal",
     };
 
-    const handleDownloadVideo = async (purchase) => {
-      const videoId = purchase.video_id || purchase.video?.id;
-      if (!videoId || !session?.access_token) return;
-      setDownloading(purchase.id);
-      setDownloadProgress(0);
-
-      try {
-        const res = await fetch(apiUrl(`/api/videos/${videoId}/download`), {
-          headers: { Authorization: `Bearer ${session.access_token}` },
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Error al descargar");
-        if (data.status === "pending") {
-          showToast(data.message || "El fotógrafo está preparando tu video.");
-          fetchPurchases({ silent: true });
-          return;
-        }
-        if (data.status === "downloaded") {
-          showToast(data.message || "Ya descargaste este video.");
-          fetchPurchases({ silent: true });
-          return;
-        }
-
-        const url = data.download_url || data.url;
-        if (!url) throw new Error("No se recibió la URL de descarga");
-
-        const response = await fetch(url);
-        if (!response.ok) {
-          throw new Error("El archivo ya no está disponible. Pedile al fotógrafo que lo vuelva a subir.");
-        }
-
-        const contentLength = response.headers.get("content-length");
-        const total = parseInt(contentLength, 10);
-        let loaded = 0;
-        const chunks = [];
-
-        if (response.body) {
-          const reader = response.body.getReader();
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            loaded += value.length;
-            if (Number.isFinite(total) && total > 0) {
-              setDownloadProgress(Math.min(100, Math.round((loaded / total) * 100)));
-            }
-          }
-        } else {
-          const fallbackBlob = await response.blob();
-          chunks.push(new Uint8Array(await fallbackBlob.arrayBuffer()));
-          loaded = fallbackBlob.size;
-        }
-
-        if (!Number.isFinite(total) || total <= 0) {
-          setDownloadProgress(100);
-        }
-
-        const blob = new Blob(chunks, { type: "video/mp4" });
-        const fileName = data.filename || `MotoShot_${videoId}.mp4`;
-
-        if (Capacitor.isNativePlatform()) {
-          const base64 = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-              const result = reader.result;
-              if (typeof result !== "string") {
-                reject(new Error("No se pudo leer el archivo del video"));
-                return;
-              }
-              resolve(result.split(",")[1]);
-            };
-            reader.onerror = () => reject(reader.error || new Error("Error al leer el video"));
-            reader.readAsDataURL(blob);
-          });
-
-          await Filesystem.writeFile({
-            path: `MotoShot/${fileName}`,
-            data: base64,
-            directory: Directory.Documents,
-            recursive: true,
-          });
-
-          alert(`Video guardado en Documentos/MotoShot/${fileName}`);
-        } else {
-          const blobUrl = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = blobUrl;
-          a.download = fileName;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(blobUrl);
-        }
-
-        const deleteRes = await fetch(apiUrl(`/api/videos/${videoId}/delete-hq`), {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${session.access_token}` },
-        });
-        const deleteData = await deleteRes.json().catch(() => ({}));
-        if (!deleteRes.ok) {
-          throw new Error(deleteData.error || "No se pudo finalizar la descarga en el servidor");
-        }
-
-        setDownloadProgress(100);
-        setVideoPurchases((prev) => prev.map((row) => (
-          row.id === purchase.id
-            ? {
-              ...row,
-              hq_downloaded_at: row.hq_downloaded_at || new Date().toISOString(),
-              video: row.video
-                ? { ...row.video, hq_status: "deleted", hq_url: null }
-                : row.video,
-            }
-            : row
-        )));
-        fetchPurchases({ silent: true });
-      } catch (err) {
-        console.error("Error descargando video:", err);
-        showToast(err.message || "Error al descargar el video. Intentá de nuevo.");
-      } finally {
-        setDownloading(null);
-        setDownloadProgress(0);
-      }
-    };
-
     const purchaseItems = [
       ...purchases.map((p) => ({ type: "photo", data: p, completed_at: p.completed_at })),
       ...videoPurchases.map((v) => ({ type: "video", data: v, completed_at: v.completed_at })),
@@ -12689,7 +12845,7 @@ const renderPhotographerProfile = () => {
     return (
   <div className="upload-view">
     <SectionTitleIcon icon="purchases">MIS COMPRAS</SectionTitleIcon>
-    <div className="section-sub">Volvé a descargar tus fotos y videos comprados.</div>
+    <div className="section-sub">Revisá tus archivos en HD, confirmá Recibido y guardalos en tu dispositivo (24 h en la nube).</div>
 
     {!user ? (
       <div className="empty">
@@ -12711,11 +12867,15 @@ const renderPhotographerProfile = () => {
         {purchaseItems.map((item) => {
           if (item.type === "photo") {
             const p = item.data;
-            const photoDownloaded = Boolean(p.hq_downloaded_at) || p.photo?.hq_status === "downloaded";
-            const photoPending = !photoDownloaded && (p.photo?.hq_status === "pending" || !p.photo?.hq_path);
-            const photoClaimable = !photoDownloaded && !photoPending;
-            const showPhotoResend = canShowHqResend(photoPending, p.completed_at);
+            const photoDownloaded = Boolean(p.hq_downloaded_at);
+            const photoPending = p.photo?.hq_status === "pending" || (!p.photo?.hq_path && p.photo?.hq_status !== "ready" && p.photo?.hq_status != null);
+            const photoExpired = isPhotoCloudGone(p) && !photoDownloaded;
+            const photoNeedsPreview = !photoPending && !photoExpired && !photoDownloaded && !p.buyer_confirmed_at;
+            const photoCanSave = !photoPending && !photoExpired && Boolean(p.buyer_confirmed_at) && !photoDownloaded;
+            const photoClaimable = photoNeedsPreview;
+            const showPhotoResend = canShowHqResend(photoPending || photoExpired, p.completed_at);
             const photoResendKey = `photo-${p.id}`;
+            const photoLabel = p.photo?.location || "Foto";
 
             return (
               <div
@@ -12743,50 +12903,74 @@ const renderPhotographerProfile = () => {
                     <IconText icon="money" size={12}>Q{p.amount}</IconText> ·{" "}
                     {p.completed_at ? new Date(p.completed_at).toLocaleString() : "Completado"}
                     {photoPending && (
-                      <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Preparando HQ</span>
+                      <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Esperando archivo</span>
+                    )}
+                    {photoExpired && (
+                      <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Archivo expirado</span>
+                    )}
+                    {p.buyer_confirmed_at && !photoDownloaded && (
+                      <span style={{ color: "var(--success)", marginLeft: 6 }}>· Recibido</span>
                     )}
                     {photoDownloaded && (
-                      <span style={{ color: "var(--success)", marginLeft: 6 }}>· Descargado</span>
+                      <span style={{ color: "var(--success)", marginLeft: 6 }}>· Guardado</span>
                     )}
                   </div>
                   {renderHqResendAction("photo", p.id, p, showPhotoResend, photoResendKey)}
                 </div>
                 <AppButton
-                  className={`card-buy purchase-row-action${photoDownloaded || photoPending ? "" : " card-buy-download"}`}
-                  disabled={photoDownloaded || photoPending}
+                  className={`card-buy purchase-row-action${photoDownloaded || photoPending || photoExpired ? "" : " card-buy-download"}`}
+                  disabled={photoDownloaded || photoPending || photoExpired}
                   style={{
                     ...purchaseActionStyle,
-                    ...(photoDownloaded || photoPending ? purchaseBtnDisabled : purchaseBtnActive),
+                    ...(photoDownloaded || photoPending || photoExpired ? purchaseBtnDisabled : purchaseBtnActive),
                   }}
                   onClick={async () => {
-                    if (photoDownloaded || photoPending) return;
-                    try {
-                      const res = await fetch(`/api/downloads/${p.photo.id}`, {
-                        headers: { Authorization: `Bearer ${session.access_token}` },
-                      });
-                      const data = await res.json();
-                      if (!res.ok) throw new Error(data.error || "Error al descargar");
-                      if (data.status === "pending") {
-                        showToast(data.message || "El fotógrafo está preparando tu foto.");
+                    if (photoDownloaded || photoPending || photoExpired) return;
+                    if (photoNeedsPreview) {
+                      openReceiptPreview("photo", p, photoLabel);
+                      return;
+                    }
+                    if (photoCanSave) {
+                      setReceiptSaving(true);
+                      try {
+                        const res = await fetch(apiUrl(`/api/downloads/${p.photo.id}`), {
+                          headers: { Authorization: `Bearer ${session.access_token}` },
+                        });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || "Error al descargar");
+                        if (data.status === "needs_confirmation") {
+                          openReceiptPreview("photo", p, photoLabel);
+                          return;
+                        }
+                        if (data.status === "expired" || data.status === "pending") {
+                          showToast(data.message || "El archivo ya no está disponible.");
+                          fetchPurchases({ silent: true });
+                          return;
+                        }
+                        await downloadFromSignedUrl(data.download_url, data.filename);
                         fetchPurchases({ silent: true });
-                        return;
+                      } catch (err) {
+                        console.error(err);
+                        showToast(err.message || "Error al descargar.");
+                      } finally {
+                        setReceiptSaving(false);
                       }
-                      if (data.status === "downloaded") {
-                        showToast(data.message || "Ya descargaste esta foto.");
-                        fetchPurchases({ silent: true });
-                        return;
-                      }
-                      await downloadFromSignedUrl(data.download_url, data.filename);
-                      fetchPurchases({ silent: true });
-                    } catch (err) {
-                      console.error(err);
-                      showToast("Error al descargar.");
                     }
                   }}
                 >
                   <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
                     <AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)", flexShrink: 0 }} />
-                    <span>{photoDownloaded ? "Descargado" : photoPending ? "Esperando HQ" : "Descargar"}</span>
+                    <span>
+                      {photoDownloaded
+                        ? "Guardado"
+                        : photoExpired
+                          ? "Expirado"
+                          : photoPending
+                            ? "Esperando"
+                            : photoCanSave
+                              ? "Guardar"
+                              : "Ver archivo"}
+                    </span>
                   </span>
                 </AppButton>
               </div>
@@ -12799,11 +12983,12 @@ const renderPhotographerProfile = () => {
             v.video?.sector ||
             "Video";
           const hqPending = v.video?.hq_status === "pending";
-          const hqDownloaded = Boolean(v.hq_downloaded_at)
-            || v.video?.hq_status === "downloaded"
-            || v.video?.hq_status === "deleted";
-          const hqClaimable = v.video?.hq_status === "ready" && !v.hq_downloaded_at;
-          const showVideoResend = canShowHqResend(hqPending, v.completed_at);
+          const hqDownloaded = Boolean(v.hq_downloaded_at);
+          const hqExpired = isVideoCloudGone(v) && !hqDownloaded;
+          const hqNeedsPreview = !hqPending && !hqExpired && !hqDownloaded && !v.buyer_confirmed_at && v.video?.hq_status === "ready";
+          const hqCanSave = !hqPending && !hqExpired && Boolean(v.buyer_confirmed_at) && !hqDownloaded;
+          const hqClaimable = hqNeedsPreview;
+          const showVideoResend = canShowHqResend(hqPending || hqExpired, v.completed_at);
           const videoResendKey = `video-${v.id}`;
           const isVideoDownloading = downloading === v.id;
 
@@ -12832,8 +13017,17 @@ const renderPhotographerProfile = () => {
                 <div style={{ color: "var(--muted)", marginTop: 2 }}>
                   <IconText icon="money" size={12}>Q{v.amount}</IconText> ·{" "}
                   {v.completed_at ? new Date(v.completed_at).toLocaleString() : "Completado"}
+                  {hqPending && (
+                    <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Esperando archivo</span>
+                  )}
+                  {hqExpired && (
+                    <span style={{ color: "var(--orange)", marginLeft: 6 }}>· Archivo expirado</span>
+                  )}
+                  {v.buyer_confirmed_at && !hqDownloaded && (
+                    <span style={{ color: "var(--success)", marginLeft: 6 }}>· Recibido</span>
+                  )}
                   {hqDownloaded && (
-                    <span style={{ color: "var(--success)", marginLeft: 6 }}>· Descargado</span>
+                    <span style={{ color: "var(--success)", marginLeft: 6 }}>· Guardado</span>
                   )}
                 </div>
                 {renderHqResendAction("video", v.id, v, showVideoResend, videoResendKey)}
@@ -12864,20 +13058,24 @@ const renderPhotographerProfile = () => {
                 </div>
               ) : (
               <AppButton
-                className={`card-buy purchase-row-action${hqDownloaded || hqPending ? "" : " card-buy-download"}`}
-                disabled={hqDownloaded || hqPending}
+                className={`card-buy purchase-row-action${hqDownloaded || hqPending || hqExpired ? "" : " card-buy-download"}`}
+                disabled={hqDownloaded || hqPending || hqExpired}
                 style={{
                   ...purchaseActionStyle,
-                  ...(hqDownloaded || hqPending ? purchaseBtnDisabled : purchaseBtnActive),
+                  ...(hqDownloaded || hqPending || hqExpired ? purchaseBtnDisabled : purchaseBtnActive),
                 }}
                 onClick={() => {
-                  if (hqDownloaded || hqPending) return;
-                  handleDownloadVideo(v);
+                  if (hqDownloaded || hqPending || hqExpired) return;
+                  if (hqNeedsPreview) {
+                    openReceiptPreview("video", v, label);
+                    return;
+                  }
+                  if (hqCanSave) handleDownloadVideoPurchase(v);
                 }}
               >
                 <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, flexWrap: "wrap" }}>
                   {hqDownloaded ? (
-                    <span>Descargado</span>
+                    <span>Guardado</span>
                   ) : (
                     <>
                       <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
@@ -12885,7 +13083,15 @@ const renderPhotographerProfile = () => {
                         <polyline points="7 10 12 15 17 10" />
                         <line x1="12" y1="15" x2="12" y2="3" />
                       </svg>
-                      <span>{hqPending ? "Esperando HQ" : "Descargar"}</span>
+                      <span>
+                        {hqExpired
+                          ? "Expirado"
+                          : hqPending
+                            ? "Esperando"
+                            : hqCanSave
+                              ? "Guardar"
+                              : "Ver archivo"}
+                      </span>
                     </>
                   )}
                 </span>
@@ -17720,6 +17926,13 @@ const renderVendorRequest = () => {
         initialEmail={readGuestCheckoutDraft()?.guest_email || ""}
         onClose={handleGuestCheckoutClose}
         onSubmit={handleGuestCheckoutSubmit}
+      />
+      <ReceiptPreviewModal
+        preview={receiptPreview}
+        onClose={() => setReceiptPreview(null)}
+        onConfirm={confirmReceiptFromPreview}
+        onSaveToDevice={saveReceiptToDevice}
+        saving={receiptSaving || downloading != null}
       />
       </div>
     </>
