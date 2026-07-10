@@ -13,6 +13,7 @@ function injectSplashStyles() {
       inset: 0;
       z-index: 2147483647;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
       background: #0c0c0c;
@@ -22,6 +23,13 @@ function injectSplashStyles() {
     #app-splash.app-splash--out {
       opacity: 0;
       pointer-events: none;
+    }
+    #app-splash .app-splash-center {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
     }
     #app-splash .app-splash-inner {
       position: relative;
@@ -38,12 +46,38 @@ function injectSplashStyles() {
       background: radial-gradient(circle, rgba(255, 107, 0, 0.42) 0%, transparent 72%);
       animation: app-splash-glow 2.4s ease-in-out infinite;
     }
-    #app-splash img {
+    #app-splash .app-splash-inner img {
       position: relative;
       z-index: 1;
       width: 96px;
       height: 96px;
       object-fit: contain;
+    }
+    #app-splash .app-splash-footer {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      padding-bottom: max(28px, env(safe-area-inset-bottom, 0px));
+      gap: 2px;
+    }
+    #app-splash .app-splash-rdl-logo {
+      width: 40px;
+      height: 40px;
+      object-fit: contain;
+      margin-bottom: 4px;
+    }
+    #app-splash .app-splash-from {
+      font-size: 11px;
+      color: #888;
+      font-family: system-ui, -apple-system, sans-serif;
+      letter-spacing: 0.02em;
+    }
+    #app-splash .app-splash-rdl-name {
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      font-family: system-ui, -apple-system, sans-serif;
     }
     @keyframes app-splash-in {
       from { opacity: 0; transform: scale(0.88); }
@@ -65,9 +99,16 @@ export function mountAppSplash() {
     el.id = "app-splash";
     el.setAttribute("aria-hidden", "true");
     el.innerHTML = `
-      <div class="app-splash-inner">
-        <div class="app-splash-glow"></div>
-        <img src="/favicon.png" alt="" width="96" height="96" />
+      <div class="app-splash-center">
+        <div class="app-splash-inner">
+          <div class="app-splash-glow"></div>
+          <img src="/favicon.png" alt="" width="96" height="96" />
+        </div>
+      </div>
+      <div class="app-splash-footer">
+        <img class="app-splash-rdl-logo" src="/rogue-dev-labs-logo.png" alt="" width="40" height="40" />
+        <div class="app-splash-from">from</div>
+        <div class="app-splash-rdl-name">Rogue Dev Labs</div>
       </div>
     `;
     document.body.prepend(el);

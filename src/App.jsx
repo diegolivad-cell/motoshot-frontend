@@ -83,7 +83,109 @@ const VIEWS = {
   UPLOAD_VIDEO: "upload_video",
   VIDEO_SEARCH: "video_search",
   PENDING_DELIVERIES: "pending_deliveries",
+  PRIVACY_POLICY: "privacy_policy",
+  TERMS_CONDITIONS: "terms_conditions",
 };
+
+const PRIVACY_POLICY_TEXT = `POLÍTICA DE PRIVACIDAD — MOTOSHOT GT
+Última actualización: julio 2026
+
+1. RESPONSABLE DEL TRATAMIENTO
+MotoShot GT, plataforma digital operada en la República de Guatemala, es responsable del tratamiento de los datos personales recolectados a través de motoshot.pro y la aplicación móvil MotoShot GT.
+Contacto: admin@motoshot.pro
+
+2. DATOS QUE RECOLECTAMOS
+Al registrarte y usar MotoShot GT, recolectamos:
+- Nombre completo y nombre de usuario (handle)
+- Correo electrónico y contraseña (encriptada)
+- Número de teléfono (opcional, requerido para membresías)
+- Redes sociales que el usuario decida vincular
+- Fotos y videos que el fotógrafo sube a la plataforma
+- Historial de compras y transacciones
+- Datos de navegación y uso de la plataforma
+
+3. PARA QUÉ USAMOS TUS DATOS
+- Crear y gestionar tu cuenta en MotoShot GT
+- Procesar pagos y membresías a través de Recurrente
+- Enviarte notificaciones sobre ventas, compras y novedades de la plataforma
+- Mejorar la experiencia de uso mediante análisis de uso anónimo
+- Cumplir con obligaciones legales y fiscales aplicables en Guatemala
+
+4. CON QUIÉN COMPARTIMOS TUS DATOS
+MotoShot GT no vende ni comparte tu información personal con terceros, excepto:
+- Recurrente: para procesar pagos y suscripciones
+- Supabase: proveedor de base de datos y almacenamiento (servidor en EE.UU.)
+- OpenAI: para el análisis automático de imágenes (solo el contenido visual, sin datos personales)
+Todos los proveedores están sujetos a sus propias políticas de privacidad y medidas de seguridad.
+
+5. ALMACENAMIENTO Y SEGURIDAD
+Tus datos se almacenan en servidores seguros de Supabase. Usamos autenticación encriptada y conexiones HTTPS. Las contraseñas nunca se almacenan en texto plano.
+
+6. TUS DERECHOS
+Tenés derecho a:
+- Acceder a tu información personal en cualquier momento desde tu perfil
+- Corregir datos incorrectos
+- Solicitar la eliminación de tu cuenta y datos enviando un correo a admin@motoshot.pro
+- Cancelar tu suscripción en cualquier momento
+
+7. RETENCIÓN DE DATOS
+Conservamos tus datos mientras tu cuenta esté activa. Al eliminar tu cuenta, tus datos personales se borran en un plazo máximo de 30 días, excepto los registros de transacciones que deben conservarse por obligaciones legales.
+
+8. CAMBIOS A ESTA POLÍTICA
+Cualquier cambio a esta política será notificado por correo electrónico con al menos 15 días de anticipación.
+
+9. CONTACTO
+Para ejercer tus derechos o resolver dudas sobre privacidad:
+admin@motoshot.pro — motoshot.pro`;
+
+const TERMS_CONDITIONS_TEXT = `TÉRMINOS Y CONDICIONES — MOTOSHOT GT
+Última actualización: julio 2026
+
+1. DESCRIPCIÓN DEL SERVICIO
+MotoShot GT es una plataforma digital de fotografía y video especializada en motociclismo, operada en Guatemala. Permite a fotógrafos verificados subir y vender contenido a participantes de rodadas mediante motoshot.pro y la app móvil.
+
+2. CUENTAS DE USUARIO
+2.1. Para usar MotoShot GT debés registrarte con información verídica.
+2.2. Sos responsable de mantener la seguridad de tu cuenta y contraseña.
+2.3. MotoShot GT puede suspender cuentas que violen estos términos sin previo aviso.
+
+3. FOTÓGRAFOS — MEMBRESÍAS Y COMISIONES
+3.1. Para subir y vender contenido, los fotógrafos deben tener una membresía activa:
+     - Plan Básico: Q120/mes — 15 GB
+     - Plan Avanzado: Q155/mes — 50 GB
+     - Plan Profesional: Q235/mes — 120 GB
+     - Plan Élite: Q390/mes — 300 GB
+3.2. Los cobros son mensuales y automáticos mediante tarjeta a través de Recurrente.
+3.3. Por cada venta exitosa, MotoShot GT cobra una comisión de Q3 fijos + 4.5% del monto (Plan Élite: Q3 + 3.5%).
+3.4. El fotógrafo puede cancelar su membresía en cualquier momento. El acceso se mantiene hasta el fin del período pagado.
+
+4. COMPRADORES
+4.1. Al comprar una foto o video, el comprador adquiere licencia de uso personal no exclusiva del contenido.
+4.2. Está prohibido redistribuir, revender o usar comercialmente el contenido sin autorización del fotógrafo.
+4.3. Las compras son finales. No se realizan reembolsos salvo error técnico atribuible a la plataforma.
+
+5. CONTENIDO
+5.1. El fotógrafo garantiza tener todos los derechos sobre el contenido que sube.
+5.2. MotoShot GT aplica marcas de agua automáticas a las previsualizaciones.
+5.3. Está prohibido subir contenido ilegal, ofensivo, que viole derechos de terceros o que no esté relacionado con motociclismo.
+5.4. MotoShot GT puede eliminar contenido que viole estas normas sin previo aviso.
+
+6. PAGOS Y RETIROS
+6.1. Las ganancias del fotógrafo se acumulan en su balance dentro de la plataforma.
+6.2. El fotógrafo puede solicitar retiro de su balance en cualquier momento desde su perfil.
+6.3. MotoShot GT procesará los retiros en un plazo máximo de 5 días hábiles.
+
+7. LIMITACIÓN DE RESPONSABILIDAD
+MotoShot GT no se hace responsable por interrupciones del servicio, pérdida de contenido por falla técnica, o disputas entre fotógrafos y compradores. El servicio se ofrece "tal como está".
+
+8. MODIFICACIONES
+MotoShot GT puede modificar estos términos con aviso previo de 30 días por correo electrónico.
+
+9. LEY APLICABLE
+Estos términos se rigen por las leyes de la República de Guatemala. Disputas se resolverán ante los tribunales competentes de Ciudad de Guatemala.
+
+10. CONTACTO
+admin@motoshot.pro — motoshot.pro`;
 
 const VIDEO_PREVIEW_MAX_SEC = 7;
 const VIDEO_PREVIEW_SHORT_SEC = 3;
@@ -2243,6 +2345,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
 //USE STATES
   export default function App() {
   const [view, setView] = useState(VIEWS.PHOTOGRAPHERS);
+  const [legalReturnView, setLegalReturnView] = useState(VIEWS.PHOTOGRAPHERS);
   const [selected, setSelected] = useState(null);
   const [pendingPurchase, setPendingPurchase] = useState(null);
   const [purchased, setPurchased] = useState([]);
@@ -2883,6 +2986,8 @@ function WatermarkedImage({ src, photographer, purchased }) {
   }, [session, refreshSubscriptionUsage]);
 
   const paymentSyncInFlight = useRef(false);
+  const paymentAbortAsCancelRef = useRef(false);
+  const paymentCancelTimerRef = useRef(null);
   const vendorDashboardInFlight = useRef(false);
   const reconcileAtRef = useRef(0);
   const prevViewRef = useRef(view);
@@ -3027,6 +3132,34 @@ function WatermarkedImage({ src, photographer, purchased }) {
     }
   };
 
+  const handlePaymentCancelled = useCallback(({ quiet = false, showCancellingMessage = true } = {}) => {
+    stopPaymentPolling();
+    clearPendingPayment();
+    paymentSyncInFlight.current = false;
+    paymentAbortAsCancelRef.current = false;
+    setPayStep(1);
+    setSubPayLoading(false);
+    setCartCheckoutLoading(false);
+    window.history.replaceState({}, document.title, window.location.pathname);
+
+    if (paymentCancelTimerRef.current) {
+      window.clearTimeout(paymentCancelTimerRef.current);
+      paymentCancelTimerRef.current = null;
+    }
+
+    if (showCancellingMessage) {
+      setGlobalLoading({ active: true, message: "Cancelando tu pago..." });
+      paymentCancelTimerRef.current = window.setTimeout(() => {
+        setGlobalLoading({ active: false, message: "" });
+        paymentCancelTimerRef.current = null;
+        if (!quiet) showToast("Pago cancelado.");
+      }, 450);
+    } else {
+      setGlobalLoading({ active: false, message: "" });
+      if (!quiet) showToast("Pago cancelado.");
+    }
+  }, []);
+
   const syncGuestPendingPayments = useCallback(async ({ silent = false } = {}) => {
     const pending = readPendingPayment();
     const params = new URLSearchParams(window.location.search);
@@ -3072,23 +3205,22 @@ function WatermarkedImage({ src, photographer, purchased }) {
       window.history.replaceState({}, document.title, window.location.pathname);
       return true;
     } catch (err) {
+      if (isPaymentStillProcessingError(err.message)) {
+        paymentAbortAsCancelRef.current = true;
+        return false;
+      }
       if (!silent) showToast(err.message || "No se pudo confirmar tu pago.");
       return false;
     } finally {
       paymentSyncInFlight.current = false;
-      if (!silent) setGlobalLoading({ active: false, message: "" });
+      if (paymentAbortAsCancelRef.current) {
+        paymentAbortAsCancelRef.current = false;
+        handlePaymentCancelled();
+      } else {
+        setGlobalLoading({ active: false, message: "" });
+      }
     }
-  }, [cart]);
-
-  const handlePaymentCancelled = useCallback(() => {
-    stopPaymentPolling();
-    clearPendingPayment();
-    paymentSyncInFlight.current = false;
-    setGlobalLoading({ active: false, message: "" });
-    setPayStep(1);
-    setSubPayLoading(false);
-    showToast("Pago cancelado.");
-  }, []);
+  }, [cart, handlePaymentCancelled]);
 
   const syncPendingPayments = useCallback(async ({ silent = false } = {}) => {
     if (!session?.access_token || paymentSyncInFlight.current) {
@@ -3139,10 +3271,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
     const failSyncPendingTimeout = () => {
       syncAborted = true;
       stopPendingPaymentSync();
-      if (!silent) {
-        setGlobalLoading({ active: false, message: "" });
-        showToast("No pudimos confirmar tu pago. Si realizaste el pago, contáctanos.");
-      }
+      paymentAbortAsCancelRef.current = true;
     };
 
     let syncAborted = false;
@@ -3239,10 +3368,21 @@ function WatermarkedImage({ src, photographer, purchased }) {
           });
           const data = await res.json().catch(() => ({}));
           if (res.ok) return { ok: true };
-          if (isTerminalPaymentError(res.status, data?.error)) {
-            return { ok: false, terminal: true };
+          const errorText = data?.error || "";
+          if (isTerminalPaymentError(res.status, errorText)) {
+            return { ok: false, terminal: true, error: errorText };
           }
-          return { ok: false, terminal: false };
+          return { ok: false, terminal: false, error: errorText };
+        };
+
+        const markCheckoutUnconfirmed = (result) => {
+          if (!result?.ok && result?.error && isPaymentStillProcessingError(result.error)) {
+            syncAborted = true;
+            stopPendingPaymentSync();
+            paymentAbortAsCancelRef.current = true;
+            return true;
+          }
+          return false;
         };
 
         const resolvedVideoId = hintVideoId;
@@ -3274,6 +3414,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
             return true;
           }
           if (result.terminal) terminalFailure = true;
+          if (markCheckoutUnconfirmed(result)) break;
         }
 
         if (pending?.kind === "video" && pending.videoId) {
@@ -3290,6 +3431,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
             return true;
           }
           if (result.terminal) terminalFailure = true;
+          if (markCheckoutUnconfirmed(result)) break;
         } else if (resolvedVideoId && paymentReturn) {
           const result = await attemptCapture("/api/payments/capture-video-order", {
             checkout_id: hintCheckoutId || undefined,
@@ -3304,6 +3446,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
             return true;
           }
           if (result.terminal) terminalFailure = true;
+          if (markCheckoutUnconfirmed(result)) break;
         }
 
         if (pending?.kind === "photo" && pending.photoId) {
@@ -3320,6 +3463,7 @@ function WatermarkedImage({ src, photographer, purchased }) {
             return true;
           }
           if (result.terminal) terminalFailure = true;
+          if (markCheckoutUnconfirmed(result)) break;
         }
 
         if (pending?.kind === "subscription" && pending.photographerId) {
@@ -3340,11 +3484,13 @@ function WatermarkedImage({ src, photographer, purchased }) {
             return true;
           }
           if (result.terminal) terminalFailure = true;
+          if (markCheckoutUnconfirmed(result)) break;
         }
 
         if (terminalFailure || (!isPaymentSyncSuccess(syncData) && !hasSyncHints)) {
           syncAborted = true;
           stopPendingPaymentSync();
+          if (terminalFailure) paymentAbortAsCancelRef.current = true;
           break;
         }
 
@@ -3370,11 +3516,14 @@ function WatermarkedImage({ src, photographer, purchased }) {
       return false;
     } finally {
       paymentSyncInFlight.current = false;
-      if (!silent) {
+      if (paymentAbortAsCancelRef.current) {
+        paymentAbortAsCancelRef.current = false;
+        handlePaymentCancelled();
+      } else {
         setGlobalLoading({ active: false, message: "" });
       }
     }
-  }, [session, successMode, finalizePhotoPurchase, finalizeVideoPurchase, finalizeCartPurchase, refreshMySubscriptions]);
+  }, [session, successMode, finalizePhotoPurchase, finalizeVideoPurchase, finalizeCartPurchase, refreshMySubscriptions, handlePaymentCancelled]);
 
   const isSubscribedToPhotographer = useCallback(
     (photographerId) =>
@@ -6598,6 +6747,17 @@ useEffect(() => {
         return;
       }
 
+      const params = new URLSearchParams(window.location.search);
+      if (
+        (source === "visibility" || source === "pageshow") &&
+        readPendingPayment() &&
+        params.get("payment_return") !== "true" &&
+        params.get("payment_cancel") !== "true"
+      ) {
+        handlePaymentCancelled();
+        return;
+      }
+
       const pending = readPendingPayment();
       const guestPending =
         pending?.isGuest || (!session && (pending?.guestEmail || readGuestCheckoutDraft()?.guest_email));
@@ -7842,6 +8002,64 @@ const openMatchPreviewItem = async (preview, e) => {
   }
 };
 
+const legalLinkStyle = {
+  background: "none",
+  border: "none",
+  padding: 0,
+  color: "var(--orange)",
+  cursor: "pointer",
+  textDecoration: "underline",
+  fontSize: "inherit",
+  fontFamily: "inherit",
+};
+
+const openLegalPage = (legalView) => {
+  setLegalReturnView(view);
+  setView(legalView);
+};
+
+const renderLegalLinksRow = (extraStyle = {}) => (
+  <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8, ...extraStyle }}>
+    <button type="button" style={legalLinkStyle} onClick={() => openLegalPage(VIEWS.PRIVACY_POLICY)}>
+      Política de Privacidad
+    </button>
+    <span style={{ color: "var(--muted)", fontSize: 12 }}>·</span>
+    <button type="button" style={legalLinkStyle} onClick={() => openLegalPage(VIEWS.TERMS_CONDITIONS)}>
+      Términos y Condiciones
+    </button>
+  </div>
+);
+
+const renderLegalPage = (pageTitle, content) => (
+  <div className="upload-view" style={{ paddingBottom: 32, minHeight: "calc(100vh - 72px)" }}>
+    <AppButton
+      className="close-btn-secondary"
+      style={{ marginBottom: 16 }}
+      onClick={() => setView(legalReturnView)}
+    >
+      ← Volver
+    </AppButton>
+    <div className="section-title" style={{ marginBottom: 8 }}>{pageTitle}</div>
+    <div
+      style={{
+        color: "var(--muted)",
+        fontSize: 14,
+        lineHeight: 1.65,
+        whiteSpace: "pre-wrap",
+        padding: "16px 18px",
+        borderRadius: 12,
+        background: "var(--surface)",
+        border: "1px solid var(--border)",
+      }}
+    >
+      {content}
+    </div>
+  </div>
+);
+
+const renderPrivacyPolicy = () => renderLegalPage("POLÍTICA DE PRIVACIDAD", PRIVACY_POLICY_TEXT);
+const renderTermsConditions = () => renderLegalPage("TÉRMINOS Y CONDICIONES", TERMS_CONDITIONS_TEXT);
+
 const renderPhotographers = () => (
   <div style={{ paddingBottom: 100 }}>
     {/* Hero */}
@@ -8372,6 +8590,16 @@ const renderPhotographers = () => (
 </motion.div>
       )}
         </>
+      )}
+
+      {!isLoggedIn && (
+        <div style={{ padding: "28px 20px 16px", textAlign: "center" }}>
+          {renderLegalLinksRow({ fontSize: 11, color: "var(--muted)" })}
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+            <span style={{ fontSize: 11, color: "#888" }}>from</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>Rogue Dev Labs</span>
+          </div>
+        </div>
       )}
     </div>
   </div>
@@ -17241,6 +17469,19 @@ const renderVendorRequest = () => {
     </div>
   </div>
 )}
+        {authMode === "register" && (
+          <p style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", marginTop: 16, marginBottom: 12, lineHeight: 1.55 }}>
+            Al registrarte aceptás nuestros{" "}
+            <button type="button" style={legalLinkStyle} onClick={() => openLegalPage(VIEWS.TERMS_CONDITIONS)}>
+              Términos y Condiciones
+            </button>
+            {" "}y{" "}
+            <button type="button" style={legalLinkStyle} onClick={() => openLegalPage(VIEWS.PRIVACY_POLICY)}>
+              Política de Privacidad
+            </button>
+            .
+          </p>
+        )}
         <AppButton className="upload-btn"
           disabled={formBusy || (authMode === "register" && !canRegister)}
           style={{
@@ -17302,6 +17543,9 @@ const renderVendorRequest = () => {
           </svg>
           {authMode === "login" ? "Ingresá con Google" : "Registrate con Google"}
         </AppButton>
+        <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+          {renderLegalLinksRow({ fontSize: 11 })}
+        </div>
         <AppButton className="close-btn-secondary" style={{ marginTop: 12 }} onClick={() => {
   setView(VIEWS.PHOTOGRAPHERS);
   setAuthForm({ email: "", password: "", confirmPassword: "", name: "" });
@@ -17676,6 +17920,8 @@ const renderVendorRequest = () => {
           {view === VIEWS.DASHBOARD && renderDashboard()}
           {view === VIEWS.MY_GALLERY && renderMyGallery()}
           {view === VIEWS.RESET_PASSWORD && renderResetPassword()}
+          {view === VIEWS.PRIVACY_POLICY && renderPrivacyPolicy()}
+          {view === VIEWS.TERMS_CONDITIONS && renderTermsConditions()}
         </>
       )}
     </motion.div>
@@ -17812,6 +18058,8 @@ const renderVendorRequest = () => {
 
 {view !== VIEWS.SUCCESS &&
   view !== VIEWS.AUTH &&
+  view !== VIEWS.PRIVACY_POLICY &&
+  view !== VIEWS.TERMS_CONDITIONS &&
   buyerGalleryModalIdx === null && (
     isCEO && isLoggedIn ? (
       <BottomNav
@@ -17911,7 +18159,7 @@ const renderVendorRequest = () => {
         onCheckout={handleCartCheckout}
         isLoggedIn={isLoggedIn}
         panelSuppressed={guestCheckoutOpen}
-        hidden={view === VIEWS.AUTH || view === VIEWS.GUEST_SUCCESS}
+        hidden={view === VIEWS.AUTH || view === VIEWS.GUEST_SUCCESS || view === VIEWS.PRIVACY_POLICY || view === VIEWS.TERMS_CONDITIONS}
         fabHidden={view === VIEWS.VIDEO_SEARCH || videoSelectionMode}
         openSignal={cartOpenSignal}
         onRequireLogin={() => {
