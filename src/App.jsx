@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect, useId } from "react";
+﻿import { useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect } from "react";
 import { flushSync, createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile, imageMimeForFile } from "./storageUpload";
@@ -2119,7 +2119,6 @@ const CAN_HOVER_VIDEO_PREVIEW =
 
 function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
   const navRef = useRef(null);
-  const gradId = useId().replace(/:/g, "");
   const [navWidth, setNavWidth] = useState(() =>
     typeof window !== "undefined" ? Math.round(window.innerWidth) : 400
   );
@@ -2165,21 +2164,7 @@ function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
         preserveAspectRatio="xMidYMin meet"
         aria-hidden="true"
       >
-        <defs>
-          <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor={isCeoNav ? "rgba(255,194,102,0)" : "rgba(255,107,0,0)"} />
-            <stop offset="50%" stopColor={isCeoNav ? "rgba(255,194,102,0.4)" : "rgba(255,107,0,0.35)"} />
-            <stop offset="100%" stopColor={isCeoNav ? "rgba(255,194,102,0)" : "rgba(255,107,0,0)"} />
-          </linearGradient>
-        </defs>
         <path d={curvePath} fill="#0e0e0e" shapeRendering="geometricPrecision" />
-        <path
-          d={curvePath}
-          fill="none"
-          stroke={`url(#${gradId})`}
-          strokeWidth="1"
-          vectorEffect="non-scaling-stroke"
-        />
       </svg>
 
       <motion.div
