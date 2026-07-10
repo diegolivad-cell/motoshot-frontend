@@ -1,6 +1,9 @@
 import { useEffect } from "react";
 import { Capacitor } from "@capacitor/core";
 
+/** Temporary kill switch — set true to re-enable screenshot / media protection. */
+export const CONTENT_PROTECTION_ENABLED = false;
+
 let protectionDepth = 0;
 let webListenersBound = false;
 
@@ -81,6 +84,7 @@ async function disableNativeProtection() {
 }
 
 export function enableContentProtection() {
+  if (!CONTENT_PROTECTION_ENABLED) return;
   protectionDepth += 1;
   if (protectionDepth === 1) {
     document.body.classList.add("motoshot-content-protected");
@@ -91,6 +95,14 @@ export function enableContentProtection() {
 }
 
 export function disableContentProtection() {
+  if (!CONTENT_PROTECTION_ENABLED) {
+    protectionDepth = 0;
+    document.body.classList.remove("motoshot-content-protected", "motoshot-obscured");
+    unbindWebGuards();
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    disableNativeProtection();
+    return;
+  }
   protectionDepth = Math.max(0, protectionDepth - 1);
   if (protectionDepth === 0) {
     document.body.classList.remove("motoshot-content-protected", "motoshot-obscured");
@@ -102,13 +114,25 @@ export function disableContentProtection() {
 
 export function useContentProtection(active) {
   useEffect(() => {
-    if (!active) return undefined;
+    if (!CONTENT_PROTECTION_ENABLED || !active) {
+      disableNativeProtection();
+      document.body.classList.remove("motoshot-content-protected", "motoshot-obscured");
+      unbindWebGuards();
+      return undefined;
+    }
     enableContentProtection();
     return () => disableContentProtection();
   }, [active]);
 }
 
 export function ProtectedMedia({ as: Tag = "div", className = "", children, style, ...rest }) {
+  if (!CONTENT_PROTECTION_ENABLED) {
+    return (
+      <Tag className={className || undefined} style={style} {...rest}>
+        {children}
+      </Tag>
+    );
+  }
   return (
     <Tag
       className={`motoshot-protected-media${className ? ` ${className}` : ""}`}
@@ -122,9 +146,11 @@ export function ProtectedMedia({ as: Tag = "div", className = "", children, styl
   );
 }
 
-export const protectedVideoProps = {
-  controlsList: "nodownload noremoteplayback nofullscreen",
-  disablePictureInPicture: true,
-  disableRemotePlayback: true,
-  onContextMenu: (event) => event.preventDefault(),
-};
+export const protectedVideoProps = CONTENT_PROTECTION_ENABLED
+  ? {
+      controlsList: "nodownload noremoteplayback nofullscreen",
+      disablePictureInPicture: true,
+      disableRemotePlayback: true,
+      onContextMenu: (event) => event.preventDefault(),
+    }
+  : {};
