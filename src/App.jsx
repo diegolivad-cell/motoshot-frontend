@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect } from "react";
+﻿import { useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect, useId } from "react";
 import { flushSync, createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile, imageMimeForFile } from "./storageUpload";
@@ -1890,8 +1890,9 @@ function buildNavCurvePath(activeIndex, total, w = 400) {
   const tabW = w / total;
   const cx = tabW * activeIndex + tabW / 2;
   const r = 34;
-  const baseY = 20;
-  const peakY = 2;
+  // Keep the flat top lower so it doesn't cut through the photo/video grid.
+  const baseY = 28;
+  const peakY = 8;
   const left = cx - r;
   const right = cx + r;
   const edgePad = 10;
@@ -2120,6 +2121,7 @@ const CAN_HOVER_VIDEO_PREVIEW =
 
 function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
   const navRef = useRef(null);
+  const fillGradId = `bnav-fill-${useId().replace(/:/g, "")}`;
   const [navWidth, setNavWidth] = useState(() =>
     typeof window !== "undefined" ? Math.round(window.innerWidth) : 400
   );
@@ -2165,7 +2167,14 @@ function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
         preserveAspectRatio="xMidYMin meet"
         aria-hidden="true"
       >
-        <path d={curvePath} fill="#0e0e0e" shapeRendering="geometricPrecision" />
+        <defs>
+          <linearGradient id={fillGradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#0e0e0e" stopOpacity="0" />
+            <stop offset="22%" stopColor="#0e0e0e" stopOpacity="0.92" />
+            <stop offset="100%" stopColor="#0e0e0e" stopOpacity="1" />
+          </linearGradient>
+        </defs>
+        <path d={curvePath} fill={`url(#${fillGradId})`} shapeRendering="geometricPrecision" />
       </svg>
 
       <motion.div
@@ -15192,11 +15201,13 @@ const renderVendorRequest = () => {
       display: flex;
       flex-direction: column;
       min-height: 0;
+      overflow-x: hidden;
     }
     .app-content-shift {
       flex: 1;
       min-height: 0;
       will-change: transform;
+      overflow-x: hidden;
     }
     .nav { position: sticky; top: 0; z-index: 100; background: rgba(12,12,12,0.94); backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: sp
@@ -16502,7 +16513,18 @@ const renderVendorRequest = () => {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
       height: 78px; padding-bottom: env(safe-area-inset-bottom, 0);
       pointer-events: none;
-      box-shadow: 0 -8px 24px rgba(0,0,0,0.55);
+      /* Soft lift only — hard upward shadow looked like a black bar cutting the grid */
+      box-shadow: none;
+    }
+    .bottom-nav::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: -20px;
+      height: 20px;
+      pointer-events: none;
+      background: linear-gradient(to top, rgba(14, 14, 14, 0.55), rgba(14, 14, 14, 0));
     }
     .bnav-curve {
       position: absolute; left: 0; bottom: 0; width: 100%; height: 72px;
