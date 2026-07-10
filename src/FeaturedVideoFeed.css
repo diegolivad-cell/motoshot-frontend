@@ -1,7 +1,7 @@
-/* Área exacta entre nav superior (58px) y menú inferior (78px) */
+/* Área exacta entre nav superior (58px) y menú inferior (58px) */
 .featured-video-feed-shell {
   --feed-top-inset: 58px;
-  --feed-bottom-inset: calc(78px + env(safe-area-inset-bottom, 0px));
+  --feed-bottom-inset: calc(58px + env(safe-area-inset-bottom, 0px));
   position: fixed;
   top: var(--feed-top-inset);
   left: 0;

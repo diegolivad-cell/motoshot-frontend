@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect, useId } from "react";
+﻿import { useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect } from "react";
 import { flushSync, createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile, imageMimeForFile } from "./storageUpload";
@@ -1885,29 +1885,6 @@ function isStructuredBankAccount(stored) {
   return Boolean(parsed && !parsed.legacy && parsed.bank && parsed.accountNumber);
 }
 
-function buildNavCurvePath(activeIndex, total, w = 400) {
-  if (total <= 0) return `M0 0 H${w} V72 H0 Z`;
-  const tabW = w / total;
-  const cx = tabW * activeIndex + tabW / 2;
-  const r = 34;
-  // Keep the flat top lower so it doesn't cut through the photo/video grid.
-  const baseY = 28;
-  const peakY = 8;
-  const left = cx - r;
-  const right = cx + r;
-  const edgePad = 10;
-  return [
-    `M 0 ${baseY}`,
-    `L ${Math.max(0, left - edgePad)} ${baseY}`,
-    `Q ${left} ${baseY} ${cx} ${peakY}`,
-    `Q ${right} ${baseY} ${Math.min(w, right + edgePad)} ${baseY}`,
-    `L ${w} ${baseY}`,
-    `L ${w} 72`,
-    `L 0 72`,
-    `Z`,
-  ].join(" ");
-}
-
 const formatNavBadge = (count) => {
   if (!count || count <= 0) return null;
   return count > 9 ? "9+" : String(count);
@@ -2120,63 +2097,18 @@ const CAN_HOVER_VIDEO_PREVIEW =
   window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 
 function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
-  const navRef = useRef(null);
-  const fillGradId = `bnav-fill-${useId().replace(/:/g, "")}`;
-  const [navWidth, setNavWidth] = useState(() =>
-    typeof window !== "undefined" ? Math.round(window.innerWidth) : 400
-  );
   const activeIndex = Math.max(0, items.findIndex(i => i.id === activeTab));
   const activeItem = items[activeIndex] || items[0];
   const tabPercent = items.length > 0 ? 100 / items.length : 100;
   const isCeoNav = variant === "ceo";
   const iconName = (item) => item.icon || item.id;
   const activeBadge = formatNavBadge(activeItem?.badge);
-  const curvePath = useMemo(
-    () => buildNavCurvePath(activeIndex, items.length, navWidth),
-    [activeIndex, items.length, navWidth]
-  );
-
-  useLayoutEffect(() => {
-    const el = navRef.current;
-    if (!el) return undefined;
-    const update = () => {
-      const w = Math.round(el.getBoundingClientRect().width);
-      if (w > 0) setNavWidth(w);
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    window.addEventListener("orientationchange", update);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("orientationchange", update);
-    };
-  }, []);
 
   return (
     <nav
-      ref={navRef}
       className={`bottom-nav${isCeoNav ? " bottom-nav-ceo" : ""}`}
       aria-label="Navegación principal"
     >
-      <svg
-        className="bnav-curve"
-        viewBox={`0 0 ${navWidth} 72`}
-        width={navWidth}
-        height={72}
-        preserveAspectRatio="xMidYMin meet"
-        aria-hidden="true"
-      >
-        <defs>
-          <linearGradient id={fillGradId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#0e0e0e" stopOpacity="0" />
-            <stop offset="22%" stopColor="#0e0e0e" stopOpacity="0.92" />
-            <stop offset="100%" stopColor="#0e0e0e" stopOpacity="1" />
-          </linearGradient>
-        </defs>
-        <path d={curvePath} fill={`url(#${fillGradId})`} shapeRendering="geometricPrecision" />
-      </svg>
-
       <motion.div
         className="bnav-bubble"
         animate={{ left: `${(activeIndex + 0.5) * tabPercent}%` }}
@@ -11922,7 +11854,7 @@ const renderPhotographerProfile = () => {
           {myGalleryMediaTab === "videos" && videoSelectionMode && selectedVideoIds.size > 0 && (
             <div style={{
               position: "fixed",
-              bottom: "calc(78px + env(safe-area-inset-bottom, 0px))",
+              bottom: "calc(58px + env(safe-area-inset-bottom, 0px))",
               left: 0,
               right: 0,
               zIndex: 200,
@@ -15336,7 +15268,7 @@ const renderVendorRequest = () => {
     .shopping-cart-fab {
       position: fixed;
       right: max(16px, env(safe-area-inset-right));
-      bottom: calc(88px + env(safe-area-inset-bottom));
+      bottom: calc(70px + env(safe-area-inset-bottom));
       z-index: 10040;
       width: 58px;
       height: 58px;
@@ -16511,27 +16443,15 @@ const renderVendorRequest = () => {
     .upload-success-banner { background: rgba(255,107,0,0.1); border: 1px solid rgba(255,107,0,0.35); border-radius: 12px; padding: 16px 20px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px; color: var(--orange-light); font-weight: 600; font-size: 14px; }
     .bottom-nav {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
-      height: 78px; padding-bottom: env(safe-area-inset-bottom, 0);
+      height: calc(58px + env(safe-area-inset-bottom, 0px));
       pointer-events: none;
-      /* Soft lift only — hard upward shadow looked like a black bar cutting the grid */
+      background: #0e0e0e;
+      border-top: none;
       box-shadow: none;
     }
-    .bottom-nav::before {
-      content: "";
-      position: absolute;
-      left: 0;
-      right: 0;
-      top: -20px;
-      height: 20px;
-      pointer-events: none;
-      background: linear-gradient(to top, rgba(14, 14, 14, 0.55), rgba(14, 14, 14, 0));
-    }
-    .bnav-curve {
-      position: absolute; left: 0; bottom: 0; width: 100%; height: 72px;
-      display: block; overflow: visible;
-    }
+    .bnav-curve { display: none; }
     .bnav-bubble {
-      position: absolute; top: 6px; width: 46px; height: 46px;
+      position: absolute; top: -18px; width: 46px; height: 46px;
       transform: translateX(-50%); pointer-events: none; z-index: 3;
     }
     .bnav-bubble-inner {
@@ -16545,8 +16465,11 @@ const renderVendorRequest = () => {
     }
     .bnav-items {
       position: absolute; left: 0; right: 0; bottom: 0;
-      height: 58px; display: flex; align-items: flex-end;
-      padding: 0 4px 10px; pointer-events: auto;
+      height: calc(58px + env(safe-area-inset-bottom, 0px));
+      display: flex; align-items: flex-end;
+      padding: 0 4px calc(10px + env(safe-area-inset-bottom, 0px));
+      pointer-events: auto;
+      background: #0e0e0e;
     }
     .bnav-item {
       flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
