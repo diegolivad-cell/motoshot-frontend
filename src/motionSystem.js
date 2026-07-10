@@ -66,8 +66,8 @@ export function getViewDirection(fromView, toView) {
   return b >= a ? 1 : -1;
 }
 
-/** Views that should use a lighter / no-exit transition (video feed). */
-export const HEAVY_VIEWS = new Set(["video_search"]);
+/** Views that should use a lighter / no-exit transition (video feed / photo feed). */
+export const HEAVY_VIEWS = new Set(["video_search", "detail"]);
 
 export function pageTransition(direction = 1, reduced = false, isHeavy = false) {
   if (reduced) {

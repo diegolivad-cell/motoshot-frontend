@@ -23,6 +23,7 @@ import { GuestSuccessPage } from "./GuestSuccessPage.jsx";
 import { ReceiptPreviewModal } from "./ReceiptPreviewModal.jsx";
 import { PhotographersHero } from "./PhotographersHero.jsx";
 import { SmoothScrollHome } from "./SmoothScrollHome.jsx";
+import PhotoFeed from "./PhotoFeed.jsx";
 import {
   getViewDirection,
   HEAVY_VIEWS,
@@ -2352,6 +2353,9 @@ function WatermarkedImage({ src, photographer, purchased, layoutId }) {
   const [view, setView] = useState(VIEWS.PHOTOGRAPHERS);
   const [legalReturnView, setLegalReturnView] = useState(VIEWS.PHOTOGRAPHERS);
   const [selected, setSelected] = useState(null);
+  const [photoFeedList, setPhotoFeedList] = useState([]);
+  const [photoFeedPhotographerId, setPhotoFeedPhotographerId] = useState(null);
+  const [photoFeedLoadMore, setPhotoFeedLoadMore] = useState(true);
   const [pendingPurchase, setPendingPurchase] = useState(null);
   const [purchased, setPurchased] = useState([]);
   const [payStep, setPayStep] = useState(0);
@@ -6937,14 +6941,19 @@ const exportPayrollCsv = () => {
 
   const handleDownload = async () => {
     if (!selected) return;
+    await handleDownloadPhoto(selected);
+  };
+
+  const handleDownloadPhoto = async (photo) => {
+    if (!photo) return;
     if (!user || !session) {
-      setPendingPurchase(selected);
+      setPendingPurchase(photo);
       setMessage("");
       setView(VIEWS.AUTH);
       return;
     }
     try {
-      const res = await fetch(`/api/downloads/${selected.id}`, {
+      const res = await fetch(`/api/downloads/${photo.id}`, {
         headers: { Authorization: `Bearer ${session?.access_token}` },
       });
       if (!res.ok) throw new Error("Error descargando");
@@ -7948,9 +7957,47 @@ const openPhotographerResult = (ph) => {
   setView(VIEWS.PHOTOGRAPHER_PROFILE);
 };
 
-const openPhotoDetail = (photo, returnView) => {
+const openPhotoDetail = (photo, returnView, feedList, options = {}) => {
+  if (!photo) return;
   setSelected(photo);
-  setDetailReturnView(returnView ?? view);
+  const ret = returnView ?? view;
+  setDetailReturnView(ret);
+
+  const enrich = (list) => (list || []).map((p) => ({
+    ...p,
+    photographer: p.photographer || selectedPhotographer || photo.photographer || null,
+  }));
+
+  let list = Array.isArray(feedList) && feedList.length ? enrich(feedList) : null;
+  if (!list) {
+    if (ret === VIEWS.PHOTOGRAPHER_PROFILE || view === VIEWS.PHOTOGRAPHER_PROFILE) {
+      list = enrich(photographerPhotos);
+    } else if (ret === VIEWS.MY_GALLERY || ret === VIEWS.VENDOR_REQUEST) {
+      const own = (photos || []).filter((p) => p.photographer?.user_id === user?.id);
+      list = enrich(own.length ? own : [photo]);
+    } else if (photos?.length) {
+      list = enrich(photos);
+    } else {
+      list = enrich([photo]);
+    }
+  }
+
+  if (!list.some((p) => p.id === photo.id)) {
+    list = [ { ...photo, photographer: photo.photographer || selectedPhotographer || null }, ...list ];
+  } else {
+    list = list.map((p) => (p.id === photo.id ? { ...p, ...photo, photographer: photo.photographer || p.photographer } : p));
+  }
+
+  const photographerId =
+    options.photographerId
+    ?? photo.photographer?.id
+    ?? photo.photographer_id
+    ?? (ret === VIEWS.PHOTOGRAPHER_PROFILE ? selectedPhotographer?.id : null)
+    ?? null;
+
+  setPhotoFeedList(list);
+  setPhotoFeedPhotographerId(photographerId);
+  setPhotoFeedLoadMore(options.enableLoadMore !== false);
   setView(VIEWS.DETAIL);
 };
 
@@ -9008,7 +9055,10 @@ const renderPhotographerProfile = () => {
         <motion.div
           key={photo.id}
           whileTap={{ scale: 0.97 }}
-          onClick={() => openPhotoDetail(photo, VIEWS.PHOTOGRAPHER_PROFILE)}
+          onClick={() => openPhotoDetail(photo, VIEWS.PHOTOGRAPHER_PROFILE, displayPhotos.map((p) => ({
+            ...p,
+            photographer: p.photographer || selectedPhotographer,
+          })), { photographerId: selectedPhotographer?.id })}
           style={{ aspectRatio: "1", overflow: "hidden", cursor: "pointer", position: "relative", background: "var(--card)" }}
         >
           <motion.img
@@ -9040,7 +9090,10 @@ const renderPhotographerProfile = () => {
         >
           <div
             style={{ width: "100%", aspectRatio: "4/3", overflow: "hidden", cursor: "pointer" }}
-            onClick={() => openPhotoDetail(photo, VIEWS.PHOTOGRAPHER_PROFILE)}
+            onClick={() => openPhotoDetail(photo, VIEWS.PHOTOGRAPHER_PROFILE, displayPhotos.map((p) => ({
+            ...p,
+            photographer: p.photographer || selectedPhotographer,
+          })), { photographerId: selectedPhotographer?.id })}
           >
             <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
           </div>
@@ -9095,57 +9148,28 @@ const renderPhotographerProfile = () => {
   );
 };
   const renderDetail = () => (
-    <div style={{ padding: "16px 20px 100px", maxWidth: 540, margin: "0 auto" }}>
-      <AppButton className="nav-btn" style={{ marginBottom: 16 }} onClick={() => setView(detailReturnView)}><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><AppIcon name="arrowRight" size={14} style={{ transform: "rotate(180deg)" }} /> Volver</span></AppButton>
-      {selected && (
-        <>
-          <div style={{ borderRadius: 12, overflow: "hidden", aspectRatio: "4/3", background: "var(--card)", marginBottom: 16 }}>
-            <WatermarkedImage
-              layoutId={selected?.id ? `photo-thumb-${selected.id}` : undefined}
-              src={selected.watermark_url}
-              photographer={selected.photographer?.name || "MOTOSHOT"}
-              purchased={canDownloadPhoto(selected)}
-            />
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-            <div>
-              <div style={{ color: "var(--orange)", fontWeight: 700, fontSize: 15 }}>{selected.photographer?.name}</div>
-              <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 2 }}><IconText icon="pin" size={12}>{selected.location}</IconText></div>
-              {selected.ride_date && <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 2 }}><IconText icon="calendar" size={12}>{selected.ride_date}</IconText></div>}
-            </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 38 }}>Q{selected.price}</div>
-              <div style={{ fontSize: 11, color: "var(--muted)" }}>Alta resolución</div>
-            </div>
-          </div>
-          {selected.tags && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 20 }}>
-              {selected.tags.map(t => (
-                <span key={t} style={{ background: "var(--card)", border: "1px solid var(--border)", color: "var(--muted)", fontSize: 12, padding: "3px 10px", borderRadius: 20 }}>{t}</span>
-              ))}
-            </div>
-          )}
-        {!isOwnPhoto(selected) && (
-        !canDownloadPhoto(selected) ? (
-  <>
-    {renderClaimButton("photo", selected.id, selected.photographer?.id || selected.photographer_id)}
-    <BuyCartButton
-      className="pay-btn"
-      style={{ width: "100%" }}
-      price={selected.price}
-      inCart={cart.isInCart("photo", selected.id)}
-      onAdd={() => cart.addItem(photoToCartItem(selected))}
+    <PhotoFeed
+      key={`photo-feed-${selected?.id || "none"}-${photoFeedList.length}`}
+      initialPhotos={photoFeedList.length ? photoFeedList : (selected ? [selected] : [])}
+      focusPhotoId={selected?.id}
+      session={session}
+      isLoggedIn={isLoggedIn}
+      onRequireAuth={() => setView(VIEWS.AUTH)}
+      onBack={() => setView(detailReturnView)}
+      cart={cart}
+      onOpenCart={openCart}
+      isOwnPhoto={isOwnPhoto}
+      canDownloadPhoto={canDownloadPhoto}
+      renderClaimButton={renderClaimButton}
+      onOpenPhotographer={openPhotographerFromPhoto}
+      onDownload={(photo) => {
+        setSelected(photo);
+        handleDownloadPhoto(photo);
+      }}
+      showToast={showToast}
+      photographerId={photoFeedPhotographerId}
+      enableLoadMore={photoFeedLoadMore}
     />
-  </>
-) : (
-  <AppButton className="download-btn" onClick={handleDownload}>
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AppIcon name="arrowRight" size={12} style={{ transform: "rotate(90deg)" }} /> {isCEO && !purchased.includes(selected.id) ? "Descargar HD gratis (CEO)" : "Descarga en HD"}</span>
-  </AppButton>
-))}
-
-        </>
-      )}
-    </div>
   );
 
 
@@ -10973,7 +10997,7 @@ const renderPhotographerProfile = () => {
         onToggleSelect(photo.id);
         return;
       }
-      openPhotoDetail(photo, VIEWS.MY_GALLERY);
+      openPhotoDetail(photo, VIEWS.MY_GALLERY, null, { enableLoadMore: false });
     };
 
     return (
@@ -14823,7 +14847,7 @@ const renderVendorRequest = () => {
     {photos.filter(p => p.photographer?.user_id === user?.id).map(photo => (
       <div
         key={photo.id}
-        onClick={() => openPhotoDetail(photo, VIEWS.VENDOR_REQUEST)}
+        onClick={() => openPhotoDetail(photo, VIEWS.VENDOR_REQUEST, null, { enableLoadMore: false })}
         style={{ aspectRatio: "1", overflow: "hidden", position: "relative", background: "var(--card)", cursor: "pointer" }}
       >
         <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
@@ -14835,7 +14859,7 @@ const renderVendorRequest = () => {
     {photos.filter(p => p.photographer?.user_id === user?.id).map(photo => (
       <div
         key={photo.id}
-        onClick={() => openPhotoDetail(photo, VIEWS.VENDOR_REQUEST)}
+        onClick={() => openPhotoDetail(photo, VIEWS.VENDOR_REQUEST, null, { enableLoadMore: false })}
         style={{ borderRadius: 14, overflow: "hidden", background: "var(--surface)", border: "1px solid var(--border)", cursor: "pointer" }}
       >
         <div style={{ width: "100%", aspectRatio: "4/3", overflow: "hidden" }}>
@@ -18140,7 +18164,7 @@ const renderVendorRequest = () => {
         isLoggedIn={isLoggedIn}
         panelSuppressed={guestCheckoutOpen}
         hidden={view === VIEWS.AUTH || view === VIEWS.GUEST_SUCCESS || view === VIEWS.PRIVACY_POLICY || view === VIEWS.TERMS_CONDITIONS}
-        fabHidden={view === VIEWS.VIDEO_SEARCH || videoSelectionMode}
+        fabHidden={view === VIEWS.VIDEO_SEARCH || view === VIEWS.DETAIL || videoSelectionMode}
         openSignal={cartOpenSignal}
         onRequireLogin={() => {
           setAuthMode("login");
