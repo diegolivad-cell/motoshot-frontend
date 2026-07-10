@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
   cartItemKey,
   cartTotal,
@@ -7,6 +7,7 @@ import {
   writeCartToStorage,
 } from "./shoppingCart";
 import { AppIcon, AppButton, LoaderIcon } from "./icons";
+import { springs, triggerHaptic } from "./motionSystem";
 
 function CartSvgIcon({ size = 28, filled = false }) {
   return (
@@ -79,6 +80,7 @@ export function useShoppingCart({
       }
       setItems((prev) => [...prev, item]);
       setBump((n) => n + 1);
+      triggerHaptic("medium");
       showToast?.("Agregado al carrito");
       return true;
     },
@@ -118,6 +120,7 @@ export function ShoppingCartWidget({
   openSignal = 0,
   panelSuppressed = false,
 }) {
+  const reduced = useReducedMotion();
   const [open, setOpen] = useState(false);
   const { items, count, total, bump, removeItem, clearCart } = cart;
   const panelOpen = open && !panelSuppressed;
@@ -139,10 +142,13 @@ export function ShoppingCartWidget({
           type="button"
           className="shopping-cart-fab"
           aria-label={`Carrito de compras${count ? `, ${count} ítems` : ""}`}
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => {
+            triggerHaptic("light");
+            setOpen((v) => !v);
+          }}
           whileTap={{ scale: 0.94 }}
           animate={bump ? { scale: [1, 1.12, 1], rotate: [0, -6, 6, 0] } : { scale: 1, rotate: 0 }}
-          transition={{ type: "spring", stiffness: 420, damping: 16 }}
+          transition={springs.bouncy}
         >
           <span className="shopping-cart-fab-glow" aria-hidden />
           <CartSvgIcon size={30} filled={count > 0} />
@@ -199,8 +205,8 @@ export function ShoppingCartWidget({
               {items.length === 0 ? (
                 <div className="shopping-cart-empty">
                   <motion.div
-                    animate={{ y: [0, -6, 0] }}
-                    transition={{ repeat: Infinity, duration: 2.4, ease: "easeInOut" }}
+                    animate={reduced ? undefined : { y: [0, -6, 0] }}
+                    transition={reduced ? undefined : { repeat: Infinity, duration: 2.4, ease: "easeInOut" }}
                   >
                     <CartSvgIcon size={56} />
                   </motion.div>
@@ -372,9 +378,9 @@ export function BuyCartButton({
           <motion.span
             key="added"
             style={FACE_STYLE}
-            initial={{ opacity: 0, y: 12, filter: "blur(3px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            exit={{ opacity: 0, y: -12, filter: "blur(3px)" }}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12 }}
             transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
           >
             <motion.span

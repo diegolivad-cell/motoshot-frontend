@@ -6,13 +6,16 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import './contentProtection.css'
 import App from './App.jsx'
+import { MotionProvider } from './MotionProvider.jsx'
 
 ensurePaymentBrowserBridge().catch(() => {})
 ensureOAuthBrowserBridge().catch(() => {})
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <App />
+    <MotionProvider>
+      <App />
+    </MotionProvider>
   </StrictMode>,
 )
 

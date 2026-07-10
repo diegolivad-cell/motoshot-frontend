@@ -2,7 +2,7 @@
 import { flushSync, createPortal } from "react-dom";
 import { supabase } from "./supabaseClient";
 import { uploadToSupabaseStorage, removeFromSupabaseStorage, videoExtForFile, imageExtForFile, imageMimeForFile } from "./storageUpload";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { VideoCardTags } from "./MotoBrandLogo";
 import { AppIcon, LoaderIcon, EmptyIcon, AvatarPlaceholder, IconText, SectionTitleIcon, VerifiedBadge, AppButton, PasswordVisibilityToggle, MotoShotBrandMark } from "./icons";
 import { isCeo, isAdmin as isAdminEmail } from "./roles";
@@ -21,6 +21,17 @@ import {
 } from "./GuestCheckout.jsx";
 import { GuestSuccessPage } from "./GuestSuccessPage.jsx";
 import { ReceiptPreviewModal } from "./ReceiptPreviewModal.jsx";
+import { PhotographersHero } from "./PhotographersHero.jsx";
+import { SmoothScrollHome } from "./SmoothScrollHome.jsx";
+import {
+  getViewDirection,
+  HEAVY_VIEWS,
+  pageTransition,
+  springs,
+  staggerContainer,
+  staggerItem,
+  triggerHaptic,
+} from "./motionSystem";
 import { signInWithGoogleNative } from "./googleNativeAuth.js";
 import {
   writePendingPayment,
@@ -2174,7 +2185,7 @@ function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
       <motion.div
         className="bnav-bubble"
         animate={{ left: `${(activeIndex + 0.5) * tabPercent}%` }}
-        transition={{ type: "spring", stiffness: 380, damping: 32 }}
+        transition={springs.layout}
       >
         <div className="bnav-bubble-inner">
           <AppIcon name={iconName(activeItem)} size={18} />
@@ -2195,7 +2206,10 @@ function BottomNav({ items, activeTab, onSelect, variant = "default" }) {
               type="button"
               className={`bnav-item${isActive ? " active" : ""}`}
               aria-current={isActive ? "page" : undefined}
-              onClick={() => onSelect(item)}
+              onClick={() => {
+                triggerHaptic("light");
+                onSelect(item);
+              }}
             >
               <span className={`bnav-icon-slot${isActive ? " active" : ""}`}>
                 {!isActive && <AppIcon name={iconName(item)} size={18} />}
@@ -2311,7 +2325,7 @@ function ProfileSearchBar({ value, onChange, onSearch, placeholder }) {
   );
 }
 
-function WatermarkedImage({ src, photographer, purchased }) {
+function WatermarkedImage({ src, photographer, purchased, layoutId }) {
   const [loaded, setLoaded] = useState(false);
   const [imageUrl, setImageUrl] = useState(null);
 
@@ -2326,8 +2340,14 @@ function WatermarkedImage({ src, photographer, purchased }) {
   return (
     <ProtectedMedia style={{ width: "100%", height: "100%", position: "relative", overflow: "hidden" }}>
       {imageUrl && (
-        <img src={imageUrl} alt={photographer} draggable={false}
-          style={{ width: "100%", height: "100%", objectFit: "cover", display: loaded ? "block" : "none" }} />
+        <motion.img
+          layoutId={layoutId}
+          src={imageUrl}
+          alt={photographer}
+          draggable={false}
+          style={{ width: "100%", height: "100%", objectFit: "cover", display: loaded ? "block" : "none" }}
+          transition={springs.layout}
+        />
       )}
       {!purchased && loaded && (
         <div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(0,0,0,0) 40%, rgba(0,0,0,0.72) 100%)" }} />
@@ -2608,9 +2628,10 @@ function WatermarkedImage({ src, photographer, purchased }) {
     }
   }, [authSubmitting, globalLoading.active, clearGoogleOAuthUi, completeOAuthSignIn]);
   const [selectedTag, setSelectedTag] = useState(null);
-  const [heroScrollY, setHeroScrollY] = useState(0);
   const [heroVideoReady, setHeroVideoReady] = useState(false);
   const heroVideoRef = useRef(null);
+  const [viewDirection, setViewDirection] = useState(1);
+  const reducedMotion = useReducedMotion();
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMode, setSearchMode] = useState(false);
   const [searchSource, setSearchSource] = useState(null);
@@ -3012,6 +3033,9 @@ function WatermarkedImage({ src, photographer, purchased }) {
 
   useEffect(() => {
     const prev = prevViewRef.current;
+    if (prev !== view) {
+      setViewDirection(getViewDirection(prev, view));
+    }
     if (prev === VIEWS.PHOTOGRAPHER_PROFILE && view !== VIEWS.PHOTOGRAPHER_PROFILE) {
       clearHomeUrl();
     }
@@ -4940,12 +4964,6 @@ const exportPayrollCsv = () => {
     })();
     return () => { if (removeListener) removeListener(); };
   }, []);
-
-useEffect(() => {
-  const onScroll = () => setHeroScrollY(window.scrollY);
-  window.addEventListener("scroll", onScroll, { passive: true });
-  return () => window.removeEventListener("scroll", onScroll);
-}, []);
 
   useEffect(() => {
     if (view !== VIEWS.PHOTOGRAPHERS) return;
@@ -8061,76 +8079,16 @@ const renderPrivacyPolicy = () => renderLegalPage("POLÍTICA DE PRIVACIDAD", PRI
 const renderTermsConditions = () => renderLegalPage("TÉRMINOS Y CONDICIONES", TERMS_CONDITIONS_TEXT);
 
 const renderPhotographers = () => (
+  <SmoothScrollHome enabled={!reducedMotion}>
   <div style={{ paddingBottom: 100 }}>
-    {/* Hero */}
-<div style={{ position: "relative", width: "100%", height: 320, overflow: "hidden", background: "#0a0a0a" }}>
-  <video
-    ref={heroVideoRef}
-    className="hero-video-bg"
-    autoPlay
-    muted
-    loop
-    playsInline
-    preload="auto"
-    disablePictureInPicture
-    controls={false}
-    onLoadedData={() => setHeroVideoReady(true)}
-    onCanPlay={() => setHeroVideoReady(true)}
-    onPlaying={() => setHeroVideoReady(true)}
-    style={{
-      position: "absolute",
-      inset: 0,
-      width: "100%",
-      height: "130%",
-      objectFit: "cover",
-      top: "-15%",
-      transform: `translateY(${heroScrollY * 0.5}px)`,
-      willChange: "transform",
-      zIndex: 0,
-      opacity: heroVideoReady ? 1 : 0,
-      transition: "opacity 0.45s ease",
-      pointerEvents: "none",
-    }}
-    src={HERO_VIDEO_URL}
-  />
-<div style={{ position: "absolute", inset: 0, zIndex: 2, background: "linear-gradient(180deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.65) 100%)" }} />
-<div style={{ position: "relative", zIndex: 3, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 20px", textAlign: "center" }}>
-    
-    <motion.div
-      initial={{ opacity: 0, y: 30 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.6, ease: "easeOut" }}
-    >
-      <MotoShotBrandMark variant="hero-video" className="hero-title" />
-    </motion.div>
-
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.6, delay: 0.2, ease: "easeOut" }}
-      style={{ color: "rgba(255,255,255,0.8)", fontSize: 15, marginTop: 10, fontWeight: 300 }}
-    >
-      Encontrá al fotógrafo de tu rodada · Comprá tus fotos y videos acá
-    </motion.div>
-
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.6, delay: 0.4, ease: "easeOut" }}
-    >
-      {isLoggedIn ? (
-        <div style={{ marginTop: 12, color: "#fff", fontSize: 14 }}>
-          Bienvenido, {getUserDisplayName()}
-        </div>
-      ) : (
-        <div style={{ marginTop: 16, color: "var(--muted)", fontSize: 14, lineHeight: 1.5, maxWidth: 420, marginInline: "auto" }}>
-          Explorá fotógrafos y comprá fotos o videos sin registrarte. Te pedimos solo tu correo para enviarte la confirmación.
-        </div>
-      )}
-    </motion.div>
-
-  </div>
-</div>
+    <PhotographersHero
+      videoSrc={HERO_VIDEO_URL}
+      videoRef={heroVideoRef}
+      videoReady={heroVideoReady}
+      onVideoReady={() => setHeroVideoReady(true)}
+      isLoggedIn={isLoggedIn}
+      welcomeName={getUserDisplayName()}
+    />
 
     {/* Anuncios */}
     {announcements.length > 0 && (
@@ -8533,23 +8491,19 @@ const renderPhotographers = () => (
       ) : (
         <motion.div
   style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}
-  variants={{
-    hidden: {},
-    show: { transition: { staggerChildren: 0.08 } }
-  }}
+  variants={staggerContainer}
   initial="hidden"
-  animate="show"
+  whileInView="show"
+  viewport={{ once: true, margin: "-40px" }}
 >
 {photographers.map(ph => (
     <motion.div
       key={ph.id}
-      variants={{
-        hidden: { opacity: 0, y: 24 },
-        show: { opacity: 1, y: 0, transition: { duration: 0.35, ease: "easeOut" } }
-      }}
-      whileHover={{ y: -4, borderColor: "var(--orange)" }}
+      variants={staggerItem}
+      whileHover={reducedMotion ? undefined : { y: -4, borderColor: "var(--orange)" }}
       whileTap={{ scale: 0.98 }}
       onClick={() => {
+        triggerHaptic("light");
         if (user && ph.user_id === user.id) {
           setView(VIEWS.VENDOR_REQUEST);
           setActiveTab("profile");
@@ -8597,12 +8551,32 @@ const renderPhotographers = () => (
           {renderLegalLinksRow({ fontSize: 11, color: "var(--muted)" })}
           <div style={{ marginTop: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
             <span style={{ fontSize: 11, color: "#888" }}>from</span>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>Rogue Dev Labs</span>
+            <a
+              href="https://rogue-dev-labs.vercel.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                window.open("https://rogue-dev-labs.vercel.app", "_blank", "noopener,noreferrer");
+              }}
+              style={{
+                fontSize: 13,
+                fontWeight: 700,
+                color: "#fff",
+                textDecoration: "underline",
+                textUnderlineOffset: 3,
+                cursor: "pointer",
+              }}
+            >
+              Rogue Dev Labs
+            </a>
           </div>
         </div>
       )}
     </div>
   </div>
+  </SmoothScrollHome>
 );
 const renderPhotographerSocialLinks = (person) => {
   if (!person) return null;
@@ -9052,7 +9026,13 @@ const renderPhotographerProfile = () => {
           onClick={() => openPhotoDetail(photo, VIEWS.PHOTOGRAPHER_PROFILE)}
           style={{ aspectRatio: "1", overflow: "hidden", cursor: "pointer", position: "relative", background: "var(--card)" }}
         >
-          <img src={photo.watermark_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <motion.img
+            layoutId={`photo-thumb-${photo.id}`}
+            src={photo.watermark_url}
+            alt=""
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            transition={springs.layout}
+          />
         </motion.div>
       ))}
     </motion.div>
@@ -9135,7 +9115,12 @@ const renderPhotographerProfile = () => {
       {selected && (
         <>
           <div style={{ borderRadius: 12, overflow: "hidden", aspectRatio: "4/3", background: "var(--card)", marginBottom: 16 }}>
-            <WatermarkedImage src={selected.watermark_url} photographer={selected.photographer?.name || "MOTOSHOT"} purchased={canDownloadPhoto(selected)} />
+            <WatermarkedImage
+              layoutId={selected?.id ? `photo-thumb-${selected.id}` : undefined}
+              src={selected.watermark_url}
+              photographer={selected.photographer?.name || "MOTOSHOT"}
+              purchased={canDownloadPhoto(selected)}
+            />
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
             <div>
@@ -13619,7 +13604,7 @@ const renderMembershipPlansSection = ({
                 Tu plan
               </div>
             )}
-            {plan.featured && !isCurrentPlan && (
+            {plan.featured && !isCurrentPlan && !reducedMotion && (
               <motion.div
                 animate={{
                   boxShadow: [
@@ -16603,6 +16588,15 @@ const renderVendorRequest = () => {
       0%, 100% { box-shadow: 0 0 36px rgba(255,107,0,0.38), inset 0 0 24px rgba(255,140,51,0.12); }
       50% { box-shadow: 0 0 52px rgba(255,107,0,0.52), inset 0 0 28px rgba(255,140,51,0.2); }
     }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto !important; }
+      .shopping-cart-fab::after,
+      .ptr-indicator-bubble--spin,
+      .processing-spinner,
+      .success-ring {
+        animation: none !important;
+      }
+    }
     .success-confirmed-pill {
       display: inline-flex; align-items: center; gap: 6px;
       background: rgba(255,107,0,0.12); border: 1px solid rgba(255,140,51,0.45);
@@ -17870,10 +17864,11 @@ const renderVendorRequest = () => {
   <AnimatePresence mode="wait">
     <motion.div
       key={showPasswordReset ? "reset" : view}
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -16 }}
-      transition={{ duration: 0.22, ease: "easeOut" }}
+      {...pageTransition(
+        viewDirection,
+        !!reducedMotion,
+        HEAVY_VIEWS.has(showPasswordReset ? "reset" : view)
+      )}
     >
       {showPasswordReset ? renderChangePassword() : (
         <>

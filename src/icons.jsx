@@ -1,4 +1,5 @@
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
+import { springs, triggerHaptic } from "./motionSystem";
 
 const ICONS = {
   feed: (
@@ -382,7 +383,11 @@ export function PasswordVisibilityToggle({ visible, onToggle, className = "" }) 
 }
 
 export function AppButton({ className = "", style, disabled, children, onClick, type = "button", ...rest }) {
+  const reduced = useReducedMotion();
   const handleClick = (e) => {
+    if (className?.includes("bnav-item") || className?.includes("pay-btn") || className?.includes("nav-btn primary")) {
+      triggerHaptic("light");
+    }
     onClick?.(e);
     if (className?.includes("bnav-item")) {
       e.currentTarget.blur();
@@ -402,9 +407,9 @@ export function AppButton({ className = "", style, disabled, children, onClick, 
       }}
       disabled={disabled}
       onClick={handleClick}
-      whileHover={disabled ? undefined : { scale: 1.05, y: -1 }}
-      whileTap={disabled ? undefined : { scale: 0.9 }}
-      transition={{ type: "spring", stiffness: 520, damping: 26 }}
+      whileHover={disabled || reduced ? undefined : { scale: 1.05, y: -1 }}
+      whileTap={disabled || reduced ? undefined : { scale: 0.9 }}
+      transition={springs.snappy}
       {...rest}
     >
       {children}

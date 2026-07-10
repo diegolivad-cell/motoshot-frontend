@@ -87,6 +87,11 @@ function injectSplashStyles() {
       0%, 100% { opacity: 0.35; transform: scale(1); }
       50% { opacity: 0.65; transform: scale(1.12); }
     }
+    @media (prefers-reduced-motion: reduce) {
+      #app-splash .app-splash-inner { animation: none; opacity: 1; transform: none; }
+      #app-splash .app-splash-glow { animation: none; opacity: 0.45; }
+      #app-splash { transition: none; }
+    }
   `;
   document.head.appendChild(style);
 }

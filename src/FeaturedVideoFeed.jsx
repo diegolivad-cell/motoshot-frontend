@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { apiJson, apiUrl } from "./apiClient.js";
 import { AppIcon, LoaderIcon, EmptyIcon } from "./icons.jsx";
 import { videoToCartItem } from "./shoppingCart.js";
@@ -112,6 +112,7 @@ function FeedCartIcon({ active = false, owned = false }) {
 }
 
 function FeedSoundIcon({ muted = true }) {
+  const reduced = useReducedMotion();
   return (
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path
@@ -139,16 +140,16 @@ function FeedSoundIcon({ muted = true }) {
             stroke={ORANGE_LIGHT}
             strokeWidth="1.7"
             strokeLinecap="round"
-            animate={{ opacity: [0.35, 1, 0.35] }}
-            transition={{ duration: 1.1, repeat: Infinity, ease: "easeInOut" }}
+            animate={reduced ? { opacity: 0.7 } : { opacity: [0.35, 1, 0.35] }}
+            transition={reduced ? undefined : { duration: 1.1, repeat: Infinity, ease: "easeInOut" }}
           />
           <motion.path
             d="M17.8 6.8a7.5 7.5 0 0 1 0 10.4"
             stroke={ORANGE}
             strokeWidth="1.7"
             strokeLinecap="round"
-            animate={{ opacity: [0.25, 0.9, 0.25] }}
-            transition={{ duration: 1.1, repeat: Infinity, ease: "easeInOut", delay: 0.18 }}
+            animate={reduced ? { opacity: 0.55 } : { opacity: [0.25, 0.9, 0.25] }}
+            transition={reduced ? undefined : { duration: 1.1, repeat: Infinity, ease: "easeInOut", delay: 0.18 }}
           />
         </>
       )}
