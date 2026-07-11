@@ -2618,6 +2618,7 @@ function WatermarkedImage({ src, photographer, purchased, layoutId }) {
   const [videoPreviewActive, setVideoPreviewActive] = useState({});
   const [videoPreviewProgress, setVideoPreviewProgress] = useState({});
   const [videoPreviewMuted, setVideoPreviewMuted] = useState({});
+  const [videoPreviewFrameReady, setVideoPreviewFrameReady] = useState({});
   const [videoDurationCache, setVideoDurationCache] = useState({});
   const [analyzingMedia, setAnalyzingMedia] = useState(false);
   const [aiAnalysisProgress, setAiAnalysisProgress] = useState(0);
@@ -6225,7 +6226,7 @@ const exportPayrollCsv = () => {
       delete videoPreviewHandlers.current[videoId];
     }
     if (videoEl) {
-      videoEl.classList.remove("is-playing");
+      videoEl.classList.remove("is-playing", "is-frame-ready");
       videoEl.pause();
       videoEl.currentTime = 0;
       videoEl.removeAttribute("src");
@@ -6235,6 +6236,7 @@ const exportPayrollCsv = () => {
     setVideoPreviewActive((prev) => ({ ...prev, [videoId]: false }));
     setVideoPreviewProgress((prev) => ({ ...prev, [videoId]: 0 }));
     setVideoPreviewMuted((prev) => ({ ...prev, [videoId]: true }));
+    setVideoPreviewFrameReady((prev) => ({ ...prev, [videoId]: false }));
     if (clearViewSession) clearPreviewViewSession(videoId);
   };
 
@@ -6256,6 +6258,7 @@ const exportPayrollCsv = () => {
     }
 
     setVideoPreviewActive((prev) => ({ ...prev, [videoId]: true }));
+    setVideoPreviewFrameReady((prev) => ({ ...prev, [videoId]: false }));
 
     if (previewUrl) {
       const currentSrc = videoEl.currentSrc || videoEl.getAttribute("src") || "";
@@ -6286,6 +6289,14 @@ const exportPayrollCsv = () => {
       videoEl.muted = true;
     }
     videoEl.classList.add("is-playing");
+    videoEl.classList.remove("is-frame-ready");
+
+    const markFrameReady = () => {
+      const el = videoRefs.current[videoId];
+      if (!el) return;
+      el.classList.add("is-frame-ready");
+      setVideoPreviewFrameReady((prev) => (prev[videoId] ? prev : { ...prev, [videoId]: true }));
+    };
 
     const beginPlay = () => {
       const el = videoRefs.current[videoId];
@@ -6298,8 +6309,15 @@ const exportPayrollCsv = () => {
       }
       el.currentTime = 0;
       if (userInitiated) trackPreviewView(videoId);
+      const onPlaying = () => {
+        el.removeEventListener("playing", onPlaying);
+        markFrameReady();
+      };
+      el.addEventListener("playing", onPlaying);
       const playPromise = el.play();
-      if (playPromise?.catch) {
+      if (playPromise?.then) {
+        playPromise.then(markFrameReady).catch(() => stopVideoPreview(videoId));
+      } else if (playPromise?.catch) {
         playPromise.catch(() => stopVideoPreview(videoId));
       }
     };
@@ -6369,6 +6387,7 @@ const exportPayrollCsv = () => {
   const renderVideoCards = (videoList, { hidePurchase = false, hidePhotographer = false } = {}) => videoList.map((video) => {
     const durationLabel = formatVideoDuration(video.duration_seconds || videoDurationCache[video.id]);
     const isPreviewing = Boolean(videoPreviewActive[video.id]);
+    const isFrameReady = Boolean(videoPreviewFrameReady[video.id]);
     const previewProgress = videoPreviewProgress[video.id] || 0;
     const posterSrc = getVideoThumbnail(video);
     const previewLimit = video.duration_seconds || videoDurationCache[video.id];
@@ -6394,7 +6413,7 @@ const exportPayrollCsv = () => {
         >
           <video
             ref={(el) => { videoRefs.current[video.id] = el; }}
-            className={`video-card-preview${isPreviewing ? " is-playing" : ""}`}
+            className={`motoshot-video video-card-preview${isPreviewing ? " is-playing" : ""}${isFrameReady ? " is-frame-ready" : ""}`}
             src={isPreviewing ? video.preview_url : undefined}
             muted={isMuted}
             playsInline
@@ -6419,8 +6438,11 @@ const exportPayrollCsv = () => {
             onCanPlay={() => {
               if (!posterSrc) markVideoMediaReady(video.id);
             }}
+            onPlaying={() => {
+              setVideoPreviewFrameReady((prev) => (prev[video.id] ? prev : { ...prev, [video.id]: true }));
+            }}
           />
-          {!isPreviewing && (
+          {(!isPreviewing || !isFrameReady) && (
             <VideoThumbnail
               video={video}
               className="video-card-poster-cover"
@@ -10702,8 +10724,8 @@ const renderPhotographerProfile = () => {
     onToggleSelect,
   } = {}) => {
     const isPreviewing = Boolean(videoPreviewActive[video.id]);
+    const isFrameReady = Boolean(videoPreviewFrameReady[video.id]);
     const previewProgress = videoPreviewProgress[video.id] || 0;
-    const posterSrc = getVideoThumbnail(video);
     const previewLimit = video.duration_seconds || videoDurationCache[video.id];
     const label = getVideoUploadName(video);
     const dateLabel = formatVideoUploadDate(video.created_at);
@@ -10738,14 +10760,26 @@ const renderPhotographerProfile = () => {
           >
             <video
               ref={(el) => { videoRefs.current[video.id] = el; }}
-              className="video-card-preview is-playing"
+              className={`motoshot-video video-card-preview is-playing${isFrameReady ? " is-frame-ready" : ""}`}
               src={video.preview_url}
               muted={isVideoPreviewMuted(video.id)}
               playsInline
-              preload="metadata"
+              preload="auto"
               controls={false}
+              controlsList="nodownload noplaybackrate nofullscreen noremoteplayback"
               disablePictureInPicture
+              disableRemotePlayback
+              onPlaying={() => {
+                setVideoPreviewFrameReady((prev) => (prev[video.id] ? prev : { ...prev, [video.id]: true }));
+              }}
             />
+            {!isFrameReady && (
+              <VideoThumbnail
+                video={video}
+                className="video-card-poster-cover"
+                loading="eager"
+              />
+            )}
             <div style={{ position: "absolute", inset: 0, zIndex: 9, pointerEvents: "none", overflow: "hidden" }}>
               <div
                 style={{
@@ -16211,28 +16245,60 @@ const renderVendorRequest = () => {
     .hero { padding: 44px 20px 28px; text-align: center; background: radial-gradient(circle at top, rgba(255,107,0,0.12), transparent 70%); border-bottom: 1px solid var(--border); }
     .hero-sub { color: var(--muted); font-size: 15px; margin-top: 10px; font-weight: 300; }
     .hero-video-bg { background: transparent; }
-    .hero-video-bg::-webkit-media-controls { display: none !important; }
-    .hero-video-bg::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; }
-    .hero-video-bg::-webkit-media-controls-overlay-play-button { display: none !important; }
-    .video-card-media { overflow: hidden; }
+    .hero-video-bg::-webkit-media-controls,
+    .hero-video-bg::-webkit-media-controls-enclosure,
+    .hero-video-bg::-webkit-media-controls-panel,
+    .hero-video-bg::-webkit-media-controls-start-playback-button,
+    .hero-video-bg::-webkit-media-controls-overlay-play-button,
+    .hero-video-bg::-webkit-media-controls-play-button {
+      display: none !important;
+      -webkit-appearance: none !important;
+      appearance: none !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+    .video-card-media { overflow: hidden; isolation: isolate; }
     .video-card-preview {
       position: absolute; inset: 0; width: 100%; height: 100%;
-      object-fit: cover; background: transparent; z-index: 2;
+      object-fit: cover; background: #000; z-index: 2;
       opacity: 0; visibility: hidden; pointer-events: none;
-      transition: opacity 0.25s ease;
+      transition: opacity 0.12s linear;
       -webkit-tap-highlight-color: transparent;
       -webkit-appearance: none;
       appearance: none;
+      transform: translateZ(0);
+      -webkit-transform: translateZ(0);
+      will-change: transform;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+      border-radius: 0.5px;
+      -webkit-mask-image: -webkit-radial-gradient(white, black);
+      isolation: isolate;
     }
-    .video-card-preview.is-playing { opacity: 1; visibility: visible; z-index: 8; pointer-events: auto; }
-    .video-card-preview::-webkit-media-controls { display: none !important; -webkit-appearance: none; }
-    .video-card-preview::-webkit-media-controls-start-playback-button { display: none !important; -webkit-appearance: none; opacity: 0 !important; pointer-events: none !important; }
-    .video-card-preview::-webkit-media-controls-overlay-play-button { display: none !important; -webkit-appearance: none; opacity: 0 !important; pointer-events: none !important; }
-    .video-card-preview::-webkit-media-controls-panel { display: none !important; }
-    .video-card-preview::-webkit-media-controls-enclosure { display: none !important; }
+    /* Solo mostrar el video cuando ya está pintando frames (evita play nativo Android). */
+    .video-card-preview.is-playing.is-frame-ready {
+      opacity: 1; visibility: visible; z-index: 8; pointer-events: auto;
+    }
+    .video-card-preview::-webkit-media-controls,
+    .video-card-preview::-webkit-media-controls-enclosure,
+    .video-card-preview::-webkit-media-controls-panel,
+    .video-card-preview::-webkit-media-controls-panel-container,
+    .video-card-preview::-webkit-media-controls-start-playback-button,
+    .video-card-preview::-webkit-media-controls-overlay-play-button,
+    .video-card-preview::-webkit-media-controls-overlay-enclosure,
+    .video-card-preview::-webkit-media-controls-play-button,
+    .video-card-preview::-webkit-media-controls-timeline,
+    .video-card-preview::-webkit-media-controls-current-time-display,
+    .video-card-preview::-webkit-media-controls-fullscreen-button {
+      display: none !important;
+      -webkit-appearance: none !important;
+      appearance: none !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
     .video-card-poster-cover {
       position: absolute; inset: 0; width: 100%; height: 100%;
-      object-fit: cover; z-index: 4; pointer-events: none;
+      object-fit: cover; z-index: 10; pointer-events: none;
       opacity: 1;
     }
     .gallery-video-poster { opacity: 1; }

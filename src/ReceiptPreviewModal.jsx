@@ -67,9 +67,12 @@ export function ReceiptPreviewModal({
                 </div>
               ) : isVideo ? (
                 <video
+                  className="motoshot-video"
                   src={previewUrl}
                   controls
                   playsInline
+                  controlsList="nodownload noplaybackrate noremoteplayback"
+                  disablePictureInPicture
                   style={{ width: "100%", maxHeight: "55vh", display: "block" }}
                 />
               ) : (

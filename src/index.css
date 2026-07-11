@@ -40,3 +40,43 @@ textarea {
   appearance: none;
   color-scheme: dark;
 }
+
+/* Kill native video play overlay / controls everywhere (Android WebView + Safari). */
+video,
+.motoshot-video {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  -webkit-tap-highlight-color: transparent;
+}
+
+video::-webkit-media-controls,
+video::-webkit-media-controls-enclosure,
+video::-webkit-media-controls-panel,
+video::-webkit-media-controls-panel-container,
+video::-webkit-media-controls-start-playback-button,
+video::-webkit-media-controls-overlay-play-button,
+video::-webkit-media-controls-overlay-enclosure,
+video::-webkit-media-controls-play-button,
+video::-webkit-media-controls-timeline,
+video::-webkit-media-controls-current-time-display,
+video::-webkit-media-controls-time-remaining-display,
+video::-webkit-media-controls-mute-button,
+video::-webkit-media-controls-toggle-closed-captions-button,
+video::-webkit-media-controls-volume-slider,
+video::-webkit-media-controls-fullscreen-button,
+.motoshot-video::-webkit-media-controls,
+.motoshot-video::-webkit-media-controls-enclosure,
+.motoshot-video::-webkit-media-controls-panel,
+.motoshot-video::-webkit-media-controls-panel-container,
+.motoshot-video::-webkit-media-controls-start-playback-button,
+.motoshot-video::-webkit-media-controls-overlay-play-button,
+.motoshot-video::-webkit-media-controls-overlay-enclosure,
+.motoshot-video::-webkit-media-controls-play-button {
+  display: none !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  opacity: 0 !important;
+  width: 0 !important;
+  height: 0 !important;
+  pointer-events: none !important;
+}

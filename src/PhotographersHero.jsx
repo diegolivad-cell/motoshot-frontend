@@ -39,14 +39,16 @@ export function PhotographersHero({
       <motion.div style={{ y, opacity, position: "absolute", inset: 0, height: "130%", top: "-15%" }}>
         <video
           ref={videoRef}
-          className="hero-video-bg"
+          className="motoshot-video hero-video-bg"
           autoPlay
           muted
           loop
           playsInline
           preload="auto"
           disablePictureInPicture
+          disableRemotePlayback
           controls={false}
+          controlsList="nodownload noplaybackrate nofullscreen noremoteplayback"
           onLoadedData={onVideoReady}
           onCanPlay={onVideoReady}
           onPlaying={onVideoReady}
@@ -59,6 +61,11 @@ export function PhotographersHero({
             opacity: videoReady ? 1 : 0,
             transition: "opacity 0.45s ease",
             pointerEvents: "none",
+            transform: "translateZ(0)",
+            WebkitTransform: "translateZ(0)",
+            backfaceVisibility: "hidden",
+            WebkitBackfaceVisibility: "hidden",
+            WebkitMaskImage: "-webkit-radial-gradient(white, black)",
           }}
           src={src}
         />

@@ -546,7 +546,7 @@ function FeedSlide({
         {shouldRenderVideo && (
           <video
             ref={videoRef}
-            className={`featured-video-slide__video${frameRendering ? " is-playing" : ""}`}
+            className={`featured-video-slide__video motoshot-video${frameRendering ? " is-playing" : ""}`}
             src={effectiveSrc}
             playsInline
             muted={muted}
