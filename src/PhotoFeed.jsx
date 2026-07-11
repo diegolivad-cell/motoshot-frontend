@@ -189,9 +189,10 @@ function PhotoSlide({
   const handleDoubleTap = (e) => {
     const now = Date.now();
     if (now - lastTapRef.current < 320) {
+      const point = e.nativeEvent?.changedTouches?.[0] || e;
       const rect = e.currentTarget.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
+      const x = (point.clientX ?? 0) - rect.left;
+      const y = (point.clientY ?? 0) - rect.top;
       setBurst({ x, y, id: now });
       if (!photo.upvoted_by_me) fireUpvote(e);
       window.setTimeout(() => setBurst(null), 750);

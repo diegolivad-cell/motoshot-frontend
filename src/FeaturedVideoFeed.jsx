@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { apiJson, apiUrl } from "./apiClient.js";
 import { AppIcon, LoaderIcon, EmptyIcon } from "./icons.jsx";
 import { videoToCartItem } from "./shoppingCart.js";
 import { mergePurchaseStatusIntoVideos, resolveVideoPurchaseState } from "./videoPurchaseState.js";
 import { shareVideo } from "./videoShare.js";
 import { ProtectedMedia, protectedVideoProps } from "./contentProtection.jsx";
+import { triggerHaptic } from "./motionSystem.js";
 import "./FeaturedVideoFeed.css";
 
 const PREVIEW_MAX_SEC = 7;
@@ -219,6 +220,21 @@ function buildCompactTags(video) {
   return tags.slice(0, 4);
 }
 
+function DoubleTapBurst({ x, y, keyId }) {
+  return (
+    <motion.div
+      key={keyId}
+      className="featured-video-slide__burst"
+      style={{ left: x, top: y }}
+      initial={{ scale: 0.2, opacity: 0 }}
+      animate={{ scale: [0.2, 1.15, 1], opacity: [0, 1, 0] }}
+      transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+    >
+      <FeedUpIcon active />
+    </motion.div>
+  );
+}
+
 function FeedSlide({
   video,
   index,
@@ -247,7 +263,15 @@ function FeedSlide({
   const [frameRendering, setFrameRendering] = useState(false);
   const [viewTracked, setViewTracked] = useState(false);
   const [effectiveSrc, setEffectiveSrc] = useState(resolvedSrc || video.preview_url);
+  const [burst, setBurst] = useState(null);
+  const [holdSpeed, setHoldSpeed] = useState(null); // "forward" | "rewind" | null
   const previewLimitRef = useRef(PREVIEW_MAX_SEC);
+  const lastTapRef = useRef(0);
+  const singleTapTimerRef = useRef(null);
+  const holdDelayTimerRef = useRef(null);
+  const rewindIntervalRef = useRef(null);
+  const holdActiveRef = useRef(false);
+  const pointerOriginRef = useRef({ x: 0, y: 0 });
 
   const dist = Number.isFinite(activeIndex) && activeIndex >= 0 ? Math.abs(index - activeIndex) : 99;
   // El slide activo y sus vecinos inmediatos montan el <video> y se mantienen
@@ -289,12 +313,28 @@ function FeedSlide({
     setPlaying(true);
   }, []);
 
+  const stopHoldSpeed = useCallback(() => {
+    if (holdDelayTimerRef.current) {
+      window.clearTimeout(holdDelayTimerRef.current);
+      holdDelayTimerRef.current = null;
+    }
+    if (rewindIntervalRef.current) {
+      window.clearInterval(rewindIntervalRef.current);
+      rewindIntervalRef.current = null;
+    }
+    const el = videoRef.current;
+    if (el) el.playbackRate = 1;
+    holdActiveRef.current = false;
+    setHoldSpeed(null);
+  }, []);
+
   // Mantener el video reproduciendo tanto si es activo como vecino.
   useEffect(() => {
     if (!shouldRenderVideo) {
       setPlaying(false);
       setFrameRendering(false);
       setReady(false);
+      stopHoldSpeed();
       return;
     }
     if (isActive) {
@@ -312,12 +352,18 @@ function FeedSlide({
     } else {
       // Vecino: seguir reproduciendo en silencio para que al llegar esté listo
       // (sin thumbnail ni botón nativo). Nunca pausar.
+      stopHoldSpeed();
       ensurePlaying(false);
       const el = videoRef.current;
       if (el) el.muted = true;
       setMuted(true);
     }
-  }, [isActive, shouldRenderVideo, ensurePlaying, trackView]);
+  }, [isActive, shouldRenderVideo, ensurePlaying, trackView, stopHoldSpeed]);
+
+  useEffect(() => () => {
+    if (singleTapTimerRef.current) window.clearTimeout(singleTapTimerRef.current);
+    stopHoldSpeed();
+  }, [stopHoldSpeed]);
 
   const togglePlay = () => {
     const el = videoRef.current;
@@ -340,13 +386,123 @@ function FeedSlide({
     setMuted(nextMuted);
   };
 
-  const handleUpvote = (e) => {
-    e.stopPropagation();
+  const fireUpvote = useCallback((e) => {
+    e?.stopPropagation?.();
     if (!isLoggedIn) {
       onRequireAuth?.();
       return;
     }
     onUpvote?.(video.id);
+    triggerHaptic("light");
+  }, [isLoggedIn, onRequireAuth, onUpvote, video.id]);
+
+  const handleUpvote = (e) => {
+    fireUpvote(e);
+  };
+
+  const startHoldSpeed = useCallback((side) => {
+    const el = videoRef.current;
+    if (!el || !isActive) return;
+    holdActiveRef.current = true;
+    setHoldSpeed(side);
+    triggerHaptic("medium");
+
+    if (side === "forward") {
+      el.playbackRate = 2;
+      if (el.paused) {
+        el.play().catch(() => {});
+        setPlaying(true);
+      }
+      return;
+    }
+
+    // Rewind ~2x (HTML video no soporta playbackRate negativo de forma fiable).
+    el.playbackRate = 1;
+    if (rewindIntervalRef.current) window.clearInterval(rewindIntervalRef.current);
+    rewindIntervalRef.current = window.setInterval(() => {
+      const node = videoRef.current;
+      if (!node) return;
+      node.currentTime = Math.max(0, node.currentTime - 0.1);
+    }, 50);
+  }, [isActive]);
+
+  const handlePointerDown = (e) => {
+    if (!isActive) return;
+    if (e.button != null && e.button !== 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clientX = e.clientX ?? 0;
+    const clientY = e.clientY ?? 0;
+    pointerOriginRef.current = { x: clientX, y: clientY };
+    const localX = clientX - rect.left;
+    const side = localX < rect.width * 0.5 ? "rewind" : "forward";
+    holdActiveRef.current = false;
+    if (holdDelayTimerRef.current) window.clearTimeout(holdDelayTimerRef.current);
+    holdDelayTimerRef.current = window.setTimeout(() => {
+      startHoldSpeed(side);
+    }, 260);
+  };
+
+  const handlePointerMove = (e) => {
+    if (!holdDelayTimerRef.current && !holdActiveRef.current) return;
+    const clientX = e.clientX ?? 0;
+    const clientY = e.clientY ?? 0;
+    const dx = Math.abs(clientX - pointerOriginRef.current.x);
+    const dy = Math.abs(clientY - pointerOriginRef.current.y);
+    // Si el usuario está scrolleando el feed, cancelar el hold pendiente.
+    if (!holdActiveRef.current && (dy > 12 || dx > 18)) {
+      if (holdDelayTimerRef.current) {
+        window.clearTimeout(holdDelayTimerRef.current);
+        holdDelayTimerRef.current = null;
+      }
+    }
+    if (holdActiveRef.current) e.preventDefault();
+  };
+
+  const handlePointerUp = (e) => {
+    const wasHold = holdActiveRef.current;
+    if (holdDelayTimerRef.current) {
+      window.clearTimeout(holdDelayTimerRef.current);
+      holdDelayTimerRef.current = null;
+    }
+    stopHoldSpeed();
+
+    if (wasHold) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX ?? 0) - rect.left;
+    const y = (e.clientY ?? 0) - rect.top;
+    const now = Date.now();
+
+    if (now - lastTapRef.current < 320) {
+      if (singleTapTimerRef.current) {
+        window.clearTimeout(singleTapTimerRef.current);
+        singleTapTimerRef.current = null;
+      }
+      lastTapRef.current = 0;
+      setBurst({ x, y, id: now });
+      window.setTimeout(() => setBurst(null), 750);
+      if (!video.upvoted_by_me) fireUpvote(e);
+      return;
+    }
+
+    lastTapRef.current = now;
+    if (singleTapTimerRef.current) window.clearTimeout(singleTapTimerRef.current);
+    singleTapTimerRef.current = window.setTimeout(() => {
+      singleTapTimerRef.current = null;
+      togglePlay();
+    }, 300);
+  };
+
+  const handlePointerCancel = () => {
+    if (holdDelayTimerRef.current) {
+      window.clearTimeout(holdDelayTimerRef.current);
+      holdDelayTimerRef.current = null;
+    }
+    stopHoldSpeed();
   };
 
   const handleShare = (e) => {
@@ -373,7 +529,7 @@ function FeedSlide({
 
   return (
     <section
-      className={`featured-video-slide${isActive ? " is-active" : ""}`}
+      className={`featured-video-slide${isActive ? " is-active" : ""}${holdSpeed ? " is-holding-speed" : ""}`}
       data-video-id={video.id}
     >
       <ProtectedMedia className="featured-video-slide__media">
@@ -428,7 +584,33 @@ function FeedSlide({
             </div>
           </div>
         )}
-        <button type="button" className="featured-video-slide__tap" aria-label={playing ? "Pausar" : "Reproducir"} onClick={togglePlay} />
+        <button
+          type="button"
+          className="featured-video-slide__tap"
+          aria-label="Doble toque para UP. Mantén izq/der para 2x."
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          onPointerLeave={handlePointerCancel}
+          onContextMenu={(e) => e.preventDefault()}
+        />
+        <AnimatePresence>
+          {burst && <DoubleTapBurst keyId={burst.id} x={burst.x} y={burst.y} />}
+        </AnimatePresence>
+        <AnimatePresence>
+          {holdSpeed && (
+            <motion.div
+              className={`featured-video-slide__speed featured-video-slide__speed--${holdSpeed}`}
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              transition={SPRING_SNAP}
+            >
+              {holdSpeed === "forward" ? "2x ››" : "‹‹ 2x"}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </ProtectedMedia>
 
       <div className="featured-video-slide__scrim" aria-hidden="true" />

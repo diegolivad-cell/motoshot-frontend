@@ -471,4 +471,55 @@
   border: none;
   background: transparent;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.featured-video-slide.is-holding-speed .featured-video-slide__tap {
+  touch-action: none;
+}
+
+.featured-video-slide__burst {
+  position: absolute;
+  z-index: 8;
+  width: 72px;
+  height: 72px;
+  margin-left: -36px;
+  margin-top: -36px;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  filter: drop-shadow(0 8px 18px rgba(255, 107, 0, 0.55));
+}
+
+.featured-video-slide__burst svg {
+  width: 48px;
+  height: 48px;
+}
+
+.featured-video-slide__speed {
+  position: absolute;
+  top: 18%;
+  z-index: 9;
+  pointer-events: none;
+  font-family: "Bebas Neue", sans-serif;
+  font-size: 34px;
+  letter-spacing: 1px;
+  color: #fff;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.75);
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 107, 0, 0.45);
+  border-radius: 999px;
+  padding: 8px 16px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.featured-video-slide__speed--forward {
+  right: 18px;
+}
+
+.featured-video-slide__speed--rewind {
+  left: 18px;
 }
